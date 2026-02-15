@@ -117,7 +117,7 @@ class CampaignService {
                 pageId,
                 pageName,
                 messageTemplate,
-                messageTag: messageTag || 'CONFIRMED_EVENT_UPDATE',
+                messageTag: messageTag || 'POST_PURCHASE_UPDATE',
                 delay: delay || 3000,
                 recipients,
                 totalRecipients: recipients.length,
@@ -362,12 +362,11 @@ class CampaignService {
 
     // Send single message with multi-tag fallback
     async sendMessage(pageToken, recipient, message, messageTag, mediaFiles, imageUrls = []) {
-        // Tag fallback chain: Message Tags first → HUMAN_AGENT last
+        // Policy-safe tag chain for transactional updates (no HUMAN_AGENT fallback)
         const tagChain = [
-            'CONFIRMED_EVENT_UPDATE',
             'POST_PURCHASE_UPDATE',
             'ACCOUNT_UPDATE',
-            'HUMAN_AGENT'
+            'CONFIRMED_EVENT_UPDATE'
         ];
 
         // Put the preferred tag first in the chain

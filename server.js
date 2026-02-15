@@ -3479,10 +3479,9 @@ app.post('/api/inbox/:userId/:pageId/reply', async (req, res) => {
 
     // Try different message tags - some don't require approval
     const tagsToTry = [
+        'POST_PURCHASE_UPDATE',     // For order/shipping updates
         'ACCOUNT_UPDATE',           // For account notifications
-        'POST_PURCHASE_UPDATE',     // For order updates
-        'CONFIRMED_EVENT_UPDATE',   // For event updates
-        'HUMAN_AGENT'               // Requires approval
+        'CONFIRMED_EVENT_UPDATE'    // For event updates
     ];
 
     for (const tag of tagsToTry) {
@@ -4414,7 +4413,6 @@ app.post('/api/inbox/:userId/:pageId/create-order', async (req, res) => {
 
     // Try with different messaging approaches (fallback chain)
     const attempts = [
-        { messaging_type: 'MESSAGE_TAG', tag: 'HUMAN_AGENT' },
         { messaging_type: 'MESSAGE_TAG', tag: 'POST_PURCHASE_UPDATE' },
         { messaging_type: 'MESSAGE_TAG', tag: 'ACCOUNT_UPDATE' },
         { messaging_type: 'RESPONSE' }
@@ -4577,7 +4575,7 @@ app.post('/api/inbox/:userId/:pageId/send-product', async (req, res) => {
                 const textPayload = {
                     recipient: { id: recipientId },
                     messaging_type: 'MESSAGE_TAG',
-                    tag: 'HUMAN_AGENT',
+                    tag: 'POST_PURCHASE_UPDATE',
                     message: { text: chunk }
                 };
 
@@ -4586,10 +4584,10 @@ app.post('/api/inbox/:userId/:pageId/send-product', async (req, res) => {
                         params: { access_token: pageToken }
                     });
                     textSent = true;
-                    console.log(`[Product Send] Chunk ${i + 1} sent successfully with HUMAN_AGENT!`);
+                    console.log(`[Product Send] Chunk ${i + 1} sent successfully with POST_PURCHASE_UPDATE!`);
                 } catch (tagErr) {
-                    // HUMAN_AGENT may not be approved, try ACCOUNT_UPDATE
-                    console.log(`[Product Send] HUMAN_AGENT failed for chunk ${i + 1}, trying ACCOUNT_UPDATE...`);
+                    // Try ACCOUNT_UPDATE if POST_PURCHASE_UPDATE is rejected
+                    console.log(`[Product Send] POST_PURCHASE_UPDATE failed for chunk ${i + 1}, trying ACCOUNT_UPDATE...`);
                     textPayload.tag = 'ACCOUNT_UPDATE';
                     try {
                         await axios.post(`${FB_GRAPH_URL}/me/messages`, textPayload, {
@@ -4679,7 +4677,7 @@ app.post('/api/inbox/:userId/:pageId/send-product', async (req, res) => {
                 const imagePayload = {
                     recipient: { id: recipientId },
                     messaging_type: 'MESSAGE_TAG',
-                    tag: 'HUMAN_AGENT',
+                    tag: 'POST_PURCHASE_UPDATE',
                     message: {
                         attachment: {
                             type: 'image',
@@ -4693,10 +4691,10 @@ app.post('/api/inbox/:userId/:pageId/send-product', async (req, res) => {
                         params: { access_token: pageToken }
                     });
                     imageSent = true;
-                    console.log('[Product Send] Image sent successfully with HUMAN_AGENT!');
+                    console.log('[Product Send] Image sent successfully with POST_PURCHASE_UPDATE!');
                 } catch (imgTagErr) {
-                    // HUMAN_AGENT may not be approved, try ACCOUNT_UPDATE
-                    console.log('[Product Send] HUMAN_AGENT failed for image, trying ACCOUNT_UPDATE...');
+                    // Try ACCOUNT_UPDATE if POST_PURCHASE_UPDATE is rejected
+                    console.log('[Product Send] POST_PURCHASE_UPDATE failed for image, trying ACCOUNT_UPDATE...');
                     imagePayload.tag = 'ACCOUNT_UPDATE';
                     await axios.post(`${FB_GRAPH_URL}/me/messages`, imagePayload, {
                         params: { access_token: pageToken }
@@ -4809,7 +4807,7 @@ app.post('/api/broadcast/:userId/:pageId/send', upload.single('media'), async (r
                 const messagePayload = {
                     recipient: { id: recipient.id },
                     messaging_type: 'MESSAGE_TAG',
-                    tag: 'HUMAN_AGENT'
+                    tag: 'POST_PURCHASE_UPDATE'
                 };
 
                 if (mediaAttachment) {
@@ -4895,9 +4893,9 @@ app.post('/api/broadcast/:userId/:pageId/send-one', upload.single('media'), asyn
         }
 
         // Determine messaging type based on Message Tag
-        // Valid tags: CONFIRMED_EVENT_UPDATE, POST_PURCHASE_UPDATE, ACCOUNT_UPDATE, HUMAN_AGENT
-        const validTags = ['CONFIRMED_EVENT_UPDATE', 'POST_PURCHASE_UPDATE', 'ACCOUNT_UPDATE', 'HUMAN_AGENT'];
-        const tag = validTags.includes(messageTag) ? messageTag : 'HUMAN_AGENT';
+        // Valid tags: POST_PURCHASE_UPDATE, ACCOUNT_UPDATE, CONFIRMED_EVENT_UPDATE
+        const validTags = ['POST_PURCHASE_UPDATE', 'ACCOUNT_UPDATE', 'CONFIRMED_EVENT_UPDATE'];
+        const tag = validTags.includes(messageTag) ? messageTag : 'POST_PURCHASE_UPDATE';
 
         const messagePayload = {
             recipient: { id: recipientId },
@@ -5973,7 +5971,7 @@ app.post('/api/campaigns/start', upload.array('media', 5), async (req, res) => {
             pageId,
             pageName: pageName || '',
             messageTemplate,
-            messageTag: messageTag || 'CONFIRMED_EVENT_UPDATE',
+            messageTag: messageTag || 'POST_PURCHASE_UPDATE',
             delay: parseInt(delay) || 3000,
             recipients: parsedRecipients,
             mediaFiles,

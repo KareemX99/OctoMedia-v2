@@ -8350,7 +8350,7 @@ class SocialMediaHub {
 
         const messageTemplate = document.getElementById('broadcastMessage')?.value;
         const pageId = document.getElementById('broadcastPageSelect')?.value;
-        const messageTag = document.getElementById('messageTagSelect')?.value || 'HUMAN_AGENT';
+        const messageTag = document.getElementById('messageTagSelect')?.value || 'POST_PURCHASE_UPDATE';
         const delay = parseInt(document.getElementById('broadcastDelay')?.value || 3000);
 
         if (!messageTemplate) {
@@ -8537,7 +8537,7 @@ class SocialMediaHub {
     async sendBroadcast() {
         const pageId = document.getElementById('broadcastPageSelect')?.value;
         const messageTemplate = document.getElementById('broadcastMessage')?.value;
-        const messageTag = 'CONFIRMED_EVENT_UPDATE'; // Always use this tag
+        const messageTag = 'POST_PURCHASE_UPDATE'; // Default for shipping/order updates
         const delay = parseInt(document.getElementById('broadcastDelay')?.value || 3000);
 
         if (!pageId) {
@@ -8756,7 +8756,7 @@ class SocialMediaHub {
 
         const pageId = document.getElementById('broadcastPageSelect')?.value;
         const messageTemplate = document.getElementById('broadcastMessage')?.value;
-        const messageTag = 'CONFIRMED_EVENT_UPDATE'; // Always use this tag
+        const messageTag = 'POST_PURCHASE_UPDATE'; // Default for shipping/order updates
         const delayValue = document.getElementById('broadcastDelay')?.value || '3000';
         const delay = delayValue === 'ai' ? 'ai' : parseInt(delayValue);
 

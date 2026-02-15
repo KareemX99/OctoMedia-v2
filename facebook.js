@@ -450,7 +450,7 @@ class FacebookIntegration {
     }
 
     // Send to single recipient for progress tracking (with media and message tag support)
-    async sendBroadcastOne(pageId, recipientId, recipientName, message, mediaFile, messageTag = 'HUMAN_AGENT') {
+    async sendBroadcastOne(pageId, recipientId, recipientName, message, mediaFile, messageTag = 'POST_PURCHASE_UPDATE') {
         try {
             const formData = new FormData();
             formData.append('recipientId', recipientId);
