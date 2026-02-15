@@ -42,7 +42,7 @@ const telegramService = require('./services/telegram');
 const competitorScraper = require('./services/competitorScraper');
 const campaignService = require('./services/campaignService');
 const googleSheetsService = require('./services/googleSheets');
-// WhatsApp service removed - const whatsappService = require('./services/whatsapp');
+const whatsappService = require('./services/whatsapp');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -5506,8 +5506,188 @@ app.post('/api/ig/:userId/logout', async (req, res) => {
     }
 });
 
-// ============= WHATSAPP API REMOVED =============
-// WhatsApp functionality and SSE endpoints have been removed
+// ============= WHATSAPP API =============
+
+// Initialize WhatsApp connection
+app.post('/api/whatsapp/:userId/init', async (req, res) => {
+    const { userId } = req.params;
+
+    console.log(`[Server] WhatsApp init request: userId=${userId}`);
+
+    try {
+        const result = await whatsappService.initialize(userId);
+        res.json(result);
+    } catch (err) {
+        console.error('[Server] WhatsApp init error:', err);
+        res.status(500).json({ success: false, error: err.message });
+    }
+});
+
+// Get WhatsApp connection status
+app.get('/api/whatsapp/:userId/status', async (req, res) => {
+    const { userId } = req.params;
+
+    try {
+        const status = await whatsappService.getStatus(userId);
+        res.json(status);
+    } catch (err) {
+        console.error('[Server] WhatsApp status error:', err);
+        res.status(500).json({ success: false, error: err.message });
+    }
+});
+
+// Get WhatsApp account info
+app.get('/api/whatsapp/:userId/info', async (req, res) => {
+    const { userId } = req.params;
+
+    try {
+        const info = await whatsappService.getAccountInfo(userId);
+        if (!info) {
+            return res.status(404).json({ error: 'Account not connected' });
+        }
+        res.json(info);
+    } catch (err) {
+        console.error('[Server] WhatsApp info error:', err);
+        res.status(500).json({ success: false, error: err.message });
+    }
+});
+
+// Get all chats
+app.get('/api/whatsapp/:userId/chats', async (req, res) => {
+    const { userId } = req.params;
+    const { limit } = req.query;
+
+    try {
+        const chats = await whatsappService.getChats(userId, limit ? parseInt(limit) : 50);
+        res.json(chats);
+    } catch (err) {
+        console.error('[Server] WhatsApp chats error:', err);
+        res.status(500).json({ success: false, error: err.message });
+    }
+});
+
+// Get chat info
+app.get('/api/whatsapp/:userId/chat-info/:chatId', async (req, res) => {
+    const { userId, chatId } = req.params;
+
+    try {
+        const chat = await whatsappService.getChat(userId, chatId);
+        if (!chat) {
+            return res.status(404).json({ error: 'Chat not found' });
+        }
+        res.json(chat);
+    } catch (err) {
+        console.error('[Server] WhatsApp chat info error:', err);
+        res.status(500).json({ success: false, error: err.message });
+    }
+});
+
+// Get messages from chat
+app.get('/api/whatsapp/:userId/messages/:chatId', async (req, res) => {
+    const { userId, chatId } = req.params;
+    const { limit, before } = req.query;
+
+    try {
+        const messages = await whatsappService.getMessages(userId, chatId, limit ? parseInt(limit) : 50);
+        res.json(messages);
+    } catch (err) {
+        console.error('[Server] WhatsApp messages error:', err);
+        res.status(500).json({ success: false, error: err.message });
+    }
+});
+
+// Send message
+app.post('/api/whatsapp/:userId/send', async (req, res) => {
+    const { userId } = req.params;
+    const { chatId, message, mediaUrl, mediaCaption, mediaType } = req.body;
+
+    console.log(`[Server] WhatsApp send message: userId=${userId}, chatId=${chatId}`);
+
+    if (!chatId || (!message && !mediaUrl)) {
+        return res.status(400).json({ success: false, error: 'Chat ID and message or media required' });
+    }
+
+    try {
+        let result;
+
+        if (mediaUrl) {
+            const mimeType = mediaType || 'image/jpeg';
+            result = await whatsappService.sendMediaFromUrl(userId, chatId, mediaUrl, mediaCaption || '', mimeType);
+        } else {
+            result = await whatsappService.sendMessage(userId, chatId, message);
+        }
+
+        res.json(result);
+    } catch (err) {
+        console.error('[Server] WhatsApp send error:', err);
+        res.status(500).json({ success: false, error: err.message });
+    }
+});
+
+// Send media (file upload)
+app.post('/api/whatsapp/:userId/send-media', async (req, res) => {
+    const { userId } = req.params;
+    const { chatId, caption } = req.body;
+
+    // Handle file upload with multer
+    if (!req.files || !req.files.media) {
+        return res.status(400).json({ success: false, error: 'Media file required' });
+    }
+
+    const mediaPath = req.files.media[0].path;
+
+    try {
+        const result = await whatsappService.sendMedia(userId, chatId, mediaPath, caption || '');
+        res.json(result);
+    } catch (err) {
+        console.error('[Server] WhatsApp send media error:', err);
+        res.status(500).json({ success: false, error: err.message });
+    }
+});
+
+// Get profile picture
+app.get('/api/whatsapp/:userId/profile-pic/:contactId', async (req, res) => {
+    const { userId, contactId } = req.params;
+
+    try {
+        const picUrl = await whatsappService.getProfilePic(userId, contactId);
+        res.json({ url: picUrl });
+    } catch (err) {
+        console.error('[Server] WhatsApp profile pic error:', err);
+        res.status(500).json({ success: false, error: err.message });
+    }
+});
+
+// Create group
+app.post('/api/whatsapp/:userId/create-group', async (req, res) => {
+    const { userId } = req.params;
+    const { groupName, participants } = req.body;
+
+    if (!groupName || !participants || !Array.isArray(participants)) {
+        return res.status(400).json({ success: false, error: 'Group name and participants required' });
+    }
+
+    try {
+        const result = await whatsappService.createGroup(userId, groupName, participants);
+        res.json(result);
+    } catch (err) {
+        console.error('[Server] WhatsApp create group error:', err);
+        res.status(500).json({ success: false, error: err.message });
+    }
+});
+
+// Logout WhatsApp
+app.post('/api/whatsapp/:userId/logout', async (req, res) => {
+    const { userId } = req.params;
+
+    try {
+        const result = await whatsappService.logout(userId);
+        res.json(result);
+    } catch (err) {
+        console.error('[Server] WhatsApp logout error:', err);
+        res.status(500).json({ success: false, error: err.message });
+    }
+});
 
 // ============= TELEGRAM API =============
 

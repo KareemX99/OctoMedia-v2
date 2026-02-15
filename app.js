@@ -2291,16 +2291,69 @@ class SocialMediaHub {
                 </div>
             </div>`;
 
-        // WhatsApp Section - Removed/Disabled
+        // WhatsApp Section
+        const waChats = this.waCachedChats || [];
         document.getElementById('whatsapp').innerHTML = `
             <header class="page-header">
-                <div class="header-content"><h1><i class="fab fa-whatsapp" style="color:#25D366;"></i> واتساب</h1><p class="subtitle">قريباً</p></div>
+                <div class="header-content"><h1><i class="fab fa-whatsapp" style="color:#25D366;"></i> واتساب</h1><p class="subtitle">إدارة محادثاتك على واتساب</p></div>
             </header>
-            <div style="padding:60px;text-align:center;">
-                <i class="fab fa-whatsapp" style="font-size:80px;color:#25D366;opacity:0.3;"></i>
-                <h2 style="margin-top:20px;color:var(--text-secondary);">هذه الميزة قيد التطوير</h2>
-                <p style="color:var(--text-secondary);margin-top:10px;">سيتم إضافة دعم واتساب قريباً</p>
+            
+            <!-- WhatsApp Status Section -->
+            <div id="whatsappQrSection" style="padding:20px;text-align:center;">
+                <div id="whatsappStatus" style="margin-bottom:20px;"></div>
+                <div id="whatsappQrCode" style="margin:20px auto;max-width:300px;"></div>
+                <button id="whatsappConnectBtn" onclick="app.connectWhatsApp()" class="btn btn-primary" style="padding:15px 40px;font-size:16px;">
+                    <i class="fab fa-whatsapp"></i> ربط واتساب
+                </button>
+            </div>
+            
+            <div class="whatsapp-container" style="display:grid;grid-template-columns:300px 1fr;gap:20px;padding:20px;height:calc(100vh - 250px);">
+                <!-- Chat List -->
+                <div id="whatsappInbox" class="wa-chat-list" style="background:var(--bg-secondary);border-radius:12px;overflow:hidden;display:none;flex-direction:column;">
+                    <div style="padding:16px;border-bottom:1px solid var(--border-color);display:flex;justify-content:space-between;align-items:center;">
+                        <h3><i class="fab fa-whatsapp" style="color:#25D366;"></i> المحادثات</h3>
+                        <button onclick="app.logoutWhatsApp('${userId}')" class="btn btn-secondary" style="font-size:12px;padding:8px 12px;">
+                            <i class="fas fa-sign-out-alt"></i> تسجيل خروج
+                        </button>
+                    </div>
+                    <div id="whatsappChatsList" style="flex:1;overflow-y:auto;">
+                        <div class="loading-spinner"><div class="spinner"></div></div>
+                    </div>
+                </div>
+                
+                <!-- Chat View -->
+                <div class="wa-chat-view" style="background:var(--bg-secondary);border-radius:12px;overflow:hidden;display:flex;flex-direction:column;">
+                    <div id="whatsappChatHeader" style="padding:16px;border-bottom:1px solid var(--border-color);display:none;">
+                        <div style="display:flex;align-items:center;gap:12px;">
+                            <div id="waChatAvatar" style="width:45px;height:45px;border-radius:50%;background:var(--bg-primary);display:flex;align-items:center;justify-content:center;">
+                                <i class="fab fa-whatsapp" style="color:#25D366;font-size:24px;"></i>
+                            </div>
+                            <div>
+                                <h3 id="waChatName" style="font-size:16px;font-weight:600;"></h3>
+                                <span id="waChatStatus" style="font-size:12px;color:var(--text-secondary);"></span>
+                            </div>
+                        </div>
+                    </div>
+                    <div id="whatsappMessages" style="flex:1;overflow-y:auto;padding:16px;display:none;">
+                    </div>
+                    <div id="whatsappEmptyState" style="flex:1;display:flex;align-items:center;justify-content:center;flex-direction:column;color:var(--text-secondary);">
+                        <i class="fab fa-whatsapp" style="font-size:80px;color:#25D366;opacity:0.3;"></i>
+                        <h3 style="margin-top:20px;">اختر محادثة للبدء</h3>
+                    </div>
+                    <div id="whatsappInputArea" style="padding:16px;border-top:1px solid var(--border-color);display:none;">
+                        <div style="display:flex;gap:10px;">
+                            <input type="text" id="waMessageInput" placeholder="اكتب رسالة..." 
+                                style="flex:1;padding:12px;border-radius:25px;border:1px solid var(--border-color);background:var(--bg-primary);color:var(--text-primary);"
+                                onkeypress="if(event.key==='Enter')app.sendWhatsAppMessage()">
+                            <button onclick="app.sendWhatsAppMessage()" class="btn btn-primary" style="border-radius:50%;width:45px;height:45px;padding:0;display:flex;align-items:center;justify-content:center;">
+                                <i class="fas fa-paper-plane"></i>
+                            </button>
+                        </div>
+                    </div>
+                </div>
             </div>`;
+
+        // Note: WhatsApp chats will be loaded via checkWhatsAppStatus()
 
         // Team Management Section (Admin Only)
         const userData = JSON.parse(localStorage.getItem('octobot_user') || '{}');
@@ -9299,7 +9352,7 @@ class SocialMediaHub {
     }
 
     // Navigation override to load data
-    navigateToPage(page) {
+    async navigateToPage(page) {
         if (page === 'inbox') {
             this.populateInboxPageSelect();
             if (this.fbPages.length > 0) this.loadConversations();
@@ -9313,7 +9366,7 @@ class SocialMediaHub {
         } else if (page === 'instagram') {
             this.checkIgLoginStatus();
         } else if (page === 'whatsapp') {
-            // WhatsApp disabled - this.checkWhatsAppStatus();
+            await this.checkWhatsAppStatus();
         } else if (page === 'telegram') {
             this.checkTelegramStatus();
         } else if (page === 'team') {
@@ -10481,6 +10534,28 @@ class SocialMediaHub {
         const statusDiv = document.getElementById('whatsappStatus');
         const qrDiv = document.getElementById('whatsappQrCode');
         const btn = document.getElementById('whatsappConnectBtn');
+
+        btn.disabled = true;
+        btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> جاري الاتصال...';
+        statusDiv.innerHTML = '';
+
+        try {
+            await fetch(`${this.API_URL}/api/whatsapp/${userId}/init`, { method: 'POST' });
+            this.pollWhatsAppStatus(userId);
+        } catch (err) {
+            statusDiv.innerHTML = '<p style="color:var(--error);">فشل في بدء الاتصال</p>';
+            btn.disabled = false;
+            btn.innerHTML = '<i class="fab fa-whatsapp"></i> ربط واتساب';
+        }
+    }
+
+    async connectWhatsApp() {
+        const userData = JSON.parse(localStorage.getItem('octobot_user') || '{}');
+        const userId = userData.id;
+        if (!userId) return;
+
+        const btn = document.getElementById('whatsappConnectBtn');
+        const statusDiv = document.getElementById('whatsappStatus');
 
         btn.disabled = true;
         btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> جاري الاتصال...';
