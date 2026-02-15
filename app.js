@@ -2292,7 +2292,8 @@ class SocialMediaHub {
             </div>`;
 
         // WhatsApp Section
-        const waChats = this.waCachedChats || [];
+        const userData = JSON.parse(localStorage.getItem('octobot_user') || '{}');
+        const userId = userData.id || '';
         document.getElementById('whatsapp').innerHTML = `
             <header class="page-header">
                 <div class="header-content"><h1><i class="fab fa-whatsapp" style="color:#25D366;"></i> واتساب</h1><p class="subtitle">إدارة محادثاتك على واتساب</p></div>
@@ -2356,7 +2357,7 @@ class SocialMediaHub {
         // Note: WhatsApp chats will be loaded via checkWhatsAppStatus()
 
         // Team Management Section (Admin Only)
-        const userData = JSON.parse(localStorage.getItem('octobot_user') || '{}');
+
         const isAdmin = userData.role === 'admin';
         const isSupervisor = userData.role === 'supervisor';
         const canManageTeam = isAdmin || isSupervisor;

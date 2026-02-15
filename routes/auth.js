@@ -277,17 +277,21 @@ router.post('/reset-password', async (req, res) => {
 // Get current user (requires auth)
 router.get('/me', authMiddleware, async (req, res) => {
     try {
+        console.log('[Auth] /me called for userId:', req.user.id);
         const user = await User.findByPk(req.user.id, {
             attributes: ['id', 'email', 'name', 'role', 'permissions', 'isActive', 'isWorkingToday', 'isVerified', 'subscriptionExpiresAt']
         });
 
         if (!user) {
+            console.log('[Auth] /me User not found for ID:', req.user.id);
             return res.status(404).json({ error: 'User not found' });
         }
 
+        console.log('[Auth] /me Success for userId:', req.user.id);
         res.json({ user });
     } catch (error) {
-        res.status(500).json({ error: 'Failed to get user' });
+        console.error('[Auth] /me ERROR:', error);
+        res.status(500).json({ error: 'Failed to get user', details: error.message });
     }
 });
 
