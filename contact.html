@@ -1,0 +1,410 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="theme-color" content="#4CC9F0">
+    <title>اتصل بنا - DK-OctoBot</title>
+    <meta name="description"
+        content="تواصل مع فريق DK-OctoBot. نحن هنا لمساعدتك في أي استفسار أو مشكلة. تواصل معنا عبر البريد الإلكتروني أو الهاتف.">
+    <meta name="keywords" content="اتصل بنا, DK-OctoBot, دعم فني, مساعدة, تواصل, contact, support">
+    <meta name="robots" content="index, follow">
+    <link rel="canonical" href="https://octomedia.octobot.it.com/contact.html">
+    <link rel="icon" type="image/png" href="/logo-icon.png">
+    <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.2/css/all.min.css">
+    <style>
+        :root {
+            --cyan-glow: #4CC9F0;
+            --white: #FFFFFF;
+            --gray-200: #D4E8F7;
+            --gradient-btn: linear-gradient(135deg, #4CC9F0 0%, #4682B4 100%);
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Cairo', sans-serif;
+            background: #000;
+            color: var(--white);
+            line-height: 1.7;
+        }
+
+        .header {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            z-index: 1000;
+            background: rgba(0, 0, 0, 0.8);
+            backdrop-filter: blur(20px);
+            border-bottom: 1px solid rgba(76, 201, 240, 0.1);
+        }
+
+        .header-container {
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 15px 30px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .logo {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .logo img {
+            width: 45px;
+            height: 45px;
+        }
+
+        .logo-text {
+            font-size: 22px;
+            font-weight: 800;
+            background: linear-gradient(135deg, #4CC9F0, #4682B4);
+            -webkit-background-clip: text;
+            background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .nav-links {
+            display: flex;
+            gap: 35px;
+            list-style: none;
+        }
+
+        .nav-links a {
+            color: var(--gray-200);
+            text-decoration: none;
+            font-weight: 500;
+        }
+
+        .nav-links a.active {
+            color: var(--cyan-glow);
+        }
+
+        .hero {
+            padding: 150px 30px 60px;
+            text-align: center;
+            background: radial-gradient(ellipse 80% 60% at 50% 0%, rgba(76, 201, 240, 0.05) 0%, transparent 50%);
+        }
+
+        .hero h1 {
+            font-size: 38px;
+            font-weight: 700;
+            margin-bottom: 15px;
+        }
+
+        .hero h1 span {
+            background: linear-gradient(135deg, #4CC9F0, #4682B4);
+            -webkit-background-clip: text;
+            background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .hero p {
+            font-size: 16px;
+            color: var(--gray-200);
+            max-width: 500px;
+            margin: 0 auto;
+        }
+
+        .contact-grid {
+            max-width: 1000px;
+            margin: 50px auto;
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 30px;
+            padding: 0 30px;
+        }
+
+        .contact-card {
+            background: rgba(10, 10, 20, 0.6);
+            border-radius: 16px;
+            padding: 30px;
+            text-align: center;
+            border: 1px solid rgba(76, 201, 240, 0.1);
+            transition: all 0.3s;
+        }
+
+        .contact-card:hover {
+            transform: translateY(-5px);
+            border-color: rgba(76, 201, 240, 0.3);
+        }
+
+        .contact-icon {
+            width: 60px;
+            height: 60px;
+            background: var(--gradient-btn);
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin: 0 auto 15px;
+            font-size: 24px;
+        }
+
+        .contact-card h3 {
+            font-size: 18px;
+            margin-bottom: 8px;
+        }
+
+        .contact-card p {
+            font-size: 14px;
+            color: var(--gray-200);
+        }
+
+        .contact-card a {
+            color: var(--cyan-glow);
+            text-decoration: none;
+        }
+
+        .form-section {
+            max-width: 600px;
+            margin: 60px auto;
+            padding: 0 30px 60px;
+        }
+
+        .form-section h2 {
+            font-size: 26px;
+            text-align: center;
+            margin-bottom: 30px;
+        }
+
+        .contact-form {
+            background: rgba(10, 10, 20, 0.6);
+            border-radius: 16px;
+            padding: 30px;
+            border: 1px solid rgba(76, 201, 240, 0.1);
+        }
+
+        .form-group {
+            margin-bottom: 20px;
+        }
+
+        .form-group label {
+            display: block;
+            margin-bottom: 8px;
+            font-size: 14px;
+            font-weight: 500;
+        }
+
+        .form-group input,
+        .form-group textarea,
+        .form-group select {
+            width: 100%;
+            padding: 14px;
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 10px;
+            color: var(--white);
+            font-family: inherit;
+            font-size: 14px;
+            transition: all 0.3s;
+        }
+
+        .form-group select option {
+            background: #fff;
+            color: #000;
+        }
+
+        .form-group input:focus,
+        .form-group textarea:focus,
+        .form-group select:focus {
+            outline: none;
+            border-color: var(--cyan-glow);
+            background: rgba(76, 201, 240, 0.05);
+        }
+
+        .form-group textarea {
+            min-height: 150px;
+            resize: vertical;
+        }
+
+        .form-message {
+            text-align: center;
+            padding: 15px;
+            border-radius: 10px;
+            margin-top: 15px;
+            font-weight: 600;
+            display: none;
+        }
+
+        .form-message.success {
+            display: block;
+            background: rgba(76, 201, 240, 0.15);
+            color: var(--cyan-glow);
+            border: 1px solid rgba(76, 201, 240, 0.3);
+        }
+
+        .form-message.error {
+            display: block;
+            background: rgba(255, 80, 80, 0.15);
+            color: #ff5050;
+            border: 1px solid rgba(255, 80, 80, 0.3);
+        }
+
+        .btn-submit:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+        }
+
+        .btn-submit {
+            width: 100%;
+            padding: 16px;
+            background: var(--gradient-btn);
+            border: none;
+            border-radius: 10px;
+            color: white;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s;
+        }
+
+        .btn-submit:hover {
+            transform: translateY(-3px);
+            box-shadow: 0 10px 30px rgba(76, 201, 240, 0.3);
+        }
+
+        .footer {
+            padding: 40px 30px 20px;
+            background: rgba(10, 10, 20, 0.8);
+            border-top: 1px solid rgba(76, 201, 240, 0.1);
+            text-align: center;
+        }
+
+        .footer p {
+            font-size: 13px;
+            color: #666;
+        }
+
+        @media (max-width: 768px) {
+            .contact-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+    </style>
+</head>
+
+<body>
+    <header class="header">
+        <div class="header-container">
+            <a href="landing.html" class="logo"><img src="logo.png?v=2" alt="DK-OctoBot"><span
+                    class="logo-text">DK-OctoBot</span></a>
+            <nav>
+                <ul class="nav-links">
+                    <li><a href="landing.html">الرئيسية</a></li>
+                    <li><a href="features.html">الميزات</a></li>
+                    <li><a href="pricing.html">الأسعار</a></li>
+                    <li><a href="about.html">من نحن</a></li>
+                    <li><a href="contact.html" class="active">اتصل بنا</a></li>
+                </ul>
+            </nav>
+        </div>
+    </header>
+    <section class="hero">
+        <h1>نحن هنا <span>لخدمتك</span></h1>
+        <p>لديك سؤال أو مشكلة؟ فريق الدعم جاهز لمساعدتك في أي وقت</p>
+    </section>
+    <section class="contact-grid">
+        <div class="contact-card">
+            <div class="contact-icon"><i class="fas fa-envelope"></i></div>
+            <h3>البريد الإلكتروني</h3>
+            <p><a href="mailto:octobotchatbot@gmail.com">octobotchatbot@gmail.com</a></p>
+        </div>
+        <div class="contact-card">
+            <div class="contact-icon"><i class="fas fa-phone"></i></div>
+            <h3>الهاتف</h3>
+            <p><a href="tel:+201505354810">+201505354810</a></p>
+        </div>
+        <div class="contact-card">
+            <div class="contact-icon"><i class="fas fa-map-marker-alt"></i></div>
+            <h3>الموقع</h3>
+            <p>القاهرة، مصر</p>
+        </div>
+    </section>
+    <section class="form-section">
+        <h2>أرسل لنا رسالة</h2>
+        <form class="contact-form" id="contactForm">
+            <div class="form-group">
+                <label>الاسم الكامل</label>
+                <input type="text" name="name" id="contactName" required placeholder="أدخل اسمك">
+            </div>
+            <div class="form-group">
+                <label>البريد الإلكتروني</label>
+                <input type="email" name="email" id="contactEmail" required placeholder="أدخل بريدك الإلكتروني">
+            </div>
+            <div class="form-group">
+                <label>نوع الاستفسار</label>
+                <select name="type" id="contactType">
+                    <option value="دعم فني">دعم فني</option>
+                    <option value="استفسارات المبيعات">استفسارات المبيعات</option>
+                    <option value="الفوترة والدفع">الفوترة والدفع</option>
+                    <option value="أخرى">أخرى</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label>الرسالة</label>
+                <textarea name="message" id="contactMessage" required placeholder="كيف يمكننا مساعدتك؟"></textarea>
+            </div>
+            <button type="submit" class="btn-submit" id="submitBtn"><i class="fas fa-paper-plane"></i> إرسال
+                الرسالة</button>
+            <div class="form-message" id="formMessage"></div>
+        </form>
+    </section>
+
+    <script>
+        document.getElementById('contactForm').addEventListener('submit', async function (e) {
+            e.preventDefault();
+            const btn = document.getElementById('submitBtn');
+            const msg = document.getElementById('formMessage');
+            btn.disabled = true;
+            btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> جاري الإرسال...';
+            msg.className = 'form-message';
+            msg.style.display = 'none';
+
+            try {
+                const res = await fetch('/api/contact', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        name: document.getElementById('contactName').value,
+                        email: document.getElementById('contactEmail').value,
+                        type: document.getElementById('contactType').value,
+                        message: document.getElementById('contactMessage').value
+                    })
+                });
+                const data = await res.json();
+                if (res.ok) {
+                    msg.className = 'form-message success';
+                    msg.textContent = '✅ تم إرسال رسالتك بنجاح! سنرد عليك في أقرب وقت.';
+                    this.reset();
+                } else {
+                    msg.className = 'form-message error';
+                    msg.textContent = '❌ ' + (data.error || 'حدث خطأ، حاول مرة أخرى');
+                }
+            } catch (err) {
+                msg.className = 'form-message error';
+                msg.textContent = '❌ خطأ في الاتصال. تأكد من الاتصال بالإنترنت.';
+            } finally {
+                btn.disabled = false;
+                btn.innerHTML = '<i class="fas fa-paper-plane"></i> إرسال الرسالة';
+            }
+        });
+    </script>
+    </section>
+    <footer class="footer">
+        <p>© 2026 DK-OctoBot. جميع الحقوق محفوظة.</p>
+    </footer>
+</body>
+
+</html>

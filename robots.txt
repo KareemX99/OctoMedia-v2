@@ -1,0 +1,87 @@
+# Robots.txt for DK-OctoBot
+# https://octomedia.octobot.it.com
+# Last updated: 2026-02-09
+
+User-agent: *
+Allow: /
+Allow: /landing.html
+Allow: /login.html
+Allow: /register.html
+Allow: /features.html
+Allow: /pricing.html
+Allow: /about.html
+Allow: /contact.html
+Allow: /privacy.html
+Allow: /terms.html
+Allow: /humans.txt
+
+# Disallow private/admin pages
+Disallow: /forgot-password.html
+Disallow: /reset-password.html
+Disallow: /logs.html
+Disallow: /index.html
+Disallow: /api/
+Disallow: /uploads/
+Disallow: /node_modules/
+Disallow: /*.json$
+Disallow: /*.js$
+Disallow: /*.css$
+Disallow: /*.xml$
+Disallow: /*.log$
+Disallow: /.git/
+Disallow: /.vscode/
+Disallow: /.wwebjs_auth/
+Disallow: /.tg_sessions/
+Disallow: /.ig_sessions/
+
+# Crawl-delay (optional - be nice to servers)
+Crawl-delay: 1
+
+# Sitemap location
+Sitemap: https://octomedia.octobot.it.com/sitemap.xml
+
+# Host directive
+Host: https://octomedia.octobot.it.com
+
+# Crawler-specific rules
+User-agent: Googlebot
+Allow: /
+
+User-agent: Bingbot
+Allow: /
+
+User-agent: Slurp
+Allow: /
+
+User-agent: DuckDuckBot
+Allow: /
+
+User-agent: Baiduspider
+Allow: /
+
+User-agent: YandexBot
+Allow: /
+
+User-agent: facebookexternalhit
+Allow: /
+
+User-agent: Twitterbot
+Allow: /
+
+User-agent: LinkedInBot
+Allow: /
+
+User-agent: Pinterestbot
+Allow: /
+
+User-agent: TelegramBot
+Allow: /
+
+User-agent: Applebot
+Allow: /
+
+User-agent: AhrefsBot
+Allow: /
+
+User-agent: SemrushBot
+Allow: /

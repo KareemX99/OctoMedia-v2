@@ -1,0 +1,40 @@
+# DK-OctoBot Team
+# Human Readable Information About The Team
+
+## Development Team
+
+Lead Developer: DK-OctoBot Team
+Contact: support@octobot.it.com
+Location: Cairo, Egypt
+Timezone: Africa/Cairo (UTC+2)
+
+## Technology Stack
+
+Frontend: HTML5, CSS3, JavaScript
+Backend: Node.js
+Database: MySQL
+Server: Node.js/Express
+
+## Recognition
+
+Built with ❤️ by DK-OctoBot Team
+Designed for the Middle East market
+Supporting Arabic and English languages
+
+## Social Media
+
+Facebook: https://facebook.com/dk-octobot
+Instagram: https://instagram.com/dk-octobot
+Twitter: https://twitter.com/dk-octobot
+LinkedIn: https://linkedin.com/company/dk-octobot
+
+## Site Information
+
+Last Updated: February 2026
+Language: Arabic (Primary), English
+Region: Egypt, Middle East, Global
+
+## Thanks
+
+Thanks to all our users for their trust and support.
+Special thanks to the open-source community.

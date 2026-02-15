@@ -1,0 +1,411 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="theme-color" content="#4CC9F0">
+    <title>من نحن - DK-OctoBot | منصة إدارة السوشيال ميديا</title>
+    <meta name="description"
+        content="DK-OctoBot هي منصة متكاملة لإدارة السوشيال ميديا والمتاجر الإلكترونية. تأسست لتبسيط إدارة التواجد الرقمي للشركات والمتاجر في مصر والعالم العربي.">
+    <meta name="keywords" content="من نحن, DK-OctoBot, عن الشركة, إدارة السوشيال ميديا, فريق العمل, المهمة, الرؤية">
+    <meta name="robots" content="index, follow">
+    <link rel="canonical" href="https://octomedia.octobot.it.com/about.html">
+    <meta property="og:url" content="https://octomedia.octobot.it.com/about.html">
+    <meta property="og:title" content="من نحن - DK-OctoBot">
+    <link rel="icon" type="image/png" href="/logo-icon.png">
+    <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --cyan-glow: #4CC9F0;
+            --white: #FFFFFF;
+            --gray-200: #D4E8F7;
+            --gradient-btn: linear-gradient(135deg, #4CC9F0 0%, #4682B4 100%);
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Cairo', sans-serif;
+            background: #000;
+            color: var(--white);
+            line-height: 1.7;
+        }
+
+        .header {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            z-index: 1000;
+            background: rgba(0, 0, 0, 0.8);
+            backdrop-filter: blur(20px);
+            border-bottom: 1px solid rgba(76, 201, 240, 0.1);
+        }
+
+        .header-container {
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 15px 30px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .logo {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .logo img {
+            width: 45px;
+            height: 45px;
+        }
+
+        .logo-text {
+            font-size: 22px;
+            font-weight: 800;
+            background: linear-gradient(135deg, #4CC9F0, #4682B4);
+            -webkit-background-clip: text;
+            background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .nav-links {
+            display: flex;
+            gap: 35px;
+            list-style: none;
+        }
+
+        .nav-links a {
+            color: var(--gray-200);
+            text-decoration: none;
+            font-weight: 500;
+            transition: color 0.3s;
+        }
+
+        .nav-links a.active {
+            color: var(--cyan-glow);
+        }
+
+        .btn {
+            padding: 12px 28px;
+            border-radius: 10px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s;
+            text-decoration: none;
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            border: none;
+        }
+
+        .btn-primary {
+            background: var(--gradient-btn);
+            color: white;
+            box-shadow: 0 8px 25px rgba(76, 201, 240, 0.3);
+        }
+
+        .hero {
+            padding: 150px 30px 80px;
+            text-align: center;
+            background: radial-gradient(ellipse 80% 60% at 50% 0%, rgba(76, 201, 240, 0.05) 0%, transparent 50%);
+        }
+
+        .hero h1 {
+            font-size: 42px;
+            font-weight: 700;
+            margin-bottom: 20px;
+        }
+
+        .hero h1 span {
+            background: linear-gradient(135deg, #4CC9F0, #4682B4);
+            -webkit-background-clip: text;
+            background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .hero p {
+            font-size: 17px;
+            color: var(--gray-200);
+            max-width: 700px;
+            margin: 0 auto;
+        }
+
+        .content-section {
+            max-width: 900px;
+            margin: 0 auto;
+            padding: 60px 30px;
+        }
+
+        .content-section h2 {
+            font-size: 28px;
+            margin-bottom: 20px;
+            color: var(--cyan-glow);
+        }
+
+        .content-section p {
+            font-size: 16px;
+            color: var(--gray-200);
+            margin-bottom: 20px;
+        }
+
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 30px;
+            max-width: 1000px;
+            margin: 60px auto;
+            padding: 0 30px;
+        }
+
+        .stat-card {
+            background: rgba(10, 10, 20, 0.6);
+            border-radius: 16px;
+            padding: 30px;
+            text-align: center;
+            border: 1px solid rgba(76, 201, 240, 0.1);
+        }
+
+        .stat-number {
+            font-size: 42px;
+            font-weight: 800;
+            color: var(--cyan-glow);
+        }
+
+        .stat-label {
+            font-size: 14px;
+            color: var(--gray-200);
+            margin-top: 5px;
+        }
+
+        .values-section {
+            background: rgba(10, 10, 20, 0.4);
+            padding: 80px 30px;
+        }
+
+        .values-grid {
+            max-width: 1100px;
+            margin: 0 auto;
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 30px;
+        }
+
+        .value-card {
+            text-align: center;
+            padding: 30px;
+        }
+
+        .value-icon {
+            width: 70px;
+            height: 70px;
+            background: var(--gradient-btn);
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin: 0 auto 20px;
+            font-size: 28px;
+        }
+
+        .value-card h3 {
+            font-size: 20px;
+            margin-bottom: 10px;
+        }
+
+        .value-card p {
+            font-size: 14px;
+            color: var(--gray-200);
+        }
+
+        .footer {
+            padding: 40px 30px 20px;
+            background: rgba(10, 10, 20, 0.8);
+            border-top: 1px solid rgba(76, 201, 240, 0.1);
+            text-align: center;
+        }
+
+        .footer p {
+            font-size: 13px;
+            color: #666;
+        }
+
+        /* Team Section */
+        .team-section {
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 60px 30px;
+        }
+
+        .team-section h2 {
+            text-align: center;
+            font-size: 32px;
+            margin-bottom: 50px;
+        }
+
+        .team-section h2 span {
+            color: var(--cyan-glow);
+        }
+
+        .team-grid {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 30px;
+        }
+
+        .team-card {
+            background: rgba(10, 10, 20, 0.6);
+            backdrop-filter: blur(20px);
+            border-radius: 20px;
+            padding: 35px;
+            text-align: center;
+            border: 1px solid rgba(76, 201, 240, 0.1);
+            transition: all 0.3s;
+        }
+
+        .team-card:hover {
+            transform: translateY(-5px);
+            border-color: rgba(76, 201, 240, 0.3);
+            box-shadow: 0 20px 40px rgba(0, 0, 0, 0.3), 0 0 20px rgba(76, 201, 240, 0.05);
+        }
+
+        .team-avatar {
+            width: 90px;
+            height: 90px;
+            background: var(--gradient-btn);
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin: 0 auto 18px;
+            font-size: 36px;
+        }
+
+        .team-card h3 {
+            font-size: 20px;
+            font-weight: 700;
+            margin-bottom: 5px;
+        }
+
+        .team-role {
+            display: inline-block;
+            background: rgba(76, 201, 240, 0.15);
+            color: var(--cyan-glow);
+            padding: 4px 16px;
+            border-radius: 20px;
+            font-size: 13px;
+            font-weight: 600;
+            margin-top: 8px;
+        }
+
+        @media (max-width: 900px) {
+            .stats-grid {
+                grid-template-columns: repeat(2, 1fr);
+            }
+
+            .values-grid {
+                grid-template-columns: 1fr;
+            }
+
+            .team-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+    </style>
+</head>
+
+<body>
+    <header class="header">
+        <div class="header-container">
+            <a href="landing.html" class="logo"><img src="logo.png?v=2" alt="DK-OctoBot"><span
+                    class="logo-text">DK-OctoBot</span></a>
+            <nav>
+                <ul class="nav-links">
+                    <li><a href="landing.html">الرئيسية</a></li>
+                    <li><a href="features.html">الميزات</a></li>
+                    <li><a href="pricing.html">الأسعار</a></li>
+                    <li><a href="about.html" class="active">من نحن</a></li>
+                    <li><a href="contact.html">اتصل بنا</a></li>
+                </ul>
+            </nav>
+            <div class="header-buttons"><a href="login.html" class="btn btn-outline">تسجيل الدخول</a><a
+                    href="register.html" class="btn btn-primary">ابدأ مجاناً</a></div>
+        </div>
+    </header>
+    <section class="hero">
+        <h1>من <span>أجل</span> نجاحك</h1>
+        <p>نؤمن بأن كل مشروع يستحق فرصة النجاح. DK-OctoBot صُمم لتسهيل إدارة تواجدك الرقمي وتحقيق أهدافك</p>
+    </section>
+    <section class="stats-grid">
+        <div class="stat-card">
+            <div class="stat-number">+10K</div>
+            <div class="stat-label">مستخدم نشط</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-number">+5K</div>
+            <div class="stat-label">صفحة مُدارة</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-number">+1M</div>
+            <div class="stat-label">رسالة يومية</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-number">18+</div>
+            <div class="stat-label">دولة</div>
+        </div>
+    </section>
+    <section class="content-section">
+        <h2>قصتنا</h2>
+        <p>بدأت رحلة DK-OctoBot من إدراك بسيط: الشركات والمتاجر الصغيرة تحتاج أدوات قوية لإدارة تواجدها الرقمي دون
+            الحاجة لفريق كبير أو ميزانية ضخمة.</p>
+        <p>منذ تأسيسنا، عملنا على بناء منصة تجمع بين سهولة الاستخدام والقوة في الأداء. اليوم، نفخر بخدمة آلاف المستخدمين
+            في مصر والعالم العربي.</p>
+    </section>
+    <section class="values-section">
+        <h2 style="text-align:center; font-size:32px; margin-bottom:50px;">قيمنا</h2>
+        <div class="values-grid">
+            <div class="value-card">
+                <div class="value-icon"><i class="fas fa-rocket"></i></div>
+                <h3>البساطة</h3>
+                <p>نؤمن بأن التقنية يجب أن تكون سهلة. منصتنا مصممة لتكون بسيطة ومباشرة</p>
+            </div>
+            <div class="value-card">
+                <div class="value-icon"><i class="fas fa-shield-alt"></i></div>
+                <h3>الأمان</h3>
+                <p>بياناتك وخصوصيتك أولويتنا. نستخدم أحدث معايير الأمان</p>
+            </div>
+            <div class="value-card">
+                <div class="value-icon"><i class="fas fa-headset"></i></div>
+                <h3>الدعم</h3>
+                <p>فريقنا جاهز لمساعدتك في أي وقت. دعم فني متاح لجميع المستخدمين</p>
+            </div>
+        </div>
+    </section>
+    <section class="team-section">
+        <h2>فريق <span>القيادة</span></h2>
+        <div class="team-grid">
+            <div class="team-card">
+                <div class="team-avatar"><i class="fas fa-user-tie"></i></div>
+                <h3>م/ كريم جاب الله</h3>
+                <span class="team-role">CEO - الرئيس التنفيذي</span>
+            </div>
+            <div class="team-card">
+                <div class="team-avatar"><i class="fas fa-laptop-code"></i></div>
+                <h3>م/ محمد أسامه</h3>
+                <span class="team-role">CTO - المدير التقني</span>
+            </div>
+        </div>
+    </section>
+    <footer class="footer">
+        <p>© 2026 DK-OctoBot. جميع الحقوق محفوظة.</p>
+    </footer>
+</body>
+
+</html>

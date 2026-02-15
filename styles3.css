@@ -1,0 +1,356 @@
+/* Facebook Integration Styles */
+
+/* Facebook Status in Sidebar */
+.fb-status {
+    margin-bottom: 12px;
+}
+
+.fb-connect-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    padding: 12px 16px;
+    background: #1877f2;
+    color: white;
+    border: none;
+    border-radius: 10px;
+    cursor: pointer;
+    font-family: inherit;
+    font-size: 13px;
+    font-weight: 600;
+    width: 100%;
+    transition: all 0.3s ease;
+}
+
+.fb-connect-btn:hover {
+    background: #166fe5;
+    transform: translateY(-2px);
+}
+
+.fb-user-info {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px;
+    background: var(--glass);
+    border-radius: 10px;
+}
+
+.fb-user-avatar {
+    width: 36px;
+    height: 36px;
+    border-radius: 50%;
+    object-fit: cover;
+}
+
+.fb-user-name {
+    flex: 1;
+    font-size: 13px;
+    font-weight: 600;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.fb-disconnect-btn {
+    width: 28px;
+    height: 28px;
+    border: none;
+    background: var(--danger);
+    color: white;
+    border-radius: 6px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 12px;
+    transition: all 0.3s ease;
+}
+
+/* Pages Section */
+.pages-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+    gap: 20px;
+    margin-top: 24px;
+}
+
+.page-card {
+    background: var(--bg-card);
+    border-radius: 16px;
+    padding: 20px;
+    border: 1px solid var(--border-color);
+    transition: all 0.3s ease;
+}
+
+.page-card:hover {
+    transform: translateY(-4px);
+    box-shadow: var(--shadow);
+}
+
+.page-card-header {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    margin-bottom: 16px;
+}
+
+.page-avatar {
+    width: 56px;
+    height: 56px;
+    border-radius: 12px;
+    object-fit: cover;
+    background: var(--glass);
+}
+
+.page-info {
+    flex: 1;
+}
+
+.page-info h3 {
+    font-size: 16px;
+    font-weight: 600;
+    margin-bottom: 4px;
+}
+
+.page-info p {
+    font-size: 13px;
+    color: var(--text-secondary);
+}
+
+.page-stats {
+    display: flex;
+    gap: 16px;
+    padding: 16px 0;
+    border-top: 1px solid var(--border-color);
+    border-bottom: 1px solid var(--border-color);
+    margin-bottom: 16px;
+}
+
+.page-stat {
+    text-align: center;
+    flex: 1;
+}
+
+.page-stat-value {
+    font-size: 20px;
+    font-weight: 700;
+    color: var(--primary);
+}
+
+.page-stat-label {
+    font-size: 12px;
+    color: var(--text-secondary);
+}
+
+.page-actions {
+    display: flex;
+    gap: 10px;
+}
+
+.page-actions .btn {
+    flex: 1;
+    justify-content: center;
+}
+
+/* Connect Prompt */
+.connect-prompt {
+    text-align: center;
+    padding: 60px 20px;
+    background: var(--bg-card);
+    border-radius: 20px;
+    border: 1px solid var(--border-color);
+}
+
+.connect-prompt i {
+    font-size: 64px;
+    color: #1877f2;
+    margin-bottom: 24px;
+}
+
+.connect-prompt h2 {
+    font-size: 24px;
+    margin-bottom: 12px;
+}
+
+.connect-prompt p {
+    color: var(--text-secondary);
+    margin-bottom: 24px;
+    max-width: 400px;
+    margin-left: auto;
+    margin-right: auto;
+}
+
+.connect-prompt .btn {
+    font-size: 16px;
+    padding: 16px 32px;
+}
+
+/* Publish Modal */
+#publishModal .modal-content {
+    max-width: 600px;
+}
+
+.page-selector {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    margin-bottom: 20px;
+}
+
+.page-select-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 16px;
+    background: var(--glass);
+    border: 2px solid var(--border-color);
+    border-radius: 10px;
+    cursor: pointer;
+    transition: all 0.3s ease;
+}
+
+.page-select-item.selected {
+    border-color: var(--primary);
+    background: rgba(102, 126, 234, 0.1);
+}
+
+.page-select-item img {
+    width: 32px;
+    height: 32px;
+    border-radius: 8px;
+}
+
+.page-select-item span {
+    font-size: 14px;
+    font-weight: 500;
+}
+
+.publish-options {
+    display: flex;
+    gap: 12px;
+    margin-bottom: 20px;
+}
+
+.publish-option {
+    flex: 1;
+    padding: 16px;
+    background: var(--glass);
+    border: 2px solid var(--border-color);
+    border-radius: 12px;
+    text-align: center;
+    cursor: pointer;
+    transition: all 0.3s ease;
+}
+
+.publish-option.selected {
+    border-color: var(--primary);
+    background: rgba(102, 126, 234, 0.1);
+}
+
+.publish-option i {
+    font-size: 24px;
+    margin-bottom: 8px;
+    display: block;
+}
+
+.schedule-inputs {
+    display: none;
+    gap: 12px;
+    margin-top: 16px;
+}
+
+.schedule-inputs.visible {
+    display: flex;
+}
+
+.schedule-inputs input {
+    flex: 1;
+}
+
+/* Scheduled Posts List */
+.scheduled-posts-list {
+    margin-top: 24px;
+}
+
+.scheduled-post-item {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    padding: 16px;
+    background: var(--bg-card);
+    border-radius: 12px;
+    border: 1px solid var(--border-color);
+    margin-bottom: 12px;
+}
+
+.scheduled-post-item .post-page {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    min-width: 150px;
+}
+
+.scheduled-post-item .post-page img {
+    width: 36px;
+    height: 36px;
+    border-radius: 8px;
+}
+
+.scheduled-post-item .post-content {
+    flex: 1;
+    font-size: 14px;
+    color: var(--text-secondary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.scheduled-post-item .post-time {
+    text-align: left;
+    min-width: 120px;
+}
+
+.scheduled-post-item .post-time .date {
+    font-weight: 600;
+    font-size: 14px;
+}
+
+.scheduled-post-item .post-time .time {
+    font-size: 12px;
+    color: var(--text-secondary);
+}
+
+.scheduled-post-item .cancel-btn {
+    width: 36px;
+    height: 36px;
+    border: none;
+    background: var(--danger);
+    color: white;
+    border-radius: 8px;
+    cursor: pointer;
+}
+
+/* Loading State */
+.loading-spinner {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    padding: 40px;
+}
+
+.spinner {
+    width: 40px;
+    height: 40px;
+    border: 4px solid var(--glass);
+    border-top-color: var(--primary);
+    border-radius: 50%;
+    animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+    to {
+        transform: rotate(360deg);
+    }
+}

@@ -1,0 +1,17817 @@
+// DK-OctoBot - Main Application with Facebook Integration & Analytics
+class SocialMediaHub {
+    constructor() {
+        this.API_URL = window.location.origin; // Base URL for API calls
+        const userData = JSON.parse(localStorage.getItem('octobot_user') || '{}');
+        this.userId = userData.id || null; // User ID from login
+        this.posts = JSON.parse(localStorage.getItem('smh_posts')) || [];
+        this.quotes = JSON.parse(localStorage.getItem('smh_quotes')) || [];
+        this.currentDate = new Date();
+        this.currentFilter = 'all';
+        this.currentPeriod = 'week';
+        this.quoteSettings = {
+            background: 'linear-gradient(135deg, #0EA5E9 0%, #2563EB 100%)',
+            bgType: 'gradient',
+            fontSize: 32,
+            fontFamily: 'Cairo',
+            textColor: '#ffffff',
+            size: '1080x1080'
+        };
+        this.editingPostId = null;
+        this.fbPages = [];
+        this.selectedPage = null;
+        this.analyticsData = null;
+        this.selectedAnalyticsPage = null;
+        this.mediaFile = null;
+        this.mediaType = null;
+        this.customLogo = localStorage.getItem('dk_custom_logo') || null;
+        // WhatsApp state variables
+        this.currentWaChat = null;
+        this.currentWaChatName = null;
+        this.waMessagesData = [];
+        this.waPollingInterval = null;
+        this.waInboxPollingInterval = null;
+        this.init();
+    }
+
+    async init() {
+        // Check subscription expiration for non-admin users
+        await this.checkSubscriptionStatus();
+
+        if (window.fbIntegration) {
+            window.fbIntegration.handleAuthCallback();
+        }
+        await this.loadUserPermissions(); // Load permissions first
+        this.renderAllPages();
+        this.applyPermissionRestrictions(); // Apply permission restrictions
+        this.bindEvents();
+
+        // Global click listener to close custom dropdowns
+        window.addEventListener('click', (e) => {
+            const dropdowns = document.querySelectorAll('.custom-options');
+            dropdowns.forEach(drop => {
+                if (drop.classList.contains('open') && !e.target.closest('.custom-select-wrapper')) {
+                    drop.classList.remove('open');
+                }
+            });
+        });
+
+        this.restoreCurrentPage(); // Restore saved page after refresh
+        this.renderCalendar();
+        this.initQuoteMaker();
+        await this.initFacebook();
+        this.updateDashboard(); // Moved after initFacebook to ensure pages and tokens are loaded
+        await this.initInstagram(); // Auto-check Instagram session
+        this.startHeartbeat(); // Start online status tracking
+        this.createTeamChatFloatingButton(); // Add floating chat button for employees
+        this.initSocketIO(); // Initialize real-time messaging
+        this.loadConnectedStores(); // Load connected e-commerce stores
+
+        // Start periodic subscription check (every 5 minutes)
+        this.startSubscriptionCheck();
+    }
+
+    // Check subscription status
+    async checkSubscriptionStatus() {
+        try {
+            const token = localStorage.getItem('octobot_token');
+            if (!token) return;
+
+            const res = await fetch(`${this.API_URL}/api/auth/me`, {
+                headers: { 'Authorization': `Bearer ${token}` }
+            });
+
+            if (!res.ok) return;
+
+            const data = await res.json();
+            const user = data.user;
+
+            // Skip check for admins
+            if (user.role === 'admin') return;
+
+            // Check if subscription has expired
+            if (user.subscriptionExpiresAt) {
+                const expiresAt = new Date(user.subscriptionExpiresAt);
+                if (expiresAt < new Date()) {
+                    this.showSubscriptionExpiredAndLogout();
+                }
+            }
+        } catch (err) {
+            console.error('Subscription check error:', err);
+        }
+    }
+
+    // Start periodic subscription check
+    startSubscriptionCheck() {
+        // Check every 5 minutes
+        setInterval(() => {
+            this.checkSubscriptionStatus();
+        }, 5 * 60 * 1000);
+    }
+
+    // Show subscription expired popup and logout
+    showSubscriptionExpiredAndLogout() {
+        // Clear token immediately
+        localStorage.removeItem('octobot_token');
+        localStorage.removeItem('octobot_user');
+
+        // Redirect to login page - popup will show there on login attempt
+        window.location.href = '/login.html';
+    }
+
+    // Initialize Socket.IO for real-time updates
+    initSocketIO() {
+        if (typeof io === 'undefined') {
+            console.log('[Socket.IO] Library not loaded, skipping real-time setup');
+            return;
+        }
+
+        this.socket = io();
+
+        this.socket.on('connect', () => {
+            console.log('[Socket.IO] Connected to server');
+        });
+
+        // Listen for new Facebook messages
+        this.socket.on('new-fb-message', (data) => {
+            const currentId = this.currentConversation?.participantId;
+            const senderId = data.senderId;
+
+            // If currently viewing this sender's conversation, append message directly
+            const isMatch = currentId && senderId && (
+                currentId === senderId ||
+                currentId.includes(senderId) ||
+                senderId.includes(currentId)
+            );
+
+            if (isMatch) {
+                const container = document.getElementById('chatMessages');
+                if (container) {
+                    // Check scroll position BEFORE appending
+                    const wasAtBottom = container.scrollHeight - container.scrollTop <= container.clientHeight + 300;
+
+                    // Create message element (customer message - shown on LEFT side -> flex-end in RTL)
+                    const msgDiv = document.createElement('div');
+                    msgDiv.style.cssText = 'display:flex;justify-content:flex-end;margin-bottom:12px;animation:fadeIn 0.3s ease;';
+                    msgDiv.innerHTML = `
+                        <div class="customer-bubble">
+                            <p style="margin:0;">${data.message || '[مرفق]'}</p>
+                            <small style="font-size:10px;opacity:0.7;">الآن</small>
+                        </div>
+                    `;
+                    container.appendChild(msgDiv);
+
+                    // Smart Scroll: Only scroll to bottom if user was already near bottom
+                    if (wasAtBottom) {
+                        container.scrollTop = container.scrollHeight;
+                        setTimeout(() => container.scrollTop = container.scrollHeight, 100);
+                    }
+                }
+            }
+
+            // Update conversations list - move this conversation to top and update snippet
+            this.updateConversationInList(data.senderId, data.message, data.pageId);
+        });
+
+        // Listen for messages sent from Facebook Page (echo)
+        this.socket.on('page-sent-message', (data) => {
+            // If currently viewing this recipient's conversation, append message directly
+            const currentParticipant = String(this.currentConversation?.participantId || '');
+            const recipientId = String(data.recipientId || '');
+
+            const isMatchingConversation = currentParticipant && recipientId && (
+                currentParticipant === recipientId ||
+                recipientId.includes(currentParticipant) ||
+                currentParticipant.includes(recipientId) ||
+                currentParticipant.endsWith(recipientId) ||
+                recipientId.endsWith(currentParticipant)
+            );
+
+            if (isMatchingConversation) {
+                const container = document.getElementById('chatMessages');
+                if (container) {
+                    const wasAtBottom = container.scrollHeight - container.scrollTop <= container.clientHeight + 300;
+
+                    // Check if this is a stored order (no text = template message)
+                    const storedOrders = JSON.parse(localStorage.getItem('dk_stored_orders') || '{}');
+                    const msgId = data.messageId || data.mid || '';
+                    const storedOrder = storedOrders[msgId];
+
+                    // Check if already rendered (by createOrder manual append)
+                    if (msgId && document.getElementById(`msg-${msgId}`)) {
+                        console.log('[Socket] Message already rendered:', msgId);
+                    } else {
+                        const msgDiv = document.createElement('div');
+                        if (msgId) msgDiv.id = `msg-${msgId}`;
+
+                        if (storedOrder) {
+                            // Render order card
+                            msgDiv.style.cssText = 'display:flex;flex-direction:column;align-items:flex-start;margin-bottom:12px;animation:fadeIn 0.3s ease;';
+                            msgDiv.innerHTML = this.renderOrderCardHtml(storedOrder);
+                            msgDiv.innerHTML += `<small style="font-size:10px;opacity:0.5;margin-top:4px;">الآن ✓</small>`;
+                        } else {
+                            msgDiv.style.cssText = 'display:flex;justify-content:flex-start;margin-bottom:12px;animation:fadeIn 0.3s ease;';
+                            msgDiv.innerHTML = `
+                            <div class="page-bubble">
+                                <p style="margin:0;">${data.message || '[مرفق]'}</p>
+                                <small style="font-size:10px;opacity:0.7;">الآن ✓</small>
+                            </div>
+                        `;
+                        }
+                        container.appendChild(msgDiv);
+
+                        if (wasAtBottom) {
+                            container.scrollTop = container.scrollHeight;
+                            setTimeout(() => container.scrollTop = container.scrollHeight, 100);
+                        }
+                    }
+                }
+            }
+
+            this.updateConversationInList(data.recipientId, '← ' + (data.message?.substring(0, 30) || '[طلب]'), data.pageId);
+        });
+
+        // Listen for order status updates (mark as paid from FB card or dashboard)
+        this.socket.on('order-status-update', (data) => {
+            if (!data.orderNumber) return;
+
+            console.log('[Socket] Order status update:', data.orderNumber, data.status);
+
+            // Update the card UI if it's on screen
+            const card = document.getElementById(`order-card-${data.orderNumber}`);
+            if (card && data.order) {
+                // Re-render completely with new data
+                const newHtml = this.renderOrderCardHtml(data.order);
+                card.outerHTML = newHtml;
+            }
+
+            // Update localStorage
+            const storedOrders = JSON.parse(localStorage.getItem('dk_stored_orders') || '{}');
+            let updated = false;
+            for (const mid in storedOrders) {
+                if (storedOrders[mid].orderNumber === data.orderNumber) {
+                    storedOrders[mid].status = 'paid';
+                    storedOrders[mid].paymentStatus = 'paid';
+                    if (data.order) {
+                        // Ideally merge updated fields
+                        storedOrders[mid] = { ...storedOrders[mid], ...data.order };
+                    }
+                    updated = true;
+                }
+            }
+            if (updated) {
+                localStorage.setItem('dk_stored_orders', JSON.stringify(storedOrders));
+            }
+
+            // Show toast if from customer
+            if (data.source === 'customer') {
+                this.showToast(`💰 العميل أكد دفع الطلب #${data.orderNumber}`, 'success');
+            }
+        });
+
+        // Listen for E-Commerce Sync Progress
+        // Listen for E-Commerce Sync Start
+        this.socket.on('ecom-sync-start', (data) => {
+            // Only process if event is for the current user
+            if (data.userId && data.userId !== this.userId) return;
+
+            const prodEl = document.getElementById('ecomTotalProducts');
+            if (prodEl && data.totalProducts) {
+                prodEl.innerHTML = `<span style="font-size:0.8em">0 / ${data.totalProducts}</span>`;
+                prodEl.style.color = '#f59e0b'; // Orange for starting
+            }
+        });
+
+        // Listen for E-Commerce Sync Progress
+        this.socket.on('ecom-sync-progress', (data) => {
+            // Only process if event is for the current user
+            if (data.userId && data.userId !== this.userId) return;
+
+            // Only update if we are on the e-commerce page or have the stats visible
+            const prodEl = document.getElementById('ecomTotalProducts');
+            if (prodEl) {
+                // Show "Synced / Total" if total is available
+                if (data.totalProducts > 0) {
+                    prodEl.textContent = `${data.syncedProducts} / ${data.totalProducts}`;
+                } else {
+                    prodEl.textContent = data.syncedProducts;
+                }
+
+                // Add a visual indicator that it's live
+                prodEl.style.color = '#22c55e';
+            }
+
+            if (data.status === 'idle') {
+                this.showToast(`✅ اكتملت المزامنة! (${data.totalProducts || data.syncedProducts} منتج)`, 'success');
+                // Refresh to get accurate categorized stats
+                this.loadEcomStats();
+                this.loadConnectedStores();
+                if (document.getElementById('products-table-body') || document.getElementById('ecomProductsGrid')) {
+                    this.loadEcomProducts(true); // Auto reload grid
+                }
+                if (document.getElementById('orders-table-body') || document.getElementById('ecomOrdersList')) {
+                    this.loadEcomOrders();
+                }
+            }
+        });
+
+        // Listen for campaign updates (broadcast)
+        this.socket.on('campaign-update', (data) => {
+            if (data.campaignId === String(this.currentCampaignId)) {
+                // Update last known values
+                this.lastCampaignValues = {
+                    campaignId: data.campaignId,
+                    sentCount: data.sentCount,
+                    failedCount: data.failedCount,
+                    lastUpdate: Date.now()
+                };
+                this.handleRealtimeCampaignUpdate(data);
+            }
+        });
+
+        // Listen for new support messages (real-time notifications)
+        this.socket.on('new-support-message', (data) => {
+            const userData = JSON.parse(localStorage.getItem('octobot_user') || '{}');
+
+            // Check if this message is for us
+            if (data.recipientId === userData.id) {
+                // Refresh unread count from API (accurate count)
+                this.loadSupportUnreadCount();
+
+                // If support list modal is open (floating button popup), refresh the list
+                if (document.getElementById('supportListContent')) {
+                    this.refreshSupportListContent();
+                }
+
+                // If support chat modal is open, refresh messages
+                if (document.getElementById('teamChatModalMessages')) {
+                    this.loadTeamChatModalMessages();
+                }
+
+                // If on team management page with support chat open, refresh messages
+                const teamChatMessages = document.getElementById('teamChatMessages');
+                if (teamChatMessages) {
+                    this.loadSupportMessages(this.currentSupportEmployee?.id);
+                }
+
+                // If on team management page support tab showing employee list, refresh it
+                const supportConvsList = document.getElementById('supportConvsList');
+                if (supportConvsList) {
+                    this.loadTeamChat();
+                }
+            }
+        });
+
+        // Listen for real-time permission updates from admin
+        this.socket.on('permissions-updated', async (data) => {
+            const userData = JSON.parse(localStorage.getItem('octobot_user') || '{}');
+
+            // Check if this update is for the current user
+            if (data.userId === userData.id) {
+                // Update permissions in memory
+                this.userPermissions = data.permissions;
+
+                // Reapply restrictions to UI
+                this.applyPermissionRestrictions();
+
+                // Show notification to user
+                this.showToast('تم تحديث صلاحياتك. جاري تطبيق التغييرات...', 'info');
+
+                // Reload the page after a short delay to apply all changes
+                setTimeout(() => {
+                    window.location.reload();
+                }, 2000);
+            }
+        });
+
+        // Listen for real-time analytics updates from webhooks
+        this.socket.on('analytics-update', (data) => {
+            // Update analytics cards in real-time
+            this.updateAnalyticsRealTime(data);
+        });
+
+        this.socket.on('disconnect', () => {
+            console.log('[Socket.IO] Disconnected');
+        });
+    }
+
+    // Update analytics cards in real-time when webhook events are received
+    updateAnalyticsRealTime(data) {
+        if (!data || !data.type) return;
+
+        // Check if we're on the analytics/dashboard page
+        const dashboardPage = document.getElementById('dashboard');
+        if (!dashboardPage || !dashboardPage.classList.contains('active')) {
+            return; // Not on dashboard, skip update
+        }
+
+        // IMPORTANT: Only update if the event is for the currently selected page
+        if (data.pageId && this.selectedAnalyticsPage && data.pageId !== this.selectedAnalyticsPage) {
+            console.log('[Analytics] Ignoring update for different page:', data.pageId, 'vs selected:', this.selectedAnalyticsPage);
+            return; // Event is for a different page, ignore
+        }
+
+        // Handle SYNC events (full stats replacement from hourly sync job)
+        if (data.type === 'sync' && data.stats) {
+            console.log('[Analytics] Sync update received for page:', data.pageId, data.stats);
+            // For sync events, we reload the full analytics to get accurate data
+            // This avoids flickering by not updating individual cards
+            // Just log it for now - the next user action or heartbeat will refresh
+            return;
+        }
+
+        // Handle individual webhook events (increment by 1)
+        // Only for reaction, comment, share, message types
+        const elementMap = {
+            'reaction': null, // Reactions go to engagement total
+            'comment': 'analyticsCommentsTotal',
+            'share': 'analyticsSharesTotal',
+            'message': 'analyticsMessagesTotal'
+        };
+
+        // Increment the specific metric
+        if (data.type === 'comment' || data.type === 'share' || data.type === 'message') {
+            const elementId = elementMap[data.type];
+            if (elementId) {
+                const element = document.getElementById(elementId);
+                if (element) {
+                    const currentValue = parseInt(element.textContent.replace(/[^0-9]/g, '')) || 0;
+                    element.textContent = (currentValue + 1).toLocaleString('ar-EG');
+                    element.style.animation = 'none';
+                    setTimeout(() => { element.style.animation = 'pulse 0.5s ease'; }, 10);
+                }
+            }
+        }
+
+        // Update engagement total for reactions/comments/shares
+        if (['reaction', 'comment', 'share'].includes(data.type)) {
+            const engagementEl = document.getElementById('analyticsEngagementTotal');
+            if (engagementEl) {
+                const currentValue = parseInt(engagementEl.textContent.replace(/[^0-9]/g, '')) || 0;
+                engagementEl.textContent = (currentValue + 1).toLocaleString('ar-EG');
+                engagementEl.style.animation = 'none';
+                setTimeout(() => { engagementEl.style.animation = 'pulse 0.5s ease'; }, 10);
+            }
+        }
+    }
+
+    // Track team activity for performance dashboard
+    async trackTeamActivity(actionType, platform, conversationId = null, messageLength = null) {
+        try {
+            const userData = JSON.parse(localStorage.getItem('octobot_user') || '{}');
+            if (!userData.id || !userData.name) return;
+
+            await fetch(`${this.API_URL}/api/team/activity`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    userId: userData.id,
+                    userName: userData.name,
+                    actionType,
+                    platform,
+                    conversationId,
+                    messageLength
+                })
+            });
+        } catch (err) {
+            // Silent fail - don't interrupt main flow
+            console.log('[Tracking] Activity tracking failed:', err.message);
+        }
+    }
+
+    // Start heartbeat to track online status
+    startHeartbeat() {
+        // Send initial heartbeat
+        this.sendHeartbeat();
+
+        // Send heartbeat every 30 seconds and refresh analytics
+        this.heartbeatInterval = setInterval(() => {
+            this.sendHeartbeat();
+            // Auto-refresh analytics if on dashboard
+            if (document.getElementById('dashboard')?.classList.contains('active') && this.selectedAnalyticsPage) {
+                this.loadAnalyticsData(this.selectedAnalyticsPage);
+            }
+        }, 30 * 1000);
+
+        // Mark user as offline when leaving page
+        window.addEventListener('beforeunload', () => {
+            this.markUserOffline();
+        });
+    }
+
+    // Send heartbeat to server
+    async sendHeartbeat() {
+        try {
+            const userData = JSON.parse(localStorage.getItem('octobot_user') || '{}');
+            if (!userData.id) return;
+
+            await fetch(`${this.API_URL}/api/heartbeat`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    userId: userData.id,
+                    userName: userData.name || 'Unknown',
+                    role: userData.role || 'employee'
+                })
+            });
+        } catch (err) {
+            // Silent fail
+        }
+    }
+
+    // Mark user as offline
+    async markUserOffline() {
+        try {
+            const userData = JSON.parse(localStorage.getItem('octobot_user') || '{}');
+            if (!userData.id) return;
+
+            // Use sendBeacon for reliable offline notification
+            const data = JSON.stringify({ userId: userData.id });
+            navigator.sendBeacon(`${this.API_URL}/api/user-offline`, data);
+        } catch (err) {
+            // Silent fail
+        }
+    }
+
+    // Create floating team chat button for easy access
+    createTeamChatFloatingButton() {
+        // Remove existing button if any
+        const existingBtn = document.getElementById('teamChatFloatingBtn');
+        if (existingBtn) existingBtn.remove();
+
+        // Create floating button
+        const btn = document.createElement('div');
+        btn.id = 'teamChatFloatingBtn';
+        btn.innerHTML = `
+            <button onclick="app.openTeamChatModal()" style="
+                position: fixed;
+                bottom: 20px;
+                left: 20px;
+                width: 60px;
+                height: 60px;
+                border-radius: 50%;
+                background: linear-gradient(135deg, #22c55e, #16a34a);
+                color: white;
+                border: none;
+                cursor: pointer;
+                box-shadow: 0 4px 20px rgba(34, 197, 94, 0.5);
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                font-size: 24px;
+                z-index: 9000;
+                transition: all 0.3s ease;
+            " title="الدعم الفني">
+                <i class="fas fa-headset"></i>
+            </button>
+            <span id="teamChatBadge" style="
+                position: fixed;
+                bottom: 65px;
+                left: 65px;
+                background: #ef4444;
+                color: white;
+                border-radius: 50%;
+                width: 20px;
+                height: 20px;
+                display: none;
+                align-items: center;
+                justify-content: center;
+                font-size: 11px;
+                font-weight: bold;
+                z-index: 9001;
+            ">0</span>
+        `;
+        document.body.appendChild(btn);
+
+        // Add hover effect
+        const button = btn.querySelector('button');
+        button.addEventListener('mouseenter', () => {
+            button.style.transform = 'scale(1.1)';
+            button.style.boxShadow = '0 6px 30px rgba(34, 197, 94, 0.7)';
+        });
+        button.addEventListener('mouseleave', () => {
+            button.style.transform = 'scale(1)';
+            button.style.boxShadow = '0 4px 20px rgba(34, 197, 94, 0.5)';
+        });
+
+        // Load initial unread count and start polling
+        this.loadSupportUnreadCount();
+        this.startSupportBadgePolling();
+    }
+
+    // Load unread support message count from API
+    async loadSupportUnreadCount() {
+        try {
+            const token = localStorage.getItem('octobot_token');
+            if (!token) return;
+
+            const response = await fetch(`${this.API_URL}/api/support/unread`, {
+                headers: { 'Authorization': `Bearer ${token}` }
+            });
+            const data = await response.json();
+
+            this.updateSupportBadge(data.unreadCount || 0);
+        } catch (err) {
+            console.log('[Support Badge] Error loading unread count:', err.message);
+        }
+    }
+
+    // Update the badge display
+    updateSupportBadge(count) {
+        const badge = document.getElementById('teamChatBadge');
+        if (badge) {
+            if (count > 0) {
+                badge.textContent = count > 99 ? '99+' : count;
+                badge.style.display = 'flex';
+            } else {
+                badge.style.display = 'none';
+            }
+        }
+    }
+
+    // Start polling for unread count
+    startSupportBadgePolling() {
+        // Stop existing polling
+        if (this.supportBadgePollInterval) {
+            clearInterval(this.supportBadgePollInterval);
+        }
+
+        // Poll every 30 seconds
+        this.supportBadgePollInterval = setInterval(() => {
+            this.loadSupportUnreadCount();
+        }, 30000);
+    }
+
+    // Open support chat modal (floating widget)
+    openTeamChatModal() {
+        // Remove existing modal if any
+        const existingModal = document.getElementById('teamChatModal');
+        if (existingModal) existingModal.remove();
+
+        const userData = JSON.parse(localStorage.getItem('octobot_user') || '{}');
+        const isAdmin = userData.role === 'admin';
+
+        if (isAdmin) {
+            this.openSupportListModal();
+        } else {
+            this.openSupportChatModal(null, 'الدعم الفني');
+        }
+    }
+
+    // Admin: Show list of employees for support
+    async openSupportListModal() {
+        const modal = document.createElement('div');
+        modal.id = 'teamChatModal';
+        modal.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.6);display:flex;align-items:center;justify-content:center;z-index:10000;';
+        modal.innerHTML = `
+            <div style="background:var(--bg-card);border-radius:20px;width:95%;max-width:500px;max-height:80vh;overflow:hidden;box-shadow:0 20px 60px rgba(0,0,0,0.3);display:flex;flex-direction:column;">
+                <div style="padding:16px 20px;background:linear-gradient(135deg,#22c55e,#16a34a);color:white;display:flex;align-items:center;gap:12px;">
+                    <i class="fas fa-headset" style="font-size:24px;"></i>
+                    <div style="flex:1;"><div style="font-weight:600;font-size:16px;">الدعم الفني</div><div style="font-size:12px;opacity:0.8;">محادثات الموظفين</div></div>
+                    <button onclick="document.getElementById('teamChatModal').remove()" style="background:none;border:none;color:white;font-size:24px;cursor:pointer;">&times;</button>
+                </div>
+                <div id="supportListContent" style="flex:1;overflow-y:auto;padding:16px;"><div style="text-align:center;padding:20px;color:var(--text-secondary);"><i class="fas fa-spinner fa-spin"></i></div></div>
+            </div>
+        `;
+        document.body.appendChild(modal);
+        modal.addEventListener('click', (e) => { if (e.target === modal) modal.remove(); });
+
+        try {
+            const token = localStorage.getItem('octobot_token');
+            const response = await fetch(`${this.API_URL}/api/support/conversations`, { headers: { 'Authorization': `Bearer ${token}` } });
+            const data = await response.json();
+            const conversations = data.conversations || [];
+            const listContent = document.getElementById('supportListContent');
+            if (conversations.length === 0) {
+                listContent.innerHTML = '<div style="text-align:center;padding:40px;color:var(--text-secondary);"><i class="fas fa-inbox" style="font-size:48px;opacity:0.3;"></i><p>لا توجد محادثات</p></div>';
+                return;
+            }
+            listContent.innerHTML = conversations.map(conv => `<div onclick="app.openSupportChatModal('${conv.id}', '${conv.name}')" style="display:flex;align-items:center;gap:12px;padding:14px;border-radius:12px;cursor:pointer;border:1px solid var(--border-color);margin-bottom:10px;${conv.unreadCount > 0 ? 'background:rgba(34,197,94,0.1);border-color:#22c55e;' : ''}"><div style="width:46px;height:46px;border-radius:50%;background:linear-gradient(135deg,#22c55e,#16a34a);display:flex;align-items:center;justify-content:center;color:white;font-weight:600;font-size:18px;">${conv.name.charAt(0)}</div><div style="flex:1;"><div style="font-weight:600;color:var(--text-primary);">${conv.name}${conv.unreadCount > 0 ? `<span style="background:#22c55e;color:white;font-size:11px;padding:2px 8px;border-radius:10px;margin-right:8px;">${conv.unreadCount}</span>` : ''}</div><div style="font-size:13px;color:var(--text-secondary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${conv.lastMessage || 'لا توجد رسائل'}</div></div><i class="fas fa-chevron-left" style="color:var(--text-secondary);"></i></div>`).join('');
+        } catch (err) { console.error('Load support list error:', err); }
+    }
+
+    // Refresh support list content without recreating modal
+    async refreshSupportListContent() {
+        try {
+            const listContent = document.getElementById('supportListContent');
+            if (!listContent) return;
+
+            const token = localStorage.getItem('octobot_token');
+            const response = await fetch(`${this.API_URL}/api/support/conversations`, {
+                headers: { 'Authorization': `Bearer ${token}` }
+            });
+            const data = await response.json();
+            const conversations = data.conversations || [];
+
+            if (conversations.length === 0) {
+                listContent.innerHTML = '<div style="text-align:center;padding:40px;color:var(--text-secondary);"><i class="fas fa-inbox" style="font-size:48px;opacity:0.3;"></i><p>لا توجد محادثات</p></div>';
+                return;
+            }
+
+            listContent.innerHTML = conversations.map(conv => `<div onclick="app.openSupportChatModal('${conv.id}', '${conv.name}')" style="display:flex;align-items:center;gap:12px;padding:14px;border-radius:12px;cursor:pointer;border:1px solid var(--border-color);margin-bottom:10px;${conv.unreadCount > 0 ? 'background:rgba(34,197,94,0.1);border-color:#22c55e;' : ''}"><div style="width:46px;height:46px;border-radius:50%;background:linear-gradient(135deg,#22c55e,#16a34a);display:flex;align-items:center;justify-content:center;color:white;font-weight:600;font-size:18px;">${conv.name.charAt(0)}</div><div style="flex:1;"><div style="font-weight:600;color:var(--text-primary);">${conv.name}${conv.unreadCount > 0 ? `<span style="background:#22c55e;color:white;font-size:11px;padding:2px 8px;border-radius:10px;margin-right:8px;">${conv.unreadCount}</span>` : ''}</div><div style="font-size:13px;color:var(--text-secondary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${conv.lastMessage || 'لا توجد رسائل'}</div></div><i class="fas fa-chevron-left" style="color:var(--text-secondary);"></i></div>`).join('');
+        } catch (err) {
+            console.error('Refresh support list error:', err);
+        }
+    }
+
+    // Open support chat modal with specific employee or admin
+    openSupportChatModal(employeeId, employeeName) {
+        const existingModal = document.getElementById('teamChatModal');
+        if (existingModal) existingModal.remove();
+        this.currentSupportEmployee = employeeId ? { id: employeeId, name: employeeName } : null;
+        const userData = JSON.parse(localStorage.getItem('octobot_user') || '{}');
+        const isAdmin = userData.role === 'admin';
+        const modal = document.createElement('div');
+        modal.id = 'teamChatModal';
+        modal.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.6);display:flex;align-items:center;justify-content:center;z-index:10000;';
+        modal.innerHTML = `
+            <div style="background:var(--bg-card);border-radius:20px;width:95%;max-width:600px;height:80vh;max-height:700px;overflow:hidden;box-shadow:0 20px 60px rgba(0,0,0,0.3);display:flex;flex-direction:column;">
+                <div style="padding:16px 20px;background:linear-gradient(135deg,#22c55e,#16a34a);color:white;display:flex;align-items:center;gap:12px;">
+                    ${isAdmin ? `<button onclick="app.openSupportListModal()" style="background:rgba(255,255,255,0.2);border:none;color:white;width:36px;height:36px;border-radius:50%;cursor:pointer;"><i class="fas fa-arrow-right"></i></button>` : '<i class="fas fa-headset" style="font-size:24px;"></i>'}
+                    <div style="flex:1;"><div style="font-weight:600;font-size:16px;">${employeeName || 'الدعم الفني'}</div><div style="font-size:12px;opacity:0.8;">${isAdmin ? 'محادثة مع موظف' : 'تواصل مع الإدارة'}</div></div>
+                    <button onclick="document.getElementById('teamChatModal').remove();app.stopTeamChatModalPolling();" style="background:none;border:none;color:white;font-size:24px;cursor:pointer;">&times;</button>
+                </div>
+                <div id="teamChatModalMessages" style="flex:1;overflow-y:auto;padding:16px;background:var(--bg-secondary);"><div style="text-align:center;padding:20px;color:var(--text-secondary);"><i class="fas fa-spinner fa-spin"></i></div></div>
+                
+                <div id="teamChatFilePreview" style="display:none;padding:10px;background:var(--bg-secondary);border-top:1px solid var(--border-color);">
+                    <div style="display:inline-block;position:relative;">
+                        <img id="previewImage" src="" style="height:60px;border-radius:8px;border:1px solid var(--border-color);">
+                        <button onclick="document.getElementById('supportFileInput').value='';document.getElementById('teamChatFilePreview').style.display='none';" style="position:absolute;top:-8px;right:-8px;background:red;color:white;border:none;border-radius:50%;width:20px;height:20px;font-size:12px;cursor:pointer;">&times;</button>
+                    </div>
+                </div>
+
+                <div style="padding:12px 16px;background:var(--bg-card);border-top:1px solid var(--border-color);">
+                    <form onsubmit="app.sendTeamMessageModal(event)" style="display:flex;gap:10px;align-items:center;">
+                        <input type="file" id="supportFileInput" hidden accept="image/*" onchange="const file=this.files[0];if(file){const reader=new FileReader();reader.onload=e=>{document.getElementById('previewImage').src=e.target.result;document.getElementById('teamChatFilePreview').style.display='block';};reader.readAsDataURL(file);}">
+                        <button type="button" onclick="document.getElementById('supportFileInput').click()" style="background:none;border:none;color:var(--text-secondary);font-size:20px;cursor:pointer;padding:8px;"><i class="fas fa-paperclip"></i></button>
+                        <input type="text" id="teamChatModalInput" placeholder="اكتب رسالتك..." style="flex:1;padding:12px 16px;border:1px solid var(--border-color);border-radius:10px;background:var(--bg-secondary);color:var(--text-primary);font-size:14px;">
+                        <button type="submit" style="background:linear-gradient(135deg,#22c55e,#16a34a);color:white;border:none;padding:12px 20px;border-radius:10px;cursor:pointer;font-weight:500;"><i class="fas fa-paper-plane"></i></button>
+                    </form>
+                </div>
+            </div>
+        `;
+        document.body.appendChild(modal);
+        modal.addEventListener('click', (e) => { if (e.target === modal) { modal.remove(); this.stopTeamChatModalPolling(); } });
+        this.loadTeamChatModalMessages();
+        this.startTeamChatModalPolling();
+    }
+
+    // Load messages in modal
+    async loadTeamChatModalMessages() {
+        try {
+            const container = document.getElementById('teamChatModalMessages');
+            if (!container) return;
+
+            const token = localStorage.getItem('octobot_token');
+            const employeeId = this.currentSupportEmployee?.id;
+            const url = employeeId
+                ? `${this.API_URL}/api/support/messages?userId=${employeeId}`
+                : `${this.API_URL}/api/support/messages`;
+
+            const response = await fetch(url, {
+                headers: { 'Authorization': `Bearer ${token}` }
+            });
+
+            if (!response.ok) {
+                console.warn('Failed to load messages (ignoring):', response.status);
+                return; // Don't clear UI on error (prevents flickering)
+            }
+
+            const data = await response.json();
+
+            // Only show empty state if it's a fresh load (container has loading spinner) or explicitly empty
+            // If we already have messages, don't show empty state during polling to avoid jitter
+            if ((!data.messages || data.messages.length === 0)) {
+                if (container.innerHTML.includes('fa-spinner') || container.innerHTML.trim() === '') {
+                    container.innerHTML = `<div style="text-align:center;color:var(--text-secondary);padding:40px;"><i class="fas fa-comments" style="font-size:48px;opacity:0.3;margin-bottom:16px;"></i><p>ابدأ المحادثة!</p></div>`;
+                }
+                return;
+            }
+
+            const userData = JSON.parse(localStorage.getItem('octobot_user') || '{}');
+
+            // Scroll management
+            const isAtBottom = container.scrollHeight - container.scrollTop <= container.clientHeight + 100;
+            const wasEmpty = container.innerHTML.trim() === '' || container.innerHTML.includes('fa-spinner');
+
+            container.innerHTML = data.messages.map(msg => {
+                const isMe = msg.senderId === userData.id;
+                const time = new Date(msg.createdAt).toLocaleTimeString('ar-EG', { hour: '2-digit', minute: '2-digit' });
+                return `
+                    <div style="display:flex;justify-content:${isMe ? 'flex-end' : 'flex-start'};margin-bottom:12px;">
+                        <div style="max-width:70%;${isMe ? '' : 'display:flex;gap:10px;'}">
+                            ${!isMe ? `<div style="width:36px;height:36px;border-radius:50%;background:linear-gradient(135deg,#22c55e,#16a34a);display:flex;align-items:center;justify-content:center;color:white;font-weight:600;">${msg.senderName.charAt(0)}</div>` : ''}
+                            <div>
+                                ${!isMe ? `<div style="font-size:12px;color:var(--text-secondary);margin-bottom:4px;">${msg.senderName}</div>` : ''}
+                                <div style="background:${isMe ? 'linear-gradient(135deg,#22c55e,#16a34a)' : 'var(--bg-card)'};color:${isMe ? 'white' : 'var(--text-primary)'};padding:${msg.attachment ? '6px' : '12px 16px'};border-radius:16px;${!isMe ? 'border:1px solid var(--border-color);' : ''}">
+                                    ${msg.attachment && msg.attachment.type === 'image' ?
+                        `<img src="${msg.attachment.url}" style="max-width:100%;border-radius:12px;cursor:pointer;" onclick="window.open(this.src, '_blank')">`
+                        : ''}
+                                    ${msg.message ? `<div style="${msg.attachment ? 'padding:8px 8px 4px 8px;' : ''}">${msg.message}</div>` : ''}
+                                </div>
+                                <div style="font-size:11px;color:var(--text-secondary);margin-top:4px;text-align:${isMe ? 'left' : 'right'};">${time}</div>
+                            </div>
+                        </div>
+                    </div>
+                `;
+            }).join('');
+
+            if (wasEmpty || isAtBottom) {
+                container.scrollTop = container.scrollHeight;
+            }
+
+            // Mark as read and refresh badge count
+            fetch(`${this.API_URL}/api/support/mark-read`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+                body: JSON.stringify({ senderId: employeeId })
+            }).then(() => {
+                // Refresh badge count after marking as read
+                this.loadSupportUnreadCount();
+                // Refresh team management list if visible
+                const supportConvsList = document.getElementById('supportConvsList');
+                if (supportConvsList) {
+                    this.loadTeamChat();
+                }
+            });
+        } catch (err) {
+            console.error('Load support modal error:', err);
+        }
+    }
+
+    // Refresh team chat modal
+    refreshTeamChatModal() {
+        this.loadTeamChatModalMessages();
+    }
+
+    // Start polling for modal
+    startTeamChatModalPolling() {
+        this.stopTeamChatModalPolling();
+        this.teamChatModalPollInterval = setInterval(() => {
+            if (document.getElementById('teamChatModal')) {
+                this.loadTeamChatModalMessages();
+            } else {
+                this.stopTeamChatModalPolling();
+            }
+        }, 5000);
+    }
+
+    // Stop modal polling
+    stopTeamChatModalPolling() {
+        if (this.teamChatModalPollInterval) {
+            clearInterval(this.teamChatModalPollInterval);
+            this.teamChatModalPollInterval = null;
+        }
+    }
+
+    // Open linked conversation from team chat
+    async openLinkedConversation(platform, conversationId, pageId) {
+        console.log('[TeamChat] Opening linked conversation:', platform, conversationId, pageId);
+
+        // Close the team chat modal
+        const modal = document.getElementById('teamChatModal');
+        if (modal) modal.remove();
+        this.stopTeamChatModalPolling();
+
+        if (platform === 'facebook') {
+            // Navigate to Facebook messages section
+            const navItem = document.querySelector('[data-page="inbox"]');
+            if (navItem) navItem.click();
+
+            // Wait for page to load then fetch and select conversation
+            setTimeout(async () => {
+                // Select the page first if we have it
+                if (pageId) {
+                    const pageSelect = document.getElementById('inboxPageSelect');
+                    if (pageSelect) pageSelect.value = pageId;
+                }
+
+                // Fetch conversation data to get participantId
+                try {
+                    this.showToast('جاري تحميل المحادثة...', 'success');
+
+                    const response = await fetch(`${this.API_URL}/api/inbox/${window.fbIntegration.userId}/${pageId}/conversations?limit=100`);
+                    const data = await response.json();
+
+                    // Find the conversation by ID
+                    const conv = data.conversations?.find(c => c.id === conversationId);
+
+                    if (conv && conv.participantId) {
+                        console.log('[TeamChat] Found conversation with participant:', conv.participant, conv.participantId);
+                        this.loadMessages(pageId, conversationId, conv.participant, conv.participantId);
+                    } else {
+                        console.warn('[TeamChat] Conversation not found, trying without participantId');
+                        // Try to load anyway, but send might fail
+                        this.loadMessages(pageId, conversationId, 'عميل', conversationId);
+                        this.showToast('⚠️ لم يتم العثور على بيانات المحادثة', 'warning');
+                    }
+                } catch (err) {
+                    console.error('[TeamChat] Error fetching conversation:', err);
+                    this.showToast('خطأ في تحميل المحادثة', 'error');
+                }
+            }, 500);
+        } else if (platform === 'instagram') {
+            // Navigate to Instagram section
+            const navItem = document.querySelector('[data-page="instagram"]');
+            if (navItem) navItem.click();
+
+            setTimeout(async () => {
+                try {
+                    this.showToast('جاري فتح محادثة انستجرام...', 'success');
+
+                    // Use openIgThread which properly switches to chat view
+                    // conversationId here is the threadId from Instagram
+                    if (typeof this.openIgThread === 'function') {
+                        // Try to get thread title from stored conversations
+                        const conv = this.igConversations?.find(c => c.id === conversationId);
+                        const title = conv?.title || conv?.users?.[0]?.username || 'محادثة';
+
+                        await this.openIgThread(conversationId, title);
+                        console.log('[TeamChat] Opened Instagram thread:', conversationId, title);
+                    } else {
+                        // Fallback: set thread and load messages manually
+                        this.currentIgThread = conversationId;
+                        if (typeof this.loadIgMessages === 'function') {
+                            await this.loadIgMessages(true);
+                        }
+                    }
+                } catch (err) {
+                    console.error('[TeamChat] Error opening Instagram chat:', err);
+                    this.showToast('خطأ في فتح المحادثة', 'error');
+                }
+            }, 800);  // Slightly longer wait for Instagram section to load
+        }
+    }
+
+    // Send message from modal
+    async sendTeamMessageModal(event) {
+        event.preventDefault();
+
+        const input = document.getElementById('teamChatModalInput');
+        const fileInput = document.getElementById('supportFileInput');
+        const message = input?.value.trim();
+        const file = fileInput?.files[0];
+
+        if (!message && !file) return;
+
+        const token = localStorage.getItem('octobot_token');
+
+        // Optimistic UI clear
+        const currentMessage = input.value;
+        input.value = '';
+        if (fileInput) fileInput.value = '';
+        document.getElementById('teamChatFilePreview').style.display = 'none';
+
+        try {
+            const formData = new FormData();
+            if (this.currentSupportEmployee?.id) formData.append('receiverId', this.currentSupportEmployee.id);
+            if (message) formData.append('message', message);
+            if (file) formData.append('file', file);
+
+            await fetch(`${this.API_URL}/api/support/send`, {
+                method: 'POST',
+                headers: { 'Authorization': `Bearer ${token}` }, // Content-Type is auto-set with FormData
+                body: formData
+            });
+            await this.loadTeamChatModalMessages();
+        } catch (err) {
+            console.error('Send support message error:', err);
+            this.showToast('فشل إرسال الرسالة', 'error');
+            // Restore input if failed
+            input.value = currentMessage;
+        }
+    }
+
+    // Load current user's permissions from server
+    async loadUserPermissions() {
+        const token = localStorage.getItem('octobot_token');
+        const userData = JSON.parse(localStorage.getItem('octobot_user') || '{}');
+
+        // Default permissions (admin gets full access)
+        this.userPermissions = {
+            facebook: { view: true, send: true, broadcast: true, manage: true },
+            telegram: { view: true, send: true, manage: true },
+            whatsapp: { view: true, send: true, manage: true },
+            instagram: { view: true, send: true, manage: true },
+            ecommerce: { view: true, manage: true },
+            sheets: { view: true, manage: true }
+        };
+        this.userRole = userData.role || 'agent';
+        this.sharedTgUserId = null; // Shared Telegram userId for employees
+        this.sharedIgUserId = null; // Shared Instagram userId for employees
+
+        // Admin always has full permissions
+        if (this.userRole === 'admin') {
+            return;
+        }
+
+        // Fetch permissions and shared platform access for non-admin users
+        try {
+            const [meResponse, sharedResponse] = await Promise.all([
+                fetch(`${this.API_URL}/api/auth/me`, {
+                    headers: { 'Authorization': `Bearer ${token}` }
+                }),
+                fetch(`${this.API_URL}/api/shared-platforms`, {
+                    headers: { 'Authorization': `Bearer ${token}` }
+                })
+            ]);
+
+            const meData = await meResponse.json();
+            if (meData.user && meData.user.permissions) {
+                this.userPermissions = meData.user.permissions;
+            }
+
+            // Log loaded permissions for debugging
+            console.log('[Permissions] Loaded for user:', this.userId, 'Role:', this.userRole);
+            console.log('[Permissions] Facebook:', JSON.stringify(this.userPermissions?.facebook));
+            console.log('[Permissions] Facebook allowed pages:', this.userPermissions?.facebook?.allowedPages);
+
+            // Employees use their own Telegram/Instagram accounts
+            // Sessions are saved per userId in .tg_sessions/ and .ig_sessions/
+            await sharedResponse.json(); // Still fetch for Facebook permissions
+            this.sharedTgUserId = null;  // Employees use their own TG account
+            this.sharedIgUserId = null;  // Employees use their own IG account
+            console.log('[App] Employees use their own Telegram/Instagram accounts');
+        } catch (err) {
+            console.error('[Permissions] Failed to load:', err);
+        }
+    }
+
+    // Check if user has permission for a platform action
+    hasPermission(platform, action = 'view') {
+        // Admin always has full access
+        if (this.userRole === 'admin') return true;
+
+        const platformPerms = this.userPermissions?.[platform];
+        return platformPerms?.[action] === true;
+    }
+
+    // Get the Telegram userId (each user uses their own account)
+    getTgUserId() {
+        return this.userId;
+    }
+
+    // Get the Instagram userId (each user uses their own account)
+    getIgUserId() {
+        return this.userId;
+    }
+
+    // Apply permission restrictions to navigation and sections
+    applyPermissionRestrictions() {
+        // Skip for admin
+        if (this.userRole === 'admin') return;
+
+        const navItems = {
+            'pages': 'facebook',
+            'inbox': 'facebook',
+            'telegram': 'telegram',
+            'whatsapp': 'whatsapp',
+            'instagram': 'instagram',
+            'ecommerce': 'ecommerce',
+            'sheets': 'sheets'
+        };
+
+        // Hide nav items for platforms without view permission
+        Object.entries(navItems).forEach(([page, platform]) => {
+            const navItem = document.querySelector(`.nav-item[data-page="${page}"]`);
+            if (navItem) {
+                if (!this.hasPermission(platform, 'view')) {
+                    navItem.style.display = 'none';
+                } else {
+                    navItem.style.display = 'flex';
+                }
+            }
+        });
+
+        // FACEBOOK permissions
+        // Send = Reply to inbox messages
+        if (!this.hasPermission('facebook', 'send')) {
+            document.querySelectorAll('#chatInput, #replyInput, .send-reply-btn, .reply-btn').forEach(el => {
+                el.style.display = 'none';
+            });
+        }
+        // Broadcast = Use broadcast/campaign feature
+        if (!this.hasPermission('facebook', 'broadcast')) {
+            document.querySelectorAll('.broadcast-section, #broadcastSection, .broadcast-btn, [data-page="broadcast"]').forEach(el => {
+                el.style.display = 'none';
+            });
+            // Also hide the broadcast nav item
+            const broadcastNav = document.querySelector('.nav-item[data-page="broadcast"]');
+            if (broadcastNav) broadcastNav.style.display = 'none';
+        }
+        // Manage = Publish posts
+        if (!this.hasPermission('facebook', 'manage')) {
+            document.querySelectorAll('.publish-btn, #addPostBtn, #postModal .btn-primary, .page-settings-btn').forEach(el => {
+                el.style.display = 'none';
+            });
+        }
+
+        // TELEGRAM permissions
+        if (!this.hasPermission('telegram', 'send')) {
+            document.querySelectorAll('#tgMessageInput, .tg-send-btn, .telegram-send-btn').forEach(el => {
+                el.style.display = 'none';
+            });
+        }
+        // Employees can always logout from their own Telegram account
+        // (manage permission no longer needed for personal logout)
+
+        // WHATSAPP permissions
+        if (!this.hasPermission('whatsapp', 'send')) {
+            document.querySelectorAll('#waMessageInput, .wa-send-btn, .whatsapp-send-btn').forEach(el => {
+                el.style.display = 'none';
+            });
+        }
+        if (!this.hasPermission('whatsapp', 'manage')) {
+            document.querySelectorAll('.wa-logout-btn, #logoutWhatsApp').forEach(el => {
+                el.style.display = 'none';
+            });
+        }
+
+        // INSTAGRAM permissions
+        if (!this.hasPermission('instagram', 'send')) {
+            document.querySelectorAll('#igMessageInput, .ig-send-btn, .instagram-send-btn').forEach(el => {
+                el.style.display = 'none';
+            });
+        }
+        // Employees can always logout from their own Instagram account
+        // (manage permission no longer needed for personal logout)
+
+        // TEAM MANAGEMENT - Admin only
+        const teamNav = document.querySelector('.nav-item[data-page="team"]');
+        if (teamNav) {
+            teamNav.style.display = 'none'; // Hide for all non-admin users
+        }
+
+        console.log('[Permissions] Restrictions applied for role:', this.userRole);
+    }
+
+    async initFacebook() {
+        // For non-admin users, try to use shared Facebook access
+        if (this.userRole !== 'admin' && window.fbIntegration) {
+            const sharedSuccess = await window.fbIntegration.initSharedAccess();
+            if (sharedSuccess) {
+                console.log('[App] Using shared Facebook access');
+            }
+        }
+        await this.updateFbStatus();
+        await this.loadFbPages();
+    }
+
+    // Initialize Instagram - employees use their own accounts
+    async initInstagram() {
+        // All users (admin and employees) use their own Instagram accounts
+        // Sessions are saved per userId in .ig_sessions/ directory
+        // Auto-check if this user already has a session
+        const userId = this.getIgUserId();
+        try {
+            const response = await fetch(`${this.API_URL}/api/ig/${userId}/status`);
+            const data = await response.json();
+            if (data.loggedIn && data.account) {
+                console.log('[App] Instagram session found for user, showing inbox');
+                this.showIgInbox(data.account);
+            } else {
+                console.log('[App] No Instagram session for this user, login required');
+            }
+        } catch (err) {
+            console.log('[App] Instagram session check error:', err);
+        }
+    }
+
+    async updateFbStatus() {
+        const container = document.getElementById('fbStatus');
+        if (!container) return;
+        if (window.fbIntegration?.isConnected()) {
+            const user = await window.fbIntegration.getUser();
+            if (user) {
+                // Only show disconnect button for admin users
+                const showDisconnect = this.userRole === 'admin';
+
+                // For employees: show DK-OctoBot branding instead of FB user
+                const displayName = this.userRole === 'admin' ? user.name : 'DK-OctoBot';
+                const displayPicture = this.userRole === 'admin' ? (user.picture || 'https://placehold.co/36') : 'logo-icon.png';
+
+                container.innerHTML = `
+                    <div class="fb-user-info">
+                        <img src="${displayPicture}" class="fb-user-avatar" alt="" style="${this.userRole !== 'admin' ? 'border-radius:8px;' : ''}">
+                        <span class="fb-user-name">${displayName}</span>
+                        ${showDisconnect ? `<button class="fb-disconnect-btn" onclick="app.disconnectFb()"><i class="fas fa-sign-out-alt"></i></button>` : ''}
+                    </div>`;
+                return;
+            }
+        }
+        // Only show connect button for admin users
+        if (this.userRole === 'admin') {
+            container.innerHTML = `<button class="fb-connect-btn" onclick="app.connectFb()"><i class="fab fa-facebook"></i> ربط فيسبوك</button>`;
+        } else {
+            container.innerHTML = `<span style="color:var(--text-secondary);font-size:13px;">لم يتم ربط فيسبوك بعد</span>`;
+        }
+    }
+
+    connectFb() {
+        // Only admin can connect
+        if (this.userRole !== 'admin') {
+            this.showToast('فقط المسؤول يمكنه ربط الفيسبوك', 'error');
+            return;
+        }
+        window.fbIntegration?.connect();
+    }
+
+    async disconnectFb() {
+        // Only admin can disconnect
+        if (this.userRole !== 'admin') {
+            this.showToast('فقط المسؤول يمكنه إلغاء ربط الفيسبوك', 'error');
+            return;
+        }
+        await window.fbIntegration?.disconnect();
+        this.fbPages = [];
+        await this.updateFbStatus();
+        this.renderPagesSection();
+        this.showToast('تم إلغاء ربط فيسبوك', 'success');
+    }
+
+    async loadFbPages() {
+        console.log('[FbPages] Loading pages... User role:', this.userRole);
+
+        if (window.fbIntegration?.isConnected()) {
+            let allPages = await window.fbIntegration.getPages();
+            console.log('[FbPages] Total pages from FB:', allPages?.length);
+
+            // Filter pages for non-admin users FIRST (before sync)
+            if (this.userRole !== 'admin') {
+                const fbPerms = this.userPermissions?.facebook || {};
+                const allowedPages = fbPerms.allowedPages || [];
+                console.log('[FbPages] Employee - Allowed pages:', allowedPages);
+
+                if (allowedPages.length === 0) {
+                    allPages = [];
+                    console.log('[FbPages] No pages allowed for employee');
+                } else {
+                    allPages = allPages.filter(page => allowedPages.includes(page.id));
+                    console.log('[FbPages] Filtered to', allPages.length, 'pages');
+                }
+            }
+
+            // SYNC WITH BACKEND: Only sync the filtered pages (faster for employees)
+            if (allPages && allPages.length > 0) {
+                console.log('[FbPages] Syncing', allPages.length, 'pages with backend...');
+                try {
+                    const token = localStorage.getItem('octobot_token');
+                    const baseUrl = this.API_URL.endsWith('/api') ? this.API_URL.slice(0, -4) : this.API_URL;
+
+                    const res = await fetch(`${baseUrl}/api/facebook/sync-pages`, {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'Authorization': `Bearer ${token}`
+                        },
+                        body: JSON.stringify({ pages: allPages })
+                    });
+
+                    if (res.ok) {
+                        const json = await res.json();
+                        console.log('[FbPages] Sync success:', json);
+                    }
+                } catch (err) {
+                    console.error('[FbPages] Sync error:', err);
+                }
+            }
+
+            this.fbPages = allPages;
+            console.log('[FbPages] Final count:', this.fbPages.length);
+            this.renderPagesSection();
+            this.populateCalendarPageSelector();
+            document.getElementById('fbPagesCount').textContent = this.fbPages.length;
+            if (this.fbPages.length > 0) {
+                await this.renderAnalyticsSection();
+            }
+        } else {
+            console.log('[FbPages] FB Integration not connected');
+        }
+    }
+
+    renderAllPages() {
+        // Dashboard with Analytics
+        document.getElementById('dashboard').innerHTML = `
+            <header class="page-header">
+                <div class="header-content"><h1>لوحة التحكم</h1><p class="subtitle">نظرة عامة على نشاطك</p></div>
+            </header>
+            <div class="stats-grid">
+                <div class="stat-card" style="--accent: var(--primary)">
+                    <div class="stat-icon"><i class="fas fa-calendar-check"></i></div>
+                    <div class="stat-info"><h3 id="subscriptionDuration" style="font-size: 18px; white-space: nowrap;">-</h3><p>مدة الاشتراك</p></div>
+                </div>
+                <div class="stat-card" style="--accent: var(--success)">
+                    <div class="stat-icon"><i class="fas fa-users"></i></div>
+                    <div class="stat-info"><h3 id="fbFanCount">-</h3><p>المعجبين</p></div>
+                </div>
+                <div class="stat-card" style="--accent: #1877f2">
+                    <div class="stat-icon"><i class="fab fa-facebook"></i></div>
+                    <div class="stat-info"><h3 id="fbPagesCount">0</h3><p>صفحات فيسبوك</p></div>
+                </div>
+            </div>
+            <div id="analyticsSection"></div>
+            <div class="dashboard-grid">
+                <div class="card upcoming-posts">
+                    <div class="card-header"><h2><i class="fas fa-calendar-check"></i> المنشورات القادمة</h2><a href="#" class="view-all" data-page="calendar">عرض الكل</a></div>
+                    <div class="card-body"><div id="upcomingList" class="posts-list"></div><div class="empty-state" id="upcomingEmpty"><i class="fas fa-inbox"></i><p>لا توجد منشورات مجدولة</p></div></div>
+                </div>
+                <div class="card quick-notes">
+                    <div class="card-header"><h2><i class="fas fa-sticky-note"></i> ملاحظاتي</h2></div>
+                    <div class="card-body">
+                        <div id="quickNotesContainer" style="display:flex;flex-direction:column;gap:12px;">
+                            <div style="position:relative;">
+                                <textarea id="quickNoteInput" placeholder="✍️ اكتب ملاحظتك هنا..." style="width:100%;min-height:70px;padding:14px 16px;border-radius:12px;border:2px solid var(--border-color);background:var(--bg-secondary);color:var(--text-primary);resize:none;font-family:inherit;font-size:14px;line-height:1.5;transition:border-color 0.3s,box-shadow 0.3s;" onfocus="this.style.borderColor='var(--primary)';this.style.boxShadow='0 0 0 3px rgba(14,165,233,0.1)'" onblur="this.style.borderColor='var(--border-color)';this.style.boxShadow='none'"></textarea>
+                            </div>
+                            <button onclick="app.saveQuickNote()" class="add-note-btn" style="display:flex;align-items:center;justify-content:center;gap:8px;padding:12px 24px;background:var(--bg-card);border:2px dashed var(--border-color);color:var(--text-secondary);border-radius:12px;cursor:pointer;font-weight:600;font-size:14px;transition:all 0.3s;font-family:inherit;" onmouseover="this.style.borderColor='var(--primary)';this.style.color='var(--primary)';this.style.background='rgba(14,165,233,0.05)'" onmouseout="this.style.borderColor='var(--border-color)';this.style.color='var(--text-secondary)';this.style.background='var(--bg-card)'">
+                                <i class="fas fa-plus-circle" style="font-size:16px;"></i>
+                                <span>إضافة ملاحظة</span>
+                            </button>
+                            <div id="quickNotesList" style="display:flex;flex-direction:column;gap:8px;max-height:220px;overflow-y:auto;"></div>
+                        </div>
+                    </div>
+                </div>
+            </div>`;
+
+        // Pages Section  
+        document.getElementById('pages').innerHTML = `
+            <header class="page-header">
+                <div class="header-content"><h1>صفحات فيسبوك</h1><p class="subtitle">إدارة ونشر على صفحاتك</p></div>
+            </header>
+            <div id="pagesContent"></div>`;
+
+        // Calendar
+        document.getElementById('calendar').innerHTML = `
+            <header class="page-header">
+                <div class="header-content"><h1>تقويم المحتوى</h1><p class="subtitle">اضغط على أي يوم لجدولة منشور</p></div>
+            </header>`;
+
+        // Sheets
+        document.getElementById('sheets').innerHTML = `
+            <header class="page-header">
+                <div class="header-content"><h1>Google Sheets</h1><p class="subtitle">عرض وتعديل البيانات في الوقت الفعلي</p></div>
+                <div class="header-actions" style="display:flex; align-items:center; gap:12px;">
+                    <button onclick="app.refreshSheet()" class="btn btn-secondary"><i class="fas fa-sync"></i> تحديث</button>
+                </div>
+            </header>
+            <div class="card">
+                <div class="card-body">
+                    <!-- Connection Area -->
+                    <div id="sheetConnectionArea" style="display:flex; gap:12px; align-items:center; flex-wrap:wrap; margin-bottom:16px;">
+                        <div style="flex:1; min-width:250px; display:flex; gap:10px; align-items:center;">
+                            <input type="text" id="sheetIdInput" placeholder="أدخل Google Sheet ID" style="padding:12px 16px; border-radius:10px; border:1px solid var(--border-color); flex:1; background:var(--bg-secondary); color:var(--text-primary); font-size:14px;">
+                            <button id="sheetConnectBtn" onclick="app.loadSheetData()" class="btn btn-primary" style="white-space:nowrap;"><i class="fas fa-plug"></i> ربط</button>
+                        </div>
+                        <div id="sheetStatusArea" style="display:none; margin-inline-start:auto; align-items:center; gap:12px; background:linear-gradient(135deg, rgba(34,197,94,0.1) 0%, rgba(34,197,94,0.05) 100%); padding:10px 16px; border-radius:10px; border:1px solid rgba(34,197,94,0.3);">
+                            <span style="display:flex; align-items:center; gap:8px; color:var(--success); font-size:13px; font-weight:500;">
+                                <i class="fas fa-circle" style="font-size:8px; animation: pulse 2s infinite;"></i>
+                                متصل - تحديث تلقائي
+                            </span>
+                            <button id="sheetDisconnectBtn" onclick="app.disconnectSheet()" class="btn" style="background:rgba(239,68,68,0.1); color:#ef4444; border:1px solid rgba(239,68,68,0.3); padding:6px 12px; font-size:12px;"><i class="fas fa-unlink"></i> فصل</button>
+                        </div>
+                    </div>
+                    <!-- Search Area -->
+                    <div id="sheetSearchArea" style="display:none; margin-bottom:16px;">
+                        <div style="display:flex; gap:10px; align-items:center;">
+                            <div style="position:relative; flex:1; max-width:350px;">
+                                <i class="fas fa-search" style="position:absolute; right:14px; top:50%; transform:translateY(-50%); color:var(--text-secondary); font-size:14px;"></i>
+                                <input type="text" id="sheetSearchInput" placeholder="بحث في البيانات..." oninput="app.searchInSheet(this.value)" onkeydown="if(event.key==='Enter'){event.preventDefault();app.jumpToNextSearchResult();}" style="width:100%; padding:10px 40px 10px 14px; border-radius:10px; border:1px solid var(--border-color); background:var(--bg-secondary); color:var(--text-primary); font-size:14px;">
+                            </div>
+                            <span id="sheetSearchResults" style="font-size:12px; color:var(--text-secondary);"></span>
+                        </div>
+                    </div>
+                    <!-- Data Container -->
+                    <div id="sheetsDataContainer" style="overflow:auto; max-height:65vh; border:1px solid var(--border-color); border-radius:12px; position:relative;">
+                        <div class="empty-state" style="padding:40px;"><i class="fas fa-table" style="font-size:48px; opacity:0.3; margin-bottom:16px;"></i><p>أدخل معرف الملف لعرض البيانات</p></div>
+                    </div>
+                </div>
+            </div>
+            <style>
+                @keyframes pulse {
+                    0%, 100% { opacity: 1; }
+                    50% { opacity: 0.4; }
+                }
+            </style>`;
+
+
+
+        // Continue Calendar Content (appended to existing header)
+        document.getElementById('calendar').innerHTML += `
+            <!-- Page Selector -->
+            <div class="calendar-page-selector" style="margin-bottom:16px;padding:16px;background:var(--bg-card);border-radius:12px;border:1px solid var(--border-color);">
+                <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
+                    <label style="font-weight:600;color:var(--text-primary);display:flex;align-items:center;gap:8px;">
+                        <i class="fab fa-facebook" style="color:#1877f2;font-size:20px;"></i>
+                        الصفحة:
+                    </label>
+                    <select id="calendarPageSelect" onchange="app.selectCalendarPage(this.value)" style="flex:1;min-width:200px;padding:10px 16px;border-radius:10px;background:var(--bg-secondary);border:2px solid var(--border-color);color:var(--text-primary);font-size:14px;cursor:pointer;">
+                        <option value="">-- اختر صفحة --</option>
+                    </select>
+                    <div id="selectedPageInfo" style="display:none;align-items:center;gap:8px;padding:8px 12px;background:var(--glass);border-radius:8px;">
+                        <img id="selectedPagePic" src="" style="width:28px;height:28px;border-radius:50%;">
+                        <span id="selectedPageName" style="font-weight:500;color:var(--text-primary);"></span>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="calendar-controls" style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
+                <div class="calendar-nav" style="display:flex;align-items:center;gap:12px;">
+                    <button class="btn-icon" id="prevMonth" style="padding:10px;border-radius:10px;background:var(--bg-card);border:1px solid var(--border-color);color:var(--text-primary);cursor:pointer;"><i class="fas fa-chevron-right"></i></button>
+                    <h2 id="currentMonth" style="min-width:150px;text-align:center;font-size:18px;"></h2>
+                    <button class="btn-icon" id="nextMonth" style="padding:10px;border-radius:10px;background:var(--bg-card);border:1px solid var(--border-color);color:var(--text-primary);cursor:pointer;"><i class="fas fa-chevron-left"></i></button>
+                </div>
+                <div style="font-size:12px;color:var(--text-muted);"><i class="fas fa-info-circle"></i> اضغط على يوم لإضافة منشور</div>
+            </div>
+            <div class="calendar-container" style="background:var(--bg-card);border-radius:16px;border:1px solid var(--border-color);overflow:hidden;">
+                <div class="calendar-header" style="display:grid;grid-template-columns:repeat(7,1fr);background:var(--bg-secondary);">
+                    <div class="day-name" style="padding:12px;text-align:center;font-weight:600;color:var(--text-secondary);font-size:13px;">الأحد</div>
+                    <div class="day-name" style="padding:12px;text-align:center;font-weight:600;color:var(--text-secondary);font-size:13px;">الإثنين</div>
+                    <div class="day-name" style="padding:12px;text-align:center;font-weight:600;color:var(--text-secondary);font-size:13px;">الثلاثاء</div>
+                    <div class="day-name" style="padding:12px;text-align:center;font-weight:600;color:var(--text-secondary);font-size:13px;">الأربعاء</div>
+                    <div class="day-name" style="padding:12px;text-align:center;font-weight:600;color:var(--text-secondary);font-size:13px;">الخميس</div>
+                    <div class="day-name" style="padding:12px;text-align:center;font-weight:600;color:var(--text-secondary);font-size:13px;">الجمعة</div>
+                    <div class="day-name" style="padding:12px;text-align:center;font-weight:600;color:var(--text-secondary);font-size:13px;">السبت</div>
+                </div>
+                <div class="calendar-grid" id="calendarGrid" style="display:grid;grid-template-columns:repeat(7,1fr);"></div>
+            </div>
+            
+            <!-- Scheduled Posts List -->
+            <div id="calendarScheduledPosts" style="margin-top:20px;"></div>`;
+
+        // Populate page selector
+        this.populateCalendarPageSelector();
+
+        // Inbox Management - Enhanced Design
+        document.getElementById('inbox').innerHTML = `
+            <style>
+                .msg-container { max-width: 1500px; margin: 0 auto; }
+                
+                /* Hero Banner - Premium Design */
+                .msg-hero {
+                    background: linear-gradient(135deg, #667eea 0%, #764ba2 50%, #0EA5E9 100%);
+                    border-radius: 24px; padding: 28px 36px; margin-bottom: 20px;
+                    display: flex; align-items: center; justify-content: space-between;
+                    box-shadow: 0 12px 40px rgba(102, 126, 234, 0.35), 0 4px 16px rgba(233, 30, 99, 0.15);
+                    position: relative; overflow: hidden;
+                    border: 1px solid rgba(255,255,255,0.15);
+                }
+                .msg-hero::before {
+                    content: ''; position: absolute; top: -50%; right: -20%;
+                    width: 500px; height: 500px; border-radius: 50%;
+                    background: radial-gradient(circle, rgba(255,255,255,0.15) 0%, transparent 70%);
+                    animation: heroGlow 8s ease-in-out infinite alternate;
+                }
+                .msg-hero::after {
+                    content: ''; position: absolute; bottom: -30%; left: -10%;
+                    width: 300px; height: 300px; border-radius: 50%;
+                    background: radial-gradient(circle, rgba(255,255,255,0.1) 0%, transparent 70%);
+                    animation: heroGlow 6s ease-in-out infinite alternate-reverse;
+                }
+                @keyframes heroGlow {
+                    0% { transform: scale(1) translate(0, 0); opacity: 0.5; }
+                    100% { transform: scale(1.2) translate(20px, -20px); opacity: 0.8; }
+                }
+                .msg-hero-content { display: flex; align-items: center; gap: 20px; z-index: 1; position: relative; }
+                .msg-hero-icon {
+                    width: 70px; height: 70px;
+                    background: linear-gradient(135deg, rgba(255,255,255,0.25) 0%, rgba(255,255,255,0.1) 100%);
+                    backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
+                    border-radius: 20px; display: flex; align-items: center; justify-content: center;
+                    font-size: 32px; color: white;
+                    border: 1px solid rgba(255,255,255,0.3);
+                    box-shadow: 0 8px 32px rgba(0,0,0,0.15), inset 0 1px 0 rgba(255,255,255,0.3);
+                    animation: iconFloat 3s ease-in-out infinite;
+                }
+                @keyframes iconFloat {
+                    0%, 100% { transform: translateY(0) rotate(0deg); }
+                    50% { transform: translateY(-8px) rotate(3deg); }
+                }
+                .msg-hero-text h2 { 
+                    color: white; font-size: 22px; font-weight: 800; margin: 0 0 6px 0;
+                    text-shadow: 0 2px 10px rgba(0,0,0,0.15);
+                    letter-spacing: -0.3px;
+                }
+                .msg-hero-text p { 
+                    color: rgba(255,255,255,0.95); font-size: 14px; margin: 0;
+                    display: flex; align-items: center; gap: 8px;
+                }
+                .msg-hero-text p i { font-size: 12px; animation: sparkle 2s ease-in-out infinite; }
+                @keyframes sparkle {
+                    0%, 100% { opacity: 1; transform: scale(1); }
+                    50% { opacity: 0.6; transform: scale(1.2); }
+                }
+                .msg-hero-stats { display: flex; gap: 16px; z-index: 1; position: relative; }
+                .msg-hero-stat { 
+                    text-align: center; padding: 16px 24px;
+                    background: linear-gradient(135deg, rgba(255,255,255,0.2) 0%, rgba(255,255,255,0.08) 100%);
+                    backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
+                    border-radius: 16px; min-width: 110px;
+                    border: 1px solid rgba(255,255,255,0.25);
+                    box-shadow: 0 8px 32px rgba(0,0,0,0.1), inset 0 1px 0 rgba(255,255,255,0.2);
+                    transition: all 0.3s ease;
+                }
+                .msg-hero-stat:hover { 
+                    transform: translateY(-4px); 
+                    box-shadow: 0 12px 40px rgba(0,0,0,0.15), inset 0 1px 0 rgba(255,255,255,0.3);
+                    background: linear-gradient(135deg, rgba(255,255,255,0.28) 0%, rgba(255,255,255,0.12) 100%);
+                }
+                .msg-hero-stat-icon {
+                    width: 36px; height: 36px; margin: 0 auto 8px auto;
+                    background: rgba(255,255,255,0.2); border-radius: 10px;
+                    display: flex; align-items: center; justify-content: center;
+                    font-size: 16px; color: white;
+                }
+                .msg-hero-stat-num { 
+                    color: white; font-size: 32px; font-weight: 900;
+                    text-shadow: 0 2px 10px rgba(0,0,0,0.2);
+                    line-height: 1;
+                }
+                .msg-hero-stat-label { 
+                    color: rgba(255,255,255,0.95); font-size: 12px; margin-top: 6px;
+                    font-weight: 500; letter-spacing: 0.3px;
+                }
+                
+                /* Main Layout */
+                .msg-main { display: flex; gap: 16px; height: calc(100vh - 260px); min-height: 450px; }
+                
+                /* Sidebar */
+                .msg-sidebar {
+                    width: 360px; flex-shrink: 0;
+                    background: var(--bg-card); border: 1px solid var(--border-color);
+                    border-radius: 20px; display: flex; flex-direction: column; overflow: hidden;
+                    box-shadow: 0 4px 24px rgba(0,0,0,0.08);
+                }
+                .msg-sidebar-head {
+                    padding: 20px; background: linear-gradient(180deg, var(--bg-secondary) 0%, var(--bg-card) 100%);
+                    border-bottom: 1px solid var(--border-color);
+                }
+                .msg-sidebar-title {
+                    display: flex; align-items: center; gap: 10px;
+                    font-size: 17px; font-weight: 700; color: var(--text-primary); margin: 0 0 14px 0;
+                }
+                .msg-sidebar-title i { 
+                    width: 32px; height: 32px; background: linear-gradient(135deg, #0084ff, #00c6ff);
+                    border-radius: 8px; display: flex; align-items: center; justify-content: center;
+                    color: white; font-size: 14px;
+                }
+                .msg-page-select {
+                    width: 100%; padding: 12px 14px; border-radius: 12px;
+                    background: var(--bg-secondary); border: 1px solid var(--border-color);
+                    color: var(--text-primary); font-family: inherit; font-size: 14px;
+                    cursor: pointer; transition: all 0.2s ease;
+                }
+                .msg-page-select:focus { outline: none; border-color: #0084ff; box-shadow: 0 0 0 3px rgba(0,132,255,0.15); }
+                .msg-search-box {
+                    display: flex; gap: 8px; margin-top: 12px; padding: 4px;
+                    background: var(--bg-secondary); border-radius: 12px;
+                }
+                .msg-search-box input {
+                    flex: 1; padding: 10px 14px; border-radius: 8px;
+                    background: transparent; border: none;
+                    color: var(--text-primary); font-size: 13px;
+                }
+                .msg-search-box input:focus { outline: none; }
+                .msg-search-box input::placeholder { color: var(--text-secondary); }
+                .msg-search-btn {
+                    padding: 10px 16px; border-radius: 8px;
+                    background: linear-gradient(135deg, #0084ff, #00c6ff);
+                    border: none; color: white; cursor: pointer;
+                    transition: all 0.2s ease; font-size: 14px;
+                }
+                .msg-search-btn:hover { transform: scale(1.05); }
+                .msg-convs { flex: 1; overflow-y: auto; padding: 12px; }
+                
+                /* Chat Panel */
+                .msg-chat {
+                    flex: 1; background: var(--bg-card); border: 1px solid var(--border-color);
+                    border-radius: 20px; display: flex; flex-direction: column; overflow: hidden;
+                    box-shadow: 0 4px 24px rgba(0,0,0,0.08);
+                }
+                .msg-chat-head {
+                    padding: 16px 24px; border-bottom: 1px solid var(--border-color);
+                    background: var(--bg-card); display: none;
+                }
+                .msg-chat-user { display: flex; align-items: center; gap: 14px; }
+                .msg-chat-avatar {
+                    width: 48px; height: 48px; border-radius: 50%;
+                    background: linear-gradient(135deg, #667eea, #764ba2);
+                    display: flex; align-items: center; justify-content: center;
+                    color: white; font-weight: 700; font-size: 18px; overflow: hidden;
+                }
+                .msg-chat-avatar img { width: 100%; height: 100%; object-fit: cover; }
+                .msg-chat-info h3 { font-size: 16px; font-weight: 600; color: var(--text-primary); margin: 0; }
+                .msg-chat-actions { margin-right: auto; display: flex; gap: 8px; }
+                .msg-chat-action {
+                    width: 36px; height: 36px; border-radius: 10px;
+                    background: var(--bg-secondary); border: 1px solid var(--border-color);
+                    color: var(--text-secondary); cursor: pointer;
+                    display: flex; align-items: center; justify-content: center;
+                    transition: all 0.2s ease;
+                }
+                .msg-chat-action:hover { color: #0084ff; border-color: #0084ff; }
+                
+                /* Messages Area */
+                .msg-messages {
+                    flex: 1; overflow-y: auto; padding: 24px;
+                    background: linear-gradient(180deg, var(--bg-secondary) 0%, var(--bg-card) 100%);
+                }
+                .msg-empty {
+                    display: flex; flex-direction: column; align-items: center;
+                    justify-content: center; height: 100%; color: var(--text-secondary);
+                }
+                .msg-empty i { font-size: 64px; margin-bottom: 20px; opacity: 0.15; }
+                .msg-empty p { font-size: 15px; }
+                
+                /* Input Area */
+                .msg-input-area {
+                    padding: 16px 24px; border-top: 1px solid var(--border-color);
+                    background: var(--bg-card); display: none;
+                }
+                .msg-input-row { display: flex; gap: 12px; align-items: flex-end; }
+                .msg-input-row textarea {
+                    flex: 1; padding: 14px 18px; border-radius: 16px;
+                    background: var(--bg-secondary); border: 1px solid var(--border-color);
+                    color: var(--text-primary); font-family: inherit; font-size: 14px;
+                    resize: none; min-height: 50px; max-height: 120px;
+                    transition: all 0.2s ease; line-height: 1.5;
+                }
+                .msg-input-row textarea:focus { outline: none; border-color: #0084ff; box-shadow: 0 0 0 3px rgba(0,132,255,0.1); }
+                .msg-send-btn {
+                    width: 50px; height: 50px; border-radius: 14px;
+                    background: linear-gradient(135deg, #0084ff, #00c6ff);
+                    border: none; color: white; cursor: pointer;
+                    display: flex; align-items: center; justify-content: center;
+                    font-size: 20px; transition: all 0.3s ease;
+                    box-shadow: 0 4px 16px rgba(0,132,255,0.35);
+                }
+                .msg-send-btn:hover { transform: translateY(-2px) scale(1.05); box-shadow: 0 8px 24px rgba(0,132,255,0.45); }
+                
+                /* Conversation Items */
+                .msg-conv {
+                    display: flex; align-items: center; gap: 12px; padding: 14px;
+                    border-radius: 14px; cursor: pointer; transition: all 0.2s ease;
+                    margin-bottom: 6px; border: 1px solid transparent;
+                }
+                .msg-conv:hover { background: var(--bg-secondary); border-color: var(--border-color); }
+                .msg-conv.active { background: linear-gradient(135deg, rgba(0,132,255,0.1), rgba(0,198,255,0.05)); border-color: rgba(0,132,255,0.3); }
+                .msg-conv-avatar {
+                    width: 52px; height: 52px; border-radius: 50%;
+                    background: linear-gradient(135deg, #667eea, #764ba2);
+                    display: flex; align-items: center; justify-content: center;
+                    color: white; font-weight: 600; font-size: 18px; flex-shrink: 0;
+                    position: relative;
+                }
+                .msg-conv-avatar.online::after {
+                    content: ''; position: absolute; bottom: 2px; right: 2px;
+                    width: 12px; height: 12px; background: #22c55e;
+                    border-radius: 50%; border: 2px solid var(--bg-card);
+                }
+                .msg-conv-info { flex: 1; min-width: 0; }
+                .msg-conv-name { font-size: 14px; font-weight: 600; color: var(--text-primary); margin-bottom: 4px; display: flex; align-items: center; gap: 6px; }
+                .msg-conv-preview { font-size: 13px; color: var(--text-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-bottom: 4px; }
+                .msg-conv-id { font-size: 10px; color: var(--text-secondary); cursor: pointer; opacity: 0.7; transition: all 0.2s; }
+                .msg-conv-id:hover { opacity: 1; color: var(--primary); }
+                .msg-conv-meta { text-align: left; flex-shrink: 0; }
+                .msg-conv-time { font-size: 11px; color: var(--text-secondary); margin-bottom: 6px; }
+                .msg-conv-badge {
+                    min-width: 22px; height: 22px; padding: 0 6px; border-radius: 11px;
+                    background: linear-gradient(135deg, #0EA5E9, #2563EB);
+                    color: white; font-size: 11px; font-weight: 700;
+                    display: flex; align-items: center; justify-content: center;
+                    animation: pulse 2s ease-in-out infinite;
+                }
+                
+                /* Animations */
+                @keyframes pulse {
+                    0%, 100% { transform: scale(1); box-shadow: 0 0 0 0 rgba(14,165,233,0.4); }
+                    50% { transform: scale(1.1); box-shadow: 0 0 0 8px rgba(14,165,233,0); }
+                }
+                @keyframes slideIn {
+                    from { opacity: 0; transform: translateX(20px); }
+                    to { opacity: 1; transform: translateX(0); }
+                }
+                @keyframes fadeIn {
+                    from { opacity: 0; }
+                    to { opacity: 1; }
+                }
+                .msg-conv { animation: slideIn 0.3s ease-out; }
+                .msg-hero-icon { animation: float 3s ease-in-out infinite; }
+                @keyframes float {
+                    0%, 100% { transform: translateY(0); }
+                    50% { transform: translateY(-4px); }
+                }
+            </style>
+            
+            <header class="page-header">
+                <div class="header-content">
+                    <h1><i class="fab fa-facebook-messenger" style="margin-left:10px;color:#0084ff;"></i>رسائل فيسبوك</h1>
+                    <p class="subtitle">تواصل مع عملائك بسهولة واحترافية</p>
+                </div>
+            </header>
+            
+            <div class="msg-container">
+                <!-- Hero Banner -->
+                <div class="msg-hero">
+                    <div class="msg-hero-content">
+                        <div class="msg-hero-icon"><i class="fas fa-headset"></i></div>
+                        <div class="msg-hero-text">
+                            <h2>مركز دعم العملاء</h2>
+                            <p><i class="fas fa-bolt"></i> الرد السريع يزيد رضا العملاء بنسبة 89%</p>
+                        </div>
+                    </div>
+                    <div class="msg-hero-stats">
+                        <div class="msg-hero-stat">
+                            <div class="msg-hero-stat-icon"><i class="fas fa-envelope"></i></div>
+                            <div class="msg-hero-stat-num" id="todayMsgCount">0</div>
+                            <div class="msg-hero-stat-label">رسائل اليوم</div>
+                        </div>
+                        <div class="msg-hero-stat">
+                            <div class="msg-hero-stat-icon"><i class="fas fa-clock"></i></div>
+                            <div class="msg-hero-stat-num" id="avgResponseTime">--</div>
+                            <div class="msg-hero-stat-label">تحتاج رد</div>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="msg-main">
+                    <!-- Sidebar -->
+                    <div class="msg-sidebar">
+                        <div class="msg-sidebar-head">
+                            <h3 class="msg-sidebar-title"><i class="fas fa-comments"></i>المحادثات</h3>
+                            <select id="inboxPageSelect" onchange="app.loadConversations(); app.updateInboxStats();" class="msg-page-select"></select>
+                            <div class="msg-search-box" style="margin-top:8px;">
+                                <input type="text" id="pageIdSearch" placeholder="🔍 بحث بـ Page ID..." 
+                                       onkeydown="if(event.key==='Enter'){event.preventDefault();app.searchByPageId();}"
+                                       oninput="app.searchByPageId()">
+                                <button onclick="app.searchByPageId()" class="msg-search-btn"><i class="fas fa-search"></i></button>
+                            </div>
+                            <div class="msg-search-box">
+                                <input type="text" id="senderIdSearch" placeholder="🔍 بحث بـ Sender ID...">
+                                <button onclick="app.searchBySenderId()" class="msg-search-btn"><i class="fas fa-search"></i></button>
+                            </div>
+                        </div>
+                        <div id="conversationsContent" class="msg-convs"></div>
+                    </div>
+                    
+                    <!-- Chat Panel -->
+                    <div id="chatPanel" class="msg-chat">
+                        <div class="msg-chat-head" id="chatHeader">
+                            <div class="msg-chat-user">
+                                <div class="msg-chat-avatar" id="chatAvatar">?</div>
+                                <div class="msg-chat-info">
+                                    <h3 id="chatWith">اختر محادثة</h3>
+                                    <div id="classificationTag" class="classification-tag-container"></div>
+                                    <div id="clientLabelsContainer" class="client-labels-container"></div>
+                                </div>
+                            </div>
+                            <div class="msg-chat-actions">
+                                <button class="msg-chat-action" onclick="app.refreshCurrentChat()" title="تحديث الرسائل"><i class="fas fa-sync-alt"></i></button>
+                                <button class="msg-chat-action" onclick="app.openLabelsModal()" title="إدارة Labels"><i class="fas fa-tags"></i></button>
+                                <button class="msg-chat-action" onclick="app.showCustomerClassification()" title="تصنيف العميل"><i class="fas fa-star"></i></button>
+                            </div>
+                        </div>
+                        <div class="msg-messages" id="chatMessages">
+                            <div class="msg-empty"><i class="fas fa-comments"></i><p>اختر محادثة لبدء المراسلة</p></div>
+                        </div>
+                        <div class="msg-input-area" id="chatInput">
+                            <!-- Preview Container -->
+                            <div id="chatMediaPreview" style="display:none;margin-bottom:12px;position:relative;width:fit-content;">
+                                <div style="position:relative;">
+                                    <img id="imagePreview" style="max-width:200px;max-height:200px;border-radius:12px;display:none;border:2px solid var(--primary);">
+                                    <video id="videoPreview" controls style="max-width:200px;max-height:200px;border-radius:12px;display:none;border:2px solid var(--primary);"></video>
+                                    <button onclick="app.clearFileSelection()" style="position:absolute;top:-10px;right:-10px;background:#ef4444;color:white;border:none;border-radius:50%;width:24px;height:24px;cursor:pointer;display:flex;align-items:center;justify-content:center;box-shadow:0 2px 5px rgba(0,0,0,0.2);"><i class="fas fa-times" style="font-size:12px;"></i></button>
+                                </div>
+                                <div id="fileName" style="font-size:12px;color:var(--text-secondary);margin-top:4px;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"></div>
+                            </div>
+                            
+                            <div class="msg-input-row" style="display:flex;gap:8px;align-items:flex-end;">
+                                <input type="file" id="chatMediaInput" accept="image/*,video/*" style="display:none" onchange="app.handleFileSelect(event)">
+                                <button onclick="document.getElementById('chatMediaInput').click()" title="إرفاق صورة/فيديو" style="width:40px;height:40px;border-radius:10px;border:none;background:var(--bg-secondary);border:1px solid var(--border-color);color:var(--text-secondary);cursor:pointer;flex-shrink:0;display:flex;align-items:center;justify-content:center;transition:all 0.2s;" onmouseover="this.style.color='#0084ff';this.style.borderColor='#0084ff'" onmouseout="this.style.color='var(--text-secondary)';this.style.borderColor='var(--border-color)'"><i class="fas fa-paperclip"></i></button>
+                                <button onclick="app.showProductPicker()" title="إرسال منتج" style="width:40px;height:40px;border-radius:10px;border:none;background:linear-gradient(135deg,#22c55e,#16a34a);color:white;cursor:pointer;flex-shrink:0;display:flex;align-items:center;justify-content:center;transition:all 0.2s;" onmouseover="this.style.transform='scale(1.05)'" onmouseout="this.style.transform='scale(1)'"><i class="fas fa-shopping-bag"></i></button>
+                                <button onclick="app.showCreateOrderModal()" title="إنشاء طلب" style="width:40px;height:40px;border-radius:10px;border:none;background:linear-gradient(135deg,#f59e0b,#d97706);color:white;cursor:pointer;flex-shrink:0;display:flex;align-items:center;justify-content:center;transition:all 0.2s;" onmouseover="this.style.transform='scale(1.05)'" onmouseout="this.style.transform='scale(1)'"><i class="fas fa-dollar-sign"></i></button>
+                                <textarea id="replyMessage" placeholder="اكتب رسالتك هنا... (Enter للإرسال)" rows="1" onkeydown="if(event.key==='Enter' && !event.shiftKey){event.preventDefault();app.sendReply();}"></textarea>
+                                <button class="msg-send-btn" onclick="app.sendReply()"><i class="fas fa-paper-plane"></i></button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>`;
+
+        // Competitors Analysis
+        document.getElementById('competitors').innerHTML = `
+            <header class="page-header">
+                <div class="header-content"><h1><i class="fas fa-chart-bar"></i> تحليل المنافسين</h1><p class="subtitle">تحليل صفحات المنافسين على فيسبوك باستخدام Puppeteer</p></div>
+            </header>
+            <div class="competitors-container" style="padding:20px;">
+                <!-- Add Competitor Section -->
+                <div class="add-competitor-section" style="background:linear-gradient(135deg, #0EA5E9 0%, #2563EB 100%);border-radius:20px;padding:30px;margin-bottom:24px;">
+                    <h3 style="color:white;margin-bottom:20px;font-size:20px;"><i class="fas fa-search-plus"></i> تحليل منافس جديد</h3>
+                    <div style="display:flex;gap:12px;flex-wrap:wrap;">
+                        <input type="text" id="competitorUrlInput" placeholder="https://www.facebook.com/PageName" 
+                            style="flex:1;min-width:300px;padding:16px 20px;border-radius:12px;border:none;font-size:15px;background:rgba(255,255,255,0.95);color:#333;">
+                        <button class="btn" onclick="app.analyzeCompetitor()" style="background:rgba(255,255,255,0.2);color:white;border:2px solid white;padding:16px 32px;font-weight:600;">
+                            <i class="fas fa-rocket"></i> تحليل الآن
+                        </button>
+                    </div>
+                    <p style="margin-top:12px;font-size:13px;color:rgba(255,255,255,0.8);">
+                        <i class="fas fa-info-circle"></i> أدخل رابط صفحة فيسبوك الكامل - التحليل يتم على السيرفر بدون الحاجة لتسجيل دخول
+                    </p>
+                </div>
+
+                <!-- Loading indicator -->
+                <div id="competitorLoading" style="display:none;text-align:center;padding:40px;">
+                    <div style="display:inline-block;width:50px;height:50px;border:4px solid var(--glass);border-top-color:var(--primary);border-radius:50%;animation:spin 1s linear infinite;"></div>
+                    <p style="margin-top:16px;color:var(--text-secondary);">جاري تحليل الصفحة... قد يستغرق هذا بضع ثوانٍ</p>
+                </div>
+
+                <!-- Comparison Chart Section -->
+                <div id="comparisonSection" style="display:none;background:var(--bg-card);border-radius:16px;padding:24px;margin-bottom:24px;border:1px solid var(--border-color);">
+                    <h3 style="margin-bottom:20px;"><i class="fas fa-chart-bar"></i> مقارنة المنافسين</h3>
+                    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:20px;">
+                        <div style="background:var(--glass);padding:20px;border-radius:12px;">
+                            <h4 style="margin-bottom:16px;color:var(--text-secondary);font-size:14px;">المتابعين</h4>
+                            <div id="followersChart"></div>
+                        </div>
+                        <div style="background:var(--glass);padding:20px;border-radius:12px;">
+                            <h4 style="margin-bottom:16px;color:var(--text-secondary);font-size:14px;">نسبة التفاعل</h4>
+                            <div id="engagementChart"></div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- SWOT Analysis Section -->
+                <div id="swotSection" style="display:none;background:var(--bg-card);border-radius:16px;padding:24px;margin-bottom:24px;border:1px solid var(--border-color);">
+                    <h3 style="margin-bottom:20px;"><i class="fas fa-balance-scale"></i> تحليل SWOT</h3>
+                    <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;">
+                        <div style="background:linear-gradient(135deg, rgba(76,175,80,0.1), rgba(76,175,80,0.05));padding:20px;border-radius:12px;border:1px solid rgba(76,175,80,0.3);">
+                            <h4 style="color:#4caf50;margin-bottom:12px;"><i class="fas fa-plus-circle"></i> نقاط القوة</h4>
+                            <ul id="swotStrengths" style="margin:0;padding-right:20px;color:var(--text-secondary);font-size:14px;line-height:1.8;"></ul>
+                        </div>
+                        <div style="background:linear-gradient(135deg, rgba(244,67,54,0.1), rgba(244,67,54,0.05));padding:20px;border-radius:12px;border:1px solid rgba(244,67,54,0.3);">
+                            <h4 style="color:#f44336;margin-bottom:12px;"><i class="fas fa-minus-circle"></i> نقاط الضعف</h4>
+                            <ul id="swotWeaknesses" style="margin:0;padding-right:20px;color:var(--text-secondary);font-size:14px;line-height:1.8;"></ul>
+                        </div>
+                        <div style="background:linear-gradient(135deg, rgba(33,150,243,0.1), rgba(33,150,243,0.05));padding:20px;border-radius:12px;border:1px solid rgba(33,150,243,0.3);">
+                            <h4 style="color:#2196f3;margin-bottom:12px;"><i class="fas fa-lightbulb"></i> الفرص</h4>
+                            <ul id="swotOpportunities" style="margin:0;padding-right:20px;color:var(--text-secondary);font-size:14px;line-height:1.8;"></ul>
+                        </div>
+                        <div style="background:linear-gradient(135deg, rgba(255,152,0,0.1), rgba(255,152,0,0.05));padding:20px;border-radius:12px;border:1px solid rgba(255,152,0,0.3);">
+                            <h4 style="color:#ff9800;margin-bottom:12px;"><i class="fas fa-exclamation-triangle"></i> التهديدات</h4>
+                            <ul id="swotThreats" style="margin:0;padding-right:20px;color:var(--text-secondary);font-size:14px;line-height:1.8;"></ul>
+                </div>
+
+                <!-- AI Top Post Analysis -->
+                <div id="topPostSection" style="display:none;background:var(--bg-card);border-radius:16px;padding:24px;margin-bottom:24px;border:1px solid var(--border-color);">
+                    <h3 style="margin-bottom:20px;"><i class="fas fa-trophy"></i> 🤖 أفضل منشور (تحليل AI)</h3>
+                    <div id="topPostContent" style="background:var(--glass);padding:20px;border-radius:12px;margin-bottom:16px;">
+                        <div id="topPostText" style="font-size:15px;line-height:1.8;color:var(--text-primary);margin-bottom:16px;"></div>
+                        <div id="topPostStats" style="display:flex;gap:20px;color:var(--text-secondary);font-size:14px;"></div>
+                    </div>
+                    <div id="topPostAnalysis" style="background:linear-gradient(135deg, rgba(102,126,234,0.1), rgba(118,75,162,0.05));padding:20px;border-radius:12px;border:1px solid rgba(102,126,234,0.3);">
+                        <h4 style="color:var(--primary);margin-bottom:12px;"><i class="fas fa-brain"></i> تحليل الذكاء الاصطناعي</h4>
+                        <div id="topPostAIText" style="color:var(--text-secondary);font-size:14px;line-height:1.8;white-space:pre-wrap;"></div>
+                    </div>
+                </div>
+
+                <!-- AI Engagement Analysis -->
+                <div id="engagementSection" style="display:none;background:var(--bg-card);border-radius:16px;padding:24px;margin-bottom:24px;border:1px solid var(--border-color);">
+                    <h3 style="margin-bottom:20px;"><i class="fas fa-chart-line"></i> 🤖 تحليل التفاعل (AI)</h3>
+                    <div style="display:grid;grid-template-columns:1fr 2fr;gap:20px;">
+                        <div id="engagementScore" style="background:var(--glass);padding:30px;border-radius:12px;text-align:center;">
+                            <div id="engagementRate" style="font-size:48px;font-weight:700;color:var(--primary);"></div>
+                            <div id="engagementLabel" style="font-size:18px;margin-top:8px;"></div>
+                        </div>
+                        <div id="engagementAIAnalysis" style="background:linear-gradient(135deg, rgba(102,126,234,0.1), rgba(118,75,162,0.05));padding:20px;border-radius:12px;border:1px solid rgba(102,126,234,0.3);">
+                            <h4 style="color:var(--primary);margin-bottom:12px;"><i class="fas fa-brain"></i> تحليل ونصائح AI</h4>
+                            <div id="engagementAIText" style="color:var(--text-secondary);font-size:14px;line-height:1.8;white-space:pre-wrap;"></div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- AI Badge -->
+                <div id="aiBadge" style="display:none;background:linear-gradient(135deg, #0EA5E9, #2563EB);color:white;padding:12px 20px;border-radius:12px;margin-bottom:24px;text-align:center;">
+                    <i class="fas fa-robot"></i> تحليل بالذكاء الاصطناعي - Llama 3 70B
+                </div>
+
+                <!-- Recommendations Section -->
+                <div id="recommendationsSection" style="display:none;background:var(--bg-card);border-radius:16px;padding:24px;margin-bottom:24px;border:1px solid var(--border-color);">
+                    <h3 style="margin-bottom:20px;"><i class="fas fa-rocket"></i> كيف تتفوق على المنافس؟</h3>
+                    <div id="recommendationsList" style="display:grid;gap:16px;"></div>
+                </div>
+
+                <!-- Benchmarks Section -->
+                <div id="benchmarksSection" style="display:none;background:var(--bg-card);border-radius:16px;padding:24px;margin-bottom:24px;border:1px solid var(--border-color);">
+                    <h3 style="margin-bottom:20px;"><i class="fas fa-chart-bar"></i> مقارنة بمعايير السوق</h3>
+                    <div id="benchmarksList" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:16px;"></div>
+                </div>
+
+                <!-- Competitors List -->
+                <div class="competitors-list" id="competitorsList" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(350px,1fr));gap:20px;"></div>
+            </div>
+            <style>
+                @keyframes spin { to { transform: rotate(360deg); } }
+            </style>`;
+
+
+        // Broadcast Section - Professional Design with Light/Dark Mode
+        document.getElementById('broadcast').innerHTML = `
+            <style>
+                .bcast { --accent: #0EA5E9; --accent-light: rgba(14,165,233,0.1); --accent-glow: rgba(14,165,233,0.25); max-width: 1200px; margin: 0 auto; font-family: 'Segoe UI', system-ui, sans-serif; }
+                .bcast-grid { display: grid; grid-template-columns: 360px 1fr; gap: 24px; }
+                @media (max-width: 900px) { .bcast-grid { grid-template-columns: 1fr; } }
+                .bcast-banner {
+                    background: var(--bg-card); border: 1px solid var(--border-color); border-radius: 16px;
+                    padding: 28px 32px; margin-bottom: 24px; display: flex; align-items: center; gap: 20px;
+                    position: relative; overflow: hidden;
+                }
+                .bcast-banner::after {
+                    content: ''; position: absolute; top: 0; right: 0; width: 300px; height: 100%;
+                    background: linear-gradient(135deg, var(--accent-light) 0%, transparent 60%); opacity: 0.5;
+                }
+                .bcast-banner-icon {
+                    width: 64px; height: 64px; background: transparent;
+                    display: flex; align-items: center; justify-content: center;
+                    flex-shrink: 0; animation: float 3s ease-in-out infinite;
+                }
+                .bcast-banner-icon img { width: 64px; height: 64px; object-fit: contain; }
+                @keyframes float { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-6px); } }
+                .bcast-banner-text h2 { font-size: 20px; font-weight: 700; color: var(--text-primary); margin: 0 0 6px 0; }
+                .bcast-banner-text p { font-size: 14px; color: var(--text-secondary); margin: 0; }
+                .bcast-card {
+                    background: var(--bg-card); border: 1px solid var(--border-color); border-radius: 16px;
+                    padding: 24px; transition: all 0.3s ease;
+                }
+                .bcast-card:hover { border-color: var(--accent); box-shadow: 0 8px 32px var(--accent-glow); }
+                .bcast-card-header {
+                    display: flex; align-items: center; gap: 12px; margin-bottom: 24px;
+                    padding-bottom: 16px; border-bottom: 1px solid var(--border-color);
+                }
+                .bcast-card-icon {
+                    width: 40px; height: 40px; background: linear-gradient(135deg, var(--accent), #2563EB);
+                    border-radius: 10px; display: flex; align-items: center; justify-content: center;
+                    font-size: 16px; color: white;
+                }
+                .bcast-card-title { font-size: 16px; font-weight: 700; color: var(--text-primary); margin: 0; }
+                .bcast-label { display: block; font-size: 13px; font-weight: 600; color: var(--text-secondary); margin-bottom: 8px; }
+                .bcast-label i { color: var(--accent); margin-left: 6px; }
+                .bcast-select, .bcast-textarea {
+                    width: 100%; padding: 14px 16px; border-radius: 12px; background: var(--bg-secondary);
+                    border: 1px solid var(--border-color); color: var(--text-primary);
+                    font-family: inherit; font-size: 14px; transition: all 0.2s ease;
+                }
+                .bcast-select:focus, .bcast-textarea:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-light); }
+                .bcast-textarea { resize: vertical; min-height: 160px; line-height: 1.7; }
+                .bcast-group { margin-bottom: 20px; }
+                .bcast-stats { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 20px; }
+                .bcast-stat { background: var(--accent-light); border: 1px solid var(--accent-glow); border-radius: 12px; padding: 16px; text-align: center; }
+                .bcast-stat-num { font-size: 32px; font-weight: 800; color: var(--accent); line-height: 1; }
+                .bcast-stat-label { font-size: 11px; color: var(--text-secondary); margin-top: 4px; text-transform: uppercase; letter-spacing: 0.5px; }
+                .bcast-ai-btn {
+                    display: inline-flex; align-items: center; gap: 10px; padding: 14px 28px;
+                    background: linear-gradient(135deg, var(--accent), #2563EB); border: none; border-radius: 12px;
+                    color: white; font-size: 15px; font-weight: 700; cursor: pointer;
+                    transition: all 0.3s ease; box-shadow: 0 4px 16px var(--accent-glow);
+                }
+                .bcast-ai-btn:hover { transform: translateY(-2px); box-shadow: 0 8px 24px var(--accent-glow); }
+                .bcast-ai-btn i { font-size: 18px; }
+                .bcast-preview {
+                    background: var(--bg-secondary); border: 1px dashed var(--border-color); border-radius: 12px;
+                    padding: 20px; min-height: 100px; color: var(--text-secondary); font-size: 14px; line-height: 1.8; white-space: pre-wrap;
+                }
+                .bcast-preview-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
+                .bcast-refresh-btn {
+                    padding: 8px 16px; background: var(--accent-light); border: 1px solid var(--accent-glow);
+                    border-radius: 8px; color: var(--accent); font-size: 12px; font-weight: 600; cursor: pointer; transition: all 0.2s ease;
+                }
+                .bcast-refresh-btn:hover { background: var(--accent); color: white; }
+                .bcast-upload-btn {
+                    width: 100%; padding: 16px; background: var(--bg-secondary); border: 2px dashed var(--border-color);
+                    border-radius: 12px; color: var(--text-secondary); font-family: inherit; font-size: 14px; cursor: pointer; transition: all 0.2s ease;
+                }
+                .bcast-upload-btn:hover { border-color: var(--accent); color: var(--accent); }
+                .bcast-send-btn {
+                    width: 100%; padding: 22px 32px; margin-top: 28px;
+                    background: linear-gradient(135deg, var(--accent), #2563EB); border: none; border-radius: 16px;
+                    color: white; font-size: 18px; font-weight: 800; font-family: inherit; cursor: pointer;
+                    display: flex; align-items: center; justify-content: center; gap: 14px;
+                    box-shadow: 0 8px 32px var(--accent-glow); transition: all 0.3s ease; position: relative; overflow: hidden;
+                }
+                .bcast-send-btn::before {
+                    content: ''; position: absolute; top: 0; left: -100%; width: 100%; height: 100%;
+                    background: linear-gradient(90deg, transparent, rgba(255,255,255,0.2), transparent); animation: shimmer 2.5s infinite;
+                }
+                @keyframes shimmer { 0% { left: -100%; } 100% { left: 100%; } }
+                .bcast-send-btn:hover:not(:disabled) { transform: translateY(-3px); box-shadow: 0 16px 48px var(--accent-glow); }
+                .bcast-send-btn:disabled { background: var(--text-secondary); cursor: not-allowed; box-shadow: none; }
+                .bcast-send-btn:disabled::before { animation: none; }
+                .bcast-note { text-align: center; margin-top: 16px; font-size: 13px; color: var(--text-secondary); }
+                
+                /* Custom Dropdown Styles */
+                .custom-select-wrapper { position: relative; user-select: none; width: 100%; }
+                .custom-select-trigger {
+                    display: flex; align-items: center; justify-content: space-between;
+                    padding: 12px 16px;
+                    background: var(--bg-secondary);
+                    border: 1px solid var(--border-color);
+                    border-radius: 12px;
+                    cursor: pointer;
+                    font-size: 14px;
+                    transition: all 0.2s;
+                    height: 50px;
+                }
+                .custom-select-trigger:hover { border-color: var(--primary); }
+                .custom-options {
+                    position: absolute; top: 110%; left: 0; right: 0;
+                    background: var(--bg-card);
+                    border: 1px solid var(--border-color);
+                    border-radius: 12px;
+                    box-shadow: 0 10px 40px rgba(0,0,0,0.2);
+                    display: none; z-index: 100;
+                    overflow: hidden;
+                }
+                .custom-options.open { display: block; animation: fadeIn 0.2s; }
+                .custom-option {
+                    padding: 12px 16px;
+                    cursor: pointer;
+                    display: flex; align-items: center; gap: 12px;
+                    transition: background 0.2s;
+                    border-bottom: 1px solid var(--border-color);
+                }
+                .custom-option:last-child { border-bottom: none; }
+                .custom-option:hover { background: var(--bg-secondary); }
+                .custom-option.selected { background: rgba(var(--primary-rgb), 0.05); }
+                .custom-option-icon {
+                    width: 32px; height: 32px;
+                    border-radius: 8px;
+                    display: flex; align-items: center; justify-content: center;
+                    font-size: 14px;
+                    background: var(--bg-secondary);
+                }
+            </style>
+            <header class="page-header"><div class="header-content"><h1><i class="fas fa-paper-plane"></i>الإرسال الجماعي</h1><p class="subtitle">أرسل رسائل مخصصة لعملائك بذكاء</p></div></header>
+            <div class="bcast">
+                <div class="bcast-banner">
+                    <div class="bcast-banner-icon"><img src="/logo.png?v=2" alt="OctoBot" style="width:auto;height:50px;"></div>
+                    <div class="bcast-banner-text"><h2>محرك DK-OctoBot للرسائل الذكية</h2><p>اكتب رسالة واحدة - كل عميل يستلم نسخة فريدة</p></div>
+                </div>
+                <div class="bcast-grid">
+                    <div class="bcast-card">
+                        <div class="bcast-card-header"><div class="bcast-card-icon"><i class="fas fa-sliders-h"></i></div><h3 class="bcast-card-title">إعدادات الحملة</h3></div>
+                        <div class="bcast-group"><label class="bcast-label"><i class="fas fa-flag"></i>الصفحة</label><select id="broadcastPageSelect" onchange="app.loadBroadcastRecipients()" class="bcast-select"><option value="">اختر صفحة...</option></select></div>
+                        <div id="broadcastStats" style="display:none;"><div class="bcast-stats"><div class="bcast-stat"><div class="bcast-stat-num" id="totalRecipients">0</div><div class="bcast-stat-label">إجمالي</div></div><div class="bcast-stat"><div class="bcast-stat-num" id="eligibleRecipients">0</div><div class="bcast-stat-label">مؤهل</div></div></div></div>
+                        <div class="bcast-group"><label class="bcast-label"><i class="fas fa-filter"></i>الفلترة</label><select id="customerFilter" onchange="app.filterBroadcastRecipients(this.value)" class="bcast-select"><option value="all">جميع العملاء</option><option value="eligible">المؤهلين فقط</option><option value="last30d">آخر 30 يوم</option></select></div>
+                        <div class="bcast-group">
+                            <label class="bcast-label"><i class="fas fa-users"></i>عدد المستلمين</label>
+                            <div style="display:flex;gap:10px;align-items:center;">
+                                <input type="number" id="recipientLimit" class="bcast-select" style="flex:1;text-align:center;" placeholder="الكل" min="1" oninput="app.applyRecipientLimit()">
+                                <span id="recipientLimitInfo" style="font-size:12px;color:var(--text-secondary);white-space:nowrap;">من <span id="totalAvailable">0</span></span>
+                            </div>
+                            <small style="display:block;margin-top:6px;color:var(--text-secondary);font-size:11px;">اتركه فارغ للإرسال للجميع</small>
+                        </div>
+                        <div class="bcast-group">
+                            <label class="bcast-label"><i class="fas fa-gauge-high"></i>السرعة</label>
+                            <div class="custom-select-wrapper" id="speedSelectWrapper">
+                                <input type="hidden" id="broadcastDelay" value="ai">
+                                <div class="custom-select-trigger" onclick="const opts = this.nextElementSibling; opts.classList.toggle('open'); event.stopPropagation();">
+                                    <div style="display:flex;align-items:center;gap:10px;">
+                                        <div class="custom-option-icon" style="background:rgba(139, 92, 246, 0.1);color:#8b5cf6;"><i class="fas fa-robot"></i></div>
+                                        <div style="display:flex;flex-direction:column;align-items:flex-start;line-height:1.2;">
+                                            <span style="font-weight:600;">AI ذكي (موصى به)</span>
+                                            <span style="font-size:10px;opacity:0.6;">تأخير عشوائي 5-30 ثانية</span>
+                                        </div>
+                                    </div>
+                                    <i class="fas fa-chevron-down" style="font-size:12px;opacity:0.5;"></i>
+                                </div>
+                                <div class="custom-options">
+                                    <div class="custom-option selected" onclick="app.setBroadcastSpeed('ai', this)">
+                                        <div class="custom-option-icon" style="background:rgba(139, 92, 246, 0.1);color:#8b5cf6;"><i class="fas fa-robot"></i></div>
+                                        <div>
+                                            <div style="font-weight:600;">AI ذكي (موصى به)</div>
+                                            <div style="font-size:11px;opacity:0.6;">تأخير عشوائي (5-30 ثانية) لتجنب الحظر</div>
+                                        </div>
+                                    </div>
+                                    <div class="custom-option" onclick="app.setBroadcastSpeed('1000', this)">
+                                        <div class="custom-option-icon" style="background:rgba(234, 179, 8, 0.1);color:#eab308;"><i class="fas fa-bolt"></i></div>
+                                        <div>
+                                            <div style="font-weight:600;">سريع جداً</div>
+                                            <div style="font-size:11px;opacity:0.6;">1 ثانية (قد يعرضك للحظر)</div>
+                                        </div>
+                                    </div>
+                                    <div class="custom-option" onclick="app.setBroadcastSpeed('3000', this)">
+                                        <div class="custom-option-icon" style="background:rgba(59, 130, 246, 0.1);color:#3b82f6;"><i class="fas fa-balance-scale"></i></div>
+                                        <div>
+                                            <div style="font-weight:600;">متوازن</div>
+                                            <div style="font-size:11px;opacity:0.6;">3 ثواني (سرعة متوسطة)</div>
+                                        </div>
+                                    </div>
+                                    <div class="custom-option" onclick="app.setBroadcastSpeed('5000', this)">
+                                        <div class="custom-option-icon" style="background:rgba(34, 197, 94, 0.1);color:#22c55e;"><i class="fas fa-shield-alt"></i></div>
+                                        <div>
+                                            <div style="font-weight:600;">آمن</div>
+                                            <div style="font-size:11px;opacity:0.6;">5 ثواني (سرعة آمنة)</div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        <div><label class="bcast-label"><i class="fas fa-image"></i>المرفقات</label><input type="file" id="broadcastMedia" accept="image/*,video/*" multiple onchange="app.handleBroadcastMedia(event)" style="display:none;"><button type="button" onclick="document.getElementById('broadcastMedia').click()" class="bcast-upload-btn"><i class="fas fa-cloud-upload-alt"></i> رفع ملفات</button><div id="broadcastMediaPreview" style="margin-top:12px;display:flex;flex-wrap:wrap;gap:8px;"></div><div id="broadcastMediaCount" style="margin-top:8px;font-size:12px;color:var(--text-secondary);"></div></div>
+                    </div>
+                    <div class="bcast-card">
+                        <div class="bcast-card-header"><div class="bcast-card-icon"><i class="fas fa-pen-nib"></i></div><h3 class="bcast-card-title">محتوى الرسالة</h3></div>
+                        <div style="margin-bottom:20px;"><button onclick="app.generateAISpintax()" class="bcast-ai-btn"><i class="fas fa-wand-magic-sparkles"></i><span>توليد ذكي</span></button></div>
+                        <div class="bcast-group"><label class="bcast-label"><i class="fas fa-message"></i>نص الرسالة</label><textarea id="broadcastMessage" class="bcast-textarea" placeholder="اكتب رسالتك هنا ثم اضغط توليد ذكي..." oninput="app.previewSpintax()"></textarea></div>
+                        <div><div class="bcast-preview-header"><label class="bcast-label" style="margin:0;"><i class="fas fa-eye"></i>معاينة</label><button onclick="app.previewSpintax()" class="bcast-refresh-btn"><i class="fas fa-rotate"></i> تحديث</button></div><div id="spintaxPreview" class="bcast-preview">اكتب رسالتك لترى المعاينة...</div></div>
+                    </div>
+                </div>
+                <button id="campaignSendBtn" class="bcast-send-btn" onclick="app.startBackendCampaign()"><i class="fas fa-rocket"></i><span>إطلاق الحملة</span></button>
+                <p class="bcast-note"><i class="fas fa-shield-check"></i> الحملة تعمل في الخلفية</p>
+                <div id="broadcastResults" style="margin-top:32px;display:none;"></div>
+            </div>`;
+
+        // Modals
+        document.getElementById('postModal').innerHTML = `
+            <div class="modal-overlay"></div>
+            <div class="modal-content">
+                <div class="modal-header"><h2 id="modalTitle">إضافة منشور جديد</h2><button class="modal-close" id="closeModal"><i class="fas fa-times"></i></button></div>
+                <form id="postForm">
+                    <div class="form-group"><label>عنوان المنشور</label><input type="text" id="postTitle" required placeholder="عنوان قصير للمنشور"></div>
+                    <div class="form-group"><label>المحتوى</label><textarea id="postContent" rows="4" placeholder="محتوى المنشور..."></textarea></div>
+                    <div class="form-row">
+                        <div class="form-group"><label>التاريخ</label><input type="date" id="postDate" required></div>
+                        <div class="form-group"><label>الوقت</label><input type="time" id="postTime"></div>
+                    </div>
+                    <div class="form-group">
+                        <label>المنصات</label>
+                        <div class="platform-checkboxes">
+                            <label class="platform-checkbox"><input type="checkbox" name="platform" value="facebook"><span class="platform-icon facebook"><i class="fab fa-facebook-f"></i></span></label>
+                        </div>
+                    </div>
+                    <div class="form-group"><label>الحالة</label><select id="postStatus"><option value="scheduled">مجدول</option><option value="published">تم النشر</option><option value="draft">مسودة</option></select></div>
+                    <input type="hidden" id="postId">
+                    <div class="form-actions"><button type="submit" class="btn btn-primary"><i class="fas fa-save"></i> حفظ</button><button type="button" class="btn btn-secondary" id="cancelModal">إلغاء</button></div>
+                </form>
+            </div>`;
+
+        document.getElementById('publishModal').innerHTML = `
+            <div class="modal-overlay"></div>
+            <div class="modal-content">
+                <div class="modal-header"><h2>نشر على فيسبوك</h2><button class="modal-close" id="closePublishModal"><i class="fas fa-times"></i></button></div>
+                <form id="publishForm">
+                    <div class="form-group"><label>اختر الصفحة</label><div class="page-selector" id="pageSelector"></div></div>
+                    <div class="form-group"><label>المحتوى</label><textarea id="publishContent" rows="5" placeholder="اكتب المنشور هنا..." required></textarea></div>
+                    <div class="form-group">
+                        <label>صور أو فيديو (يمكن اختيار أكثر من ملف)</label>
+                        <div class="media-upload-area" onclick="document.getElementById('mediaInput').click()">
+                            <i class="fas fa-cloud-upload-alt"></i>
+                            <p>اضغط لاختيار صور أو فيديو</p>
+                        </div>
+                        <input type="file" id="mediaInput" accept="image/*,video/*" multiple style="display:none" onchange="app.handleMediaUpload(event)">
+                        <div id="mediaPreview"></div>
+                    </div>
+                    <div class="form-group"><label>رابط (اختياري)</label><input type="url" id="publishLink" placeholder="https://..."></div>
+                    <div class="form-group">
+                        <label>نوع النشر</label>
+                        <div class="publish-options">
+                            <div class="publish-option selected" data-type="now" onclick="app.setPublishType('now')"><i class="fas fa-paper-plane"></i><span>نشر الآن</span></div>
+                            <div class="publish-option" data-type="schedule" onclick="app.setPublishType('schedule')"><i class="fas fa-clock"></i><span>جدولة</span></div>
+                        </div>
+                    </div>
+                    <div class="schedule-inputs" id="scheduleInputs">
+                        <input type="date" id="scheduleDate">
+                        <input type="time" id="scheduleTime">
+                    </div>
+                    <div class="form-actions">
+                        <button type="submit" class="btn btn-primary" id="publishBtn"><i class="fas fa-paper-plane"></i> نشر</button>
+                        <button type="button" class="btn btn-secondary" onclick="app.closePublishModal()">إلغاء</button>
+                    </div>
+                </form>
+            </div>`;
+
+        // Instagram Section - Direct Login
+        document.getElementById('instagram').innerHTML = `
+            <header class="page-header">
+                <div class="header-content"><h1><i class="fab fa-instagram" style="color:#E1306C;"></i> رسائل انستجرام</h1><p class="subtitle">إدارة رسائل Instagram المباشرة</p></div>
+            </header>
+            <div class="instagram-container" style="padding:20px;">
+                <div id="igLoginSection">
+                    <div class="login-card" style="background:linear-gradient(135deg, #E1306C 0%, #833AB4 50%, #405DE6 100%);padding:40px;border-radius:20px;color:white;max-width:450px;margin:40px auto;">
+                        <div style="text-align:center;margin-bottom:30px;">
+                            <i class="fab fa-instagram" style="font-size:64px;margin-bottom:15px;"></i>
+                            <h2 style="font-size:24px;margin-bottom:10px;">تسجيل الدخول إلى Instagram</h2>
+                            <p style="opacity:0.9;">أدخل بيانات حساب Instagram الخاص بك</p>
+                        </div>
+                        <form id="igLoginForm" onsubmit="app.loginInstagramDirect(event)">
+                            <div style="margin-bottom:15px;">
+                                <input type="text" id="igUsername" placeholder="اسم المستخدم" required
+                                    style="width:100%;padding:14px 16px;border-radius:12px;border:none;font-size:15px;background:rgba(255,255,255,0.95);color:#333;">
+                            </div>
+                            <div style="margin-bottom:20px;">
+                                <input type="password" id="igPassword" placeholder="كلمة المرور" required
+                                    style="width:100%;padding:14px 16px;border-radius:12px;border:none;font-size:15px;background:rgba(255,255,255,0.95);color:#333;">
+                            </div>
+                            <button type="submit" id="igLoginBtn" style="width:100%;padding:14px;border-radius:12px;border:none;background:rgba(0,0,0,0.2);color:white;font-size:16px;font-weight:600;cursor:pointer;">
+                                <i class="fas fa-sign-in-alt"></i> تسجيل الدخول
+                            </button>
+                        </form>
+                        <div id="igLoginError" style="margin-top:15px;text-align:center;display:none;"></div>
+                    </div>
+                </div>
+                <div id="igInboxSection" style="display:none;">
+                    <div style="background:var(--bg-card);border-radius:16px;padding:20px;margin-bottom:20px;border:1px solid var(--border-color);">
+                        <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:15px;">
+                            <div id="igAccountInfo" style="display:flex;align-items:center;gap:12px;">
+                                <i class="fab fa-instagram" style="color:#E1306C;font-size:24px;"></i>
+                                <span style="font-weight:600;color:var(--text-primary);">جاري التحميل...</span>
+                            </div>
+                            <button onclick="app.logoutInstagramDirect()" class="btn btn-secondary" style="padding:8px 16px;">
+                                <i class="fas fa-sign-out-alt"></i> تسجيل الخروج
+                            </button>
+                        </div>
+                    </div>
+                    <div style="background:var(--bg-card);border-radius:16px;padding:15px;margin-bottom:20px;border:1px solid var(--border-color);">
+                        <div style="display:flex;gap:10px;">
+                            <input type="text" id="igSearchInput" placeholder="بحث في المحادثات..." 
+                                style="flex:1;padding:12px 16px;border-radius:12px;background:var(--glass);border:1px solid var(--border-color);color:var(--text-primary);"
+                                onkeyup="app.filterIgConversations(event)">
+                            <button onclick="app.loadIgInbox()" class="btn btn-primary" style="padding:12px 20px;">
+                                <i class="fas fa-sync"></i>
+                            </button>
+                        </div>
+                    </div>
+                    <div id="igInbox" style="background:var(--bg-card);border-radius:16px;border:1px solid var(--border-color);"></div>
+                    
+                    <!-- Chat View -->
+                    <div id="igChatView" style="display:none;">
+                        <div style="background:var(--bg-card);border-radius:16px;border:1px solid var(--border-color);overflow:hidden;">
+                            <!-- Chat Header -->
+                            <div id="igChatHeader" style="padding:15px 20px;background:linear-gradient(135deg, #E1306C 0%, #833AB4 100%);display:flex;align-items:center;gap:15px;">
+                                <button onclick="app.closeIgChat()" style="background:rgba(255,255,255,0.2);border:none;color:white;padding:8px 12px;border-radius:8px;cursor:pointer;">
+                                    <i class="fas fa-arrow-right"></i>
+                                </button>
+                                <div style="flex:1;">
+                                    <div id="igChatTitle" style="font-weight:600;color:white;font-size:16px;"></div>
+                                    <small id="igChatStatus" style="color:rgba(255,255,255,0.8);"></small>
+                                </div>
+                                <button onclick="app.refreshIgMessages()" style="background:rgba(255,255,255,0.2);border:none;color:white;padding:8px 12px;border-radius:8px;cursor:pointer;">
+                                    <i class="fas fa-sync"></i>
+                                </button>
+                            </div>
+                            
+                            <!-- Messages Container -->
+                            <div id="igMessages" style="height:400px;overflow-y:auto;padding:20px;background:var(--bg-secondary);"></div>
+                            
+
+                            
+                            <!-- Hidden file input (outside form to prevent form submission) -->
+                            <input type="file" id="igPhotoInput" accept="image/*,video/*" style="display:none;" onchange="app.sendIgMedia(event)">
+                            
+                            <!-- Message Input -->
+                            ${this.hasPermission('instagram', 'send') ? `
+                            <div style="padding:15px;background:var(--bg-card);border-top:1px solid var(--border-color);">
+                                <form onsubmit="app.sendIgMessage(event)" style="display:flex;gap:10px;align-items:center;">
+                                    <button type="button" onclick="document.getElementById('igPhotoInput').click()" 
+                                        style="background:var(--glass);border:1px solid var(--border-color);color:var(--text-secondary);padding:12px;border-radius:25px;cursor:pointer;"
+                                        title="إرسال صورة أو فيديو">
+                                        <i class="fas fa-image"></i>
+                                    </button>
+                                    <input type="text" id="igMessageInput" placeholder="اكتب رسالة..." 
+                                        style="flex:1;padding:12px 16px;border-radius:25px;background:var(--glass);border:1px solid var(--border-color);color:var(--text-primary);">
+                                    <button type="submit" style="background:linear-gradient(135deg, #E1306C, #833AB4);border:none;color:white;padding:12px 20px;border-radius:25px;cursor:pointer;">
+                                        <i class="fas fa-paper-plane"></i>
+                                    </button>
+                                </form>
+                            </div>
+                            ` : `
+                            <div style="padding:16px 20px;background:var(--bg-card);border-top:1px solid var(--border-color);text-align:center;color:var(--text-secondary);font-size:13px;">
+                                <i class="fas fa-ban" style="margin-left:8px;"></i>
+                                ليس لديك صلاحية الإرسال
+                            </div>
+                            `}
+                        </div>
+                    </div>
+                </div>
+            </div>`;
+
+        // WhatsApp Section - Removed/Disabled
+        document.getElementById('whatsapp').innerHTML = `
+            <header class="page-header">
+                <div class="header-content"><h1><i class="fab fa-whatsapp" style="color:#25D366;"></i> واتساب</h1><p class="subtitle">قريباً</p></div>
+            </header>
+            <div style="padding:60px;text-align:center;">
+                <i class="fab fa-whatsapp" style="font-size:80px;color:#25D366;opacity:0.3;"></i>
+                <h2 style="margin-top:20px;color:var(--text-secondary);">هذه الميزة قيد التطوير</h2>
+                <p style="color:var(--text-secondary);margin-top:10px;">سيتم إضافة دعم واتساب قريباً</p>
+            </div>`;
+
+        // Team Management Section (Admin Only)
+        const userData = JSON.parse(localStorage.getItem('octobot_user') || '{}');
+        const isAdmin = userData.role === 'admin';
+        const isSupervisor = userData.role === 'supervisor';
+        const canManageTeam = isAdmin || isSupervisor;
+
+        document.getElementById('team').innerHTML = `
+            <header class="page-header">
+                <div class="header-content"><h1><i class="fas fa-users"></i> إدارة الفريق</h1><p class="subtitle">إدارة أعضاء الفريق والصلاحيات والأداء</p></div>
+            </header>
+            <div class="team-container" style="padding:20px;">
+                ${canManageTeam ? `
+                <!-- Team Tabs -->
+                <div class="team-tabs" style="display:flex;gap:5px;margin-bottom:20px;background:var(--bg-secondary);padding:6px;border-radius:12px;flex-wrap:wrap;">
+                    <button class="team-tab active" onclick="app.switchTeamTab('members')" data-tab="members" style="flex:1;min-width:100px;padding:12px 20px;border:none;border-radius:8px;cursor:pointer;font-weight:600;transition:all 0.3s;">
+                        <i class="fas fa-users"></i> الأعضاء
+                    </button>
+                    <button class="team-tab" onclick="app.switchTeamTab('performance')" data-tab="performance" style="flex:1;min-width:100px;padding:12px 20px;border:none;border-radius:8px;cursor:pointer;font-weight:600;transition:all 0.3s;">
+                        <i class="fas fa-chart-bar"></i> الأداء
+                    </button>
+                    <button class="team-tab" onclick="app.switchTeamTab('chat')" data-tab="chat" style="flex:1;min-width:100px;padding:12px 20px;border:none;border-radius:8px;cursor:pointer;font-weight:600;transition:all 0.3s;">
+                        <i class="fas fa-headset"></i> الدعم الفني
+                    </button>
+                    <button class="team-tab" onclick="app.switchTeamTab('settings')" data-tab="settings" style="flex:1;min-width:100px;padding:12px 20px;border:none;border-radius:8px;cursor:pointer;font-weight:600;transition:all 0.3s;">
+                        <i class="fas fa-cog"></i> الإعدادات
+                    </button>
+                </div>
+
+                <!-- Members Tab -->
+                <div id="teamMembersTab" class="team-tab-content" style="display:block;">
+                    <div class="team-actions" style="display:flex;gap:15px;margin-bottom:20px;flex-wrap:wrap;">
+                        <button onclick="app.inviteTeamMember()" class="btn btn-primary"><i class="fas fa-user-plus"></i> دعوة عضو جديد</button>
+                        <button onclick="app.loadTeamMembers()" class="btn btn-secondary"><i class="fas fa-sync"></i> تحديث</button>
+                    </div>
+                    <div id="teamList" class="team-list"></div>
+                </div>
+
+                <!-- Performance Tab -->
+                <div id="teamPerformanceTab" class="team-tab-content" style="display:none;">
+                    <div id="performanceContent" style="text-align:center;padding:40px;color:var(--text-secondary);">
+                        <i class="fas fa-chart-line" style="font-size:48px;margin-bottom:15px;color:#0EA5E9;"></i>
+                        <h3>لوحة الأداء</h3>
+                        <p>جاري تحميل إحصائيات الفريق...</p>
+                    </div>
+                </div>
+
+                <!-- Support Chat Tab -->
+                <div id="teamChatTab" class="team-tab-content" style="display:none;">
+                    <div id="chatContent" style="text-align:center;padding:40px;color:var(--text-secondary);">
+                        <i class="fas fa-headset" style="font-size:48px;margin-bottom:15px;color:#22c55e;"></i>
+                        <h3>الدعم الفني</h3>
+                        <p>جاري التحميل...</p>
+                    </div>
+                </div>
+
+                <!-- Settings Tab -->
+                <div id="teamSettingsTab" class="team-tab-content" style="display:none;">
+                    <div style="background:var(--bg-card);border-radius:16px;padding:24px;border:1px solid var(--border-color);max-width:600px;margin:0 auto;">
+                        <h3 style="margin-bottom:20px;display:flex;align-items:center;gap:10px;"><i class="fas fa-cog" style="color:var(--primary);"></i> إعدادات النظام</h3>
+                        
+                        <div class="form-group" style="margin-bottom:20px;">
+                            <label style="display:block;margin-bottom:8px;font-weight:600;">نص مدة الاشتراك (يظهر في لوحة التحكم)</label>
+                            <input type="text" id="settingSubscriptionText" placeholder="مثال: يتبقى 30 يوم" class="form-control" style="width:100%;padding:12px;border-radius:8px;border:1px solid var(--border-color);background:var(--bg-secondary);color:var(--text-primary);">
+                        </div>
+                        
+                        <button onclick="app.saveSettings()" class="btn btn-primary" style="width:100%;padding:14px;font-weight:bold;">
+                            <i class="fas fa-save"></i> حفظ الإعدادات
+                        </button>
+                    </div>
+                </div>
+                ` : `
+                <div class="info-box" style="background:rgba(255,255,255,0.05);padding:30px;border-radius:16px;text-align:center;">
+                    <i class="fas fa-lock" style="font-size:48px;color:#0EA5E9;margin-bottom:15px;"></i>
+                    <h3>هذه الصفحة للمسؤولين فقط</h3>
+                    <p style="color:rgba(255,255,255,0.6);margin-top:10px;">تواصل مع مسؤول النظام للحصول على صلاحيات.</p>
+                </div>
+                `}
+            </div>`;
+
+        // E-Commerce Section
+        document.getElementById('ecommerce').innerHTML = `
+            <header class="page-header">
+                <div class="header-content">
+                    <h1><i class="fas fa-shopping-cart" style="color:#22c55e;margin-left:10px;"></i>E-Commerce</h1>
+                    <p class="subtitle">إدارة متاجرك الإلكترونية ومنتجاتك وطلباتك</p>
+                </div>
+                <div class="header-actions">
+                    <button class="btn btn-primary" onclick="app.showConnectStoreModal()">
+                        <i class="fas fa-plus"></i> ربط متجر جديد
+                    </button>
+                </div>
+            </header>
+
+            <!-- Store Connection Status -->
+            <div id="ecommerceStoresSection">
+                <div class="ecom-stores-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:20px;margin-bottom:28px;">
+                    <!-- Connected stores will be loaded here -->
+                    <div class="ecom-add-store-card" onclick="app.showConnectStoreModal()" style="
+                        background: linear-gradient(145deg, var(--bg-card), rgba(255,255,255,0.02));
+                        border: 2px dashed rgba(34, 197, 94, 0.3);
+                        border-radius: 20px;
+                        padding: 0;
+                        display: flex;
+                        flex-direction: column;
+                        cursor: pointer;
+                        transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+                        min-height: 260px;
+                        overflow: hidden;
+                        position: relative;
+                    " onmouseover="this.style.borderColor='#22c55e';this.style.transform='translateY(-4px)';this.style.boxShadow='0 12px 40px rgba(34, 197, 94, 0.15)';" 
+                       onmouseout="this.style.borderColor='rgba(34, 197, 94, 0.3)';this.style.transform='translateY(0)';this.style.boxShadow='none';">
+                        <!-- Top Section with gradient -->
+                        <div style="
+                            background: linear-gradient(135deg, rgba(34, 197, 94, 0.15), rgba(22, 163, 74, 0.08));
+                            padding: 28px;
+                            display: flex;
+                            flex-direction: column;
+                            align-items: center;
+                            justify-content: center;
+                            gap: 16px;
+                            flex: 1;
+                        ">
+                            <div style="
+                                width: 72px;
+                                height: 72px;
+                                background: linear-gradient(135deg, #22c55e, #16a34a);
+                                border-radius: 20px;
+                                display: flex;
+                                align-items: center;
+                                justify-content: center;
+                                font-size: 28px;
+                                color: white;
+                                box-shadow: 0 8px 25px rgba(34, 197, 94, 0.35);
+                                transition: all 0.3s ease;
+                            ">
+                                <i class="fas fa-plus"></i>
+                            </div>
+                            <div style="text-align: center;">
+                                <div style="font-weight: 700; font-size: 17px; color: var(--text-primary); margin-bottom: 6px;">ربط متجر جديد</div>
+                                <div style="font-size: 13px; color: var(--text-secondary);">قم بربط متجرك الإلكتروني لإدارته</div>
+                            </div>
+                        </div>
+                        <!-- Bottom Section with platform icons -->
+                        <div style="
+                            padding: 16px 20px;
+                            background: var(--bg-secondary);
+                            border-top: 1px solid var(--border-color);
+                            display: flex;
+                            align-items: center;
+                            justify-content: center;
+                            gap: 20px;
+                        ">
+                            <div style="display:flex;align-items:center;gap:6px;opacity:0.7;" title="Shopify">
+                                <i class="fab fa-shopify" style="font-size:18px;color:#96bf48;"></i>
+                            </div>
+                            <div style="display:flex;align-items:center;gap:6px;opacity:0.7;" title="WooCommerce">
+                                <i class="fab fa-wordpress" style="font-size:18px;color:#9b5c8f;"></i>
+                            </div>
+                            <div style="display:flex;align-items:center;gap:6px;opacity:0.7;font-weight:700;color:#004165;font-size:14px;" title="Salla">
+                                Salla
+                            </div>
+                            <div style="display:flex;align-items:center;gap:6px;opacity:0.7;font-weight:700;color:#ff6b35;font-size:14px;" title="Zid">
+                                Zid
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Quick Stats -->
+            <div class="ecom-stats-row" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:16px;margin-bottom:24px;">
+                <div class="stat-card" style="--accent: #22c55e">
+                    <div class="stat-icon"><i class="fas fa-shopping-bag"></i></div>
+                    <div class="stat-info"><h3 id="ecomTodayOrders">0</h3><p>طلبات اليوم</p></div>
+                </div>
+                <div class="stat-card" style="--accent: #3b82f6">
+                    <div class="stat-icon"><i class="fas fa-box"></i></div>
+                    <div class="stat-info"><h3 id="ecomTotalProducts">0</h3><p>المنتجات</p></div>
+                </div>
+                <div class="stat-card" style="--accent: #a855f7">
+                    <div class="stat-icon"><i class="fas fa-trophy"></i></div>
+                    <div class="stat-info"><h3 id="ecomPendingOrders" style="font-size:14px;line-height:1.4;">-</h3><p>🏆 الأكثر مبيعاً اليوم</p></div>
+                </div>
+                <div class="stat-card" style="--accent: #8b5cf6">
+                    <div class="stat-icon"><i class="fas fa-coins"></i></div>
+                    <div class="stat-info"><h3 id="ecomTodayRevenue">0</h3><p>إيرادات اليوم</p></div>
+                </div>
+            </div>
+
+            <!-- Tabs -->
+            <div class="ecom-tabs" style="display:flex;gap:8px;margin-bottom:20px;flex-wrap:wrap;background:var(--bg-card);padding:8px;border-radius:12px;">
+                <button class="ecom-tab active" onclick="app.switchEcomTab('orders')" data-tab="orders" style="flex:1;min-width:120px;padding:12px 20px;border:none;border-radius:8px;cursor:pointer;font-weight:600;transition:all 0.3s;background:var(--primary);color:white;">
+                    <i class="fas fa-receipt"></i> الطلبات
+                </button>
+                <button class="ecom-tab" onclick="app.switchEcomTab('products')" data-tab="products" style="flex:1;min-width:120px;padding:12px 20px;border:none;border-radius:8px;cursor:pointer;font-weight:600;transition:all 0.3s;background:transparent;color:var(--text-primary);">
+                    <i class="fas fa-boxes"></i> المنتجات
+                </button>
+                <button class="ecom-tab" onclick="app.switchEcomTab('customers')" data-tab="customers" style="flex:1;min-width:120px;padding:12px 20px;border:none;border-radius:8px;cursor:pointer;font-weight:600;transition:all 0.3s;background:transparent;color:var(--text-primary);">
+                    <i class="fas fa-users"></i> العملاء
+                </button>
+                <button class="ecom-tab" onclick="app.switchEcomTab('settings')" data-tab="settings" style="flex:1;min-width:120px;padding:12px 20px;border:none;border-radius:8px;cursor:pointer;font-weight:600;transition:all 0.3s;background:transparent;color:var(--text-primary);">
+                    <i class="fas fa-cog"></i> الإعدادات
+                </button>
+                <button class="ecom-tab" onclick="app.switchEcomTab('ai-content')" data-tab="ai-content" style="flex:1;min-width:140px;padding:12px 20px;border:none;border-radius:8px;cursor:pointer;font-weight:600;transition:all 0.3s;background:linear-gradient(135deg, #8b5cf6, #6366f1);color:white;">
+                    <i class="fas fa-magic"></i> ✨ تصميم المحتوى
+                </button>
+            </div>
+
+            <!-- Orders Tab -->
+            <div id="ecomOrdersTab" class="ecom-tab-content" style="display:block;">
+                <div class="card">
+                    <div class="card-header" style="display:flex;justify-content:space-between;align-items:center;">
+                        <h3><i class="fas fa-receipt" style="color:#22c55e;margin-left:8px;"></i>الطلبات الأخيرة</h3>
+                        <div style="display:flex;gap:10px;">
+                            <select id="ecomOrderFilter" onchange="app.loadEcomOrders(true)" style="padding:8px 16px;border-radius:8px;border:1px solid var(--border-color);background:var(--bg-secondary);color:var(--text-primary);">
+                                <option value="all">جميع الطلبات</option>
+                                <option value="pending">قيد الانتظار</option>
+                                <option value="processing">قيد التنفيذ</option>
+                                <option value="completed">مكتملة</option>
+                                <option value="cancelled">ملغية</option>
+                            </select>
+                            <button onclick="app.refreshEcomOrders()" class="btn btn-secondary"><i class="fas fa-sync"></i></button>
+                        </div>
+                    </div>
+                    <div class="card-body">
+                        <div id="ecomOrdersList" style="text-align:center;padding:40px;color:var(--text-secondary);">
+                            <i class="fas fa-store" style="font-size:48px;margin-bottom:15px;opacity:0.3;"></i>
+                            <p>قم بربط متجرك الإلكتروني لعرض الطلبات</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Products Tab -->
+            <div id="ecomProductsTab" class="ecom-tab-content" style="display:none;">
+                <div class="card">
+                    <div class="card-header" style="display:flex;justify-content:space-between;align-items:center;">
+                        <h3><i class="fas fa-boxes" style="color:#3b82f6;margin-left:8px;"></i>المنتجات</h3>
+                        <div style="display:flex;gap:10px;">
+                            <input type="text" id="ecomProductSearch" oninput="app.loadEcomProducts(true)" placeholder="🔍 بحث عن منتج..." style="padding:8px 16px;border-radius:8px;border:1px solid var(--border-color);background:var(--bg-secondary);color:var(--text-primary);min-width:200px;">
+                            <button onclick="app.syncEcomProducts()" class="btn btn-primary"><i class="fas fa-sync"></i> مزامنة</button>
+                        </div>
+                    </div>
+                    <div class="card-body">
+                        <div id="ecomProductsGrid" style="text-align:center;padding:40px;color:var(--text-secondary);">
+                            <i class="fas fa-box-open" style="font-size:48px;margin-bottom:15px;opacity:0.3;"></i>
+                            <p>قم بربط متجرك الإلكتروني لعرض المنتجات</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Customers Tab -->
+            <div id="ecomCustomersTab" class="ecom-tab-content" style="display:none;">
+                <div class="card">
+                    <div class="card-header" style="display:flex;justify-content:space-between;align-items:center;">
+                        <h3><i class="fas fa-users" style="color:#8b5cf6;margin-left:8px;"></i>العملاء</h3>
+                        <div style="display:flex;gap:10px;">
+                            <input type="text" id="ecomCustomerSearch" oninput="app.searchEcomCustomers()" placeholder="🔍 بحث عن عميل..." style="padding:8px 16px;border-radius:8px;border:1px solid var(--border-color);background:var(--bg-secondary);color:var(--text-primary);min-width:200px;">
+                            <button onclick="app.loadEcomCustomers(true)" class="btn btn-secondary"><i class="fas fa-sync"></i></button>
+                        </div>
+                    </div>
+                    <div class="card-body">
+                        <div id="ecomCustomersList" style="text-align:center;padding:40px;color:var(--text-secondary);">
+                            <i class="fas fa-user-tag" style="font-size:48px;margin-bottom:15px;opacity:0.3;"></i>
+                            <p>اضغط على تبويب العملاء لتحميل البيانات</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Settings Tab -->
+            <div id="ecomSettingsTab" class="ecom-tab-content" style="display:none;">
+                <div class="card">
+                    <div class="card-header">
+                        <h3><i class="fas fa-cog" style="color:#f59e0b;margin-left:8px;"></i>إعدادات E-Commerce</h3>
+                    </div>
+                    <div class="card-body">
+                        <div id="ecomSettingsContent" style="padding:20px;">
+                            <h4 style="margin-bottom:16px;">المتاجر المتصلة</h4>
+                            <div id="connectedStoresList">
+                                <p style="color:var(--text-secondary);">لا توجد متاجر متصلة حتى الآن</p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- AI Content Generator Tab -->
+            <div id="ecom-ai-content" class="ecom-tab-content" style="display:none;">
+                <div style="display:grid;grid-template-columns:350px 1fr;gap:24px;min-height:600px;">
+                    <!-- Products Selection -->
+                    <div style="background:var(--bg-card);border-radius:16px;border:1px solid var(--border-color);overflow:hidden;display:flex;flex-direction:column;">
+                        <div style="padding:16px;border-bottom:1px solid var(--border-color);background:var(--glass);">
+                            <h3 style="margin:0 0 12px;display:flex;align-items:center;gap:8px;">
+                                <i class="fas fa-boxes" style="color:var(--primary);"></i>
+                                اختر المنتجات
+                            </h3>
+                            <input type="text" id="aiProductSearch" placeholder="🔍 ابحث عن منتج..." 
+                                style="width:100%;padding:10px 14px;border-radius:8px;border:1px solid var(--border-color);background:var(--bg-primary);color:var(--text-primary);"
+                                oninput="app.searchAIProducts(this.value)">
+                        </div>
+                        <div id="aiProductsList" style="flex:1;overflow-y:auto;padding:12px;max-height:400px;">
+                            <div style="text-align:center;padding:40px;color:var(--text-secondary);">
+                                <i class="fas fa-spinner fa-spin" style="font-size:32px;"></i>
+                                <p>جاري تحميل المنتجات...</p>
+                            </div>
+                        </div>
+                        <div style="padding:12px 16px;border-top:1px solid var(--border-color);background:var(--glass);font-size:14px;color:var(--text-secondary);">
+                            <i class="fas fa-check-circle"></i> تم اختيار <strong id="selectedProductCount">0</strong> منتج
+                        </div>
+                    </div>
+
+                    <!-- Chat & Output -->
+                    <div style="display:flex;flex-direction:column;gap:16px;">
+                        <!-- Quick Prompts -->
+                        <div style="display:flex;flex-wrap:wrap;gap:8px;">
+                            <button onclick="app.useQuickPrompt('✨ اكتب لي إعلان جذاب للمنتجات دي')" class="btn btn-secondary" style="font-size:13px;padding:8px 14px;">
+                                ✨ إعلان جذاب
+                            </button>
+                            <button onclick="app.useQuickPrompt('🔥 اكتب عرض خاص مع خصم')" class="btn btn-secondary" style="font-size:13px;padding:8px 14px;">
+                                🔥 عرض خاص
+                            </button>
+                            <button onclick="app.useQuickPrompt('📱 اكتب بوست لإنستجرام')" class="btn btn-secondary" style="font-size:13px;padding:8px 14px;">
+                                📱 بوست إنستجرام
+                            </button>
+                            <button onclick="app.useQuickPrompt('💬 اكتب رسالة للواتساب')" class="btn btn-secondary" style="font-size:13px;padding:8px 14px;">
+                                💬 رسالة واتساب
+                            </button>
+                            <button onclick="app.clearAIChat()" class="btn btn-secondary" style="font-size:13px;padding:8px 14px;margin-right:auto;">
+                                🗑️ مسح المحادثة
+                            </button>
+                        </div>
+
+                        <!-- Chat Messages - Reduced Height -->
+                        <div id="aiChatMessages" style="height:250px;flex-shrink:0;background:var(--bg-card);border-radius:16px;border:1px solid var(--border-color);overflow-y:auto;padding:16px;">
+                            <div style="text-align:center;padding:40px 20px;color:var(--text-secondary);">
+                                <i class="fas fa-robot" style="font-size:48px;color:var(--primary);margin-bottom:16px;display:block;"></i>
+                                <h3 style="margin:0 0 8px;color:var(--text-primary);">مرحباً! أنا مساعد المحتوى الإعلاني 🎯</h3>
+                                <p>اختر منتجات من القائمة، ثم اكتب ما تريده وسأنشئ لك محتوى إعلاني احترافي!</p>
+                            </div>
+                        </div>
+
+                        <!-- Input Area -->
+                        <div style="display:flex;gap:12px;">
+                            <input type="text" id="aiMessageInput" placeholder="اكتب طلبك هنا... (مثال: اكتب لي إعلان جذاب)" 
+                                style="flex:1;padding:14px 18px;border-radius:12px;border:1px solid var(--border-color);background:var(--bg-card);color:var(--text-primary);font-size:15px;"
+                                onkeypress="if(event.key==='Enter')app.sendAIMessage()">
+                            <button onclick="app.sendAIMessage()" class="btn btn-primary" style="padding:14px 24px;border-radius:12px;">
+                                <i class="fas fa-paper-plane"></i>
+                                إرسال
+                            </button>
+                        </div>
+
+                        <!-- Output Box - Expanded to fill remaining space -->
+                        <div style="flex:1;display:flex;flex-direction:column;background:var(--bg-card);border-radius:16px;border:1px solid var(--border-color);overflow:hidden;min-height:250px;">
+                            <div style="padding:12px 16px;border-bottom:1px solid var(--border-color);background:var(--glass);display:flex;align-items:center;justify-content:space-between;flex-shrink:0;">
+                                <h4 style="margin:0;display:flex;align-items:center;gap:8px;">
+                                    <i class="fas fa-edit" style="color:var(--success);"></i>
+                                    النص النهائي (قابل للتعديل)
+                                </h4>
+                                <div style="display:flex;gap:8px;">
+                                    <button onclick="app.transferToPublish()" class="btn btn-primary" style="padding:6px 12px;font-size:12px;background:#1877F2;color:#fff;border:none;">
+                                        <i class="fas fa-paper-plane"></i> نشر
+                                    </button>
+                                    <button onclick="app.transferToBroadcast()" class="btn btn-primary" style="padding:6px 12px;font-size:12px;background:var(--success);color:#fff;border:none;">
+                                        <i class="fas fa-bullhorn"></i> إرسال حملة
+                                    </button>
+                                    <button onclick="app.copyAIOutput()" class="btn btn-secondary" style="padding:6px 12px;font-size:12px;">
+                                        <i class="fas fa-copy"></i> نسخ
+                                    </button>
+                                    <button onclick="app.regenerateAI()" class="btn btn-secondary" style="padding:6px 12px;font-size:12px;">
+                                        <i class="fas fa-redo"></i> توليد جديد
+                                    </button>
+                                </div>
+                            </div>
+                            <textarea id="aiOutputBox" placeholder="سيظهر المحتوى الإعلاني هنا..." 
+                                style="flex:1;width:100%;padding:16px;border:none;background:transparent;color:var(--text-primary);font-size:15px;line-height:1.7;resize:none;"></textarea>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        `;
+    }
+
+    // Analytics Section
+    async renderAnalyticsSection() {
+        const container = document.getElementById('analyticsSection');
+        if (!container || this.fbPages.length === 0) {
+            if (container) container.innerHTML = '';
+            return;
+        }
+
+        if (!this.selectedAnalyticsPage) {
+            this.selectedAnalyticsPage = this.fbPages[0].id;
+        }
+        const currentPage = this.fbPages.find(p => p.id === this.selectedAnalyticsPage) || this.fbPages[0];
+
+        container.innerHTML = `
+            <div class="analytics-section">
+                <div class="analytics-header">
+                    <div style="display: flex; align-items: center; gap: 16px;">
+                        <h2><i class="fas fa-chart-line"></i> إحصائيات</h2>
+                        <div class="page-selector-dropdown">
+                            <button class="page-select-btn" onclick="app.togglePageDropdown()">
+                                <img src="${currentPage.picture || 'https://placehold.co/28'}" alt="">
+                                <span>${currentPage.name}</span>
+                                <i class="fas fa-chevron-down"></i>
+                            </button>
+                            <div class="page-dropdown" id="pageDropdown" style="max-height:350px;overflow-y:auto;overscroll-behavior:contain;">
+                                <div style="padding:12px 12px 8px;position:sticky;top:0;background:var(--bg-card);z-index:10;border-bottom:1px solid var(--border-color);">
+                                    <input type="text" placeholder="بحث..." 
+                                        onclick="event.stopPropagation()"
+                                        onkeyup="app.filterDashboardPages(this.value)"
+                                        style="width:100%;padding:8px 12px;border:1px solid var(--border-color);border-radius:8px;background:var(--bg-secondary);color:var(--text-primary);font-size:13px;outline:none;">
+                                </div>
+                                <div id="pageDropdownList">
+                                    ${this.fbPages.map(p => `
+                                        <div class="page-dropdown-item ${p.id === this.selectedAnalyticsPage ? 'selected' : ''}" 
+                                            data-name="${p.name.toLowerCase()}"
+                                            data-id="${p.id}"
+                                            onclick="app.selectAnalyticsPage('${p.id}')">
+                                            <img src="${p.picture || 'https://placehold.co/36'}" alt="">
+                                            <span>${p.name}</span>
+                                        </div>
+                                    `).join('')}
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="period-tabs">
+                        <button class="period-tab ${this.currentPeriod === 'day' ? 'active' : ''}" onclick="app.changePeriod('day')">يومي</button>
+                        <button class="period-tab ${this.currentPeriod === 'week' ? 'active' : ''}" onclick="app.changePeriod('week')">أسبوعي</button>
+                        <button class="period-tab ${this.currentPeriod === 'month' ? 'active' : ''}" onclick="app.changePeriod('month')">شهري</button>
+                    </div>
+                </div>
+                <div id="analyticsCards" class="analytics-grid"><div class="loading-spinner"><div class="spinner"></div></div></div>
+            </div>`;
+
+        await this.loadAnalyticsData(this.selectedAnalyticsPage);
+    }
+
+    togglePageDropdown() {
+        document.getElementById('pageDropdown')?.classList.toggle('show');
+    }
+
+    // Filter dashboard page selector (by name, page ID, or URL)
+    filterDashboardPages(query) {
+        const searchTerm = query.toLowerCase().trim();
+        const items = document.querySelectorAll('#pageDropdownList .page-dropdown-item');
+
+        // Try to extract a long number (likely an ID) from the query
+        const idMatch = searchTerm.match(/(\d{5,})/);
+        const extractedId = idMatch ? idMatch[0] : null;
+
+        items.forEach(item => {
+            const name = item.dataset.name || '';
+            const id = item.dataset.id || '';
+
+            const matchesName = name.includes(searchTerm);
+            // If we extracted an ID, checks if the page ID contains it. 
+            // Otherwise check if the page ID contains the raw query (for partial ID typing)
+            const matchesId = extractedId ? id.includes(extractedId) : id.includes(searchTerm);
+
+            if (matchesName || matchesId) {
+                item.style.display = 'flex';
+            } else {
+                item.style.display = 'none';
+            }
+        });
+    }
+
+    async selectAnalyticsPage(pageId) {
+        this.selectedAnalyticsPage = pageId;
+        document.getElementById('pageDropdown')?.classList.remove('show');
+        await this.renderAnalyticsSection();
+    }
+
+    async loadAnalyticsData(pageId) {
+        const loading = document.querySelector('.analytics-grid .loading-spinner');
+        if (loading) loading.style.display = 'block';
+
+        try {
+            const token = localStorage.getItem('octobot_token');
+            // Use Facebook User ID (stored when connecting Facebook), not database user ID
+            const fbUserId = window.fbIntegration?.userId || localStorage.getItem('fb_user_id');
+
+            if (!fbUserId) {
+                console.warn('[Analytics] No FB User ID found - Facebook not connected');
+                this.renderAnalyticsCards({ total: 0 }, { total: 0 }, { total: 0 }, { total: 0 });
+                return;
+            }
+
+            console.log('[Analytics] Loading data for page:', pageId, 'fbUserId:', fbUserId);
+
+            // Call the real engagement API endpoint
+            const res = await fetch(`${this.API_URL}/api/engagement/${fbUserId}/${pageId}/live`, {
+                headers: {
+                    'Authorization': `Bearer ${token}`
+                }
+            });
+
+            if (!res.ok) {
+                const errData = await res.json().catch(() => ({}));
+                console.warn('[Analytics] API Error:', res.status, errData);
+                this.renderAnalyticsCards({ total: 0 }, { total: 0 }, { total: 0 }, { total: 0 });
+                return;
+            }
+
+            const data = await res.json();
+            console.log('[Analytics] Received stats:', data.stats);
+
+            // Also get messages count
+            let messagesTotal = 0;
+            try {
+                const msgRes = await fetch(`${this.API_URL}/api/analytics/${fbUserId}/${pageId}/messages`, {
+                    headers: { 'Authorization': `Bearer ${token}` }
+                });
+                if (msgRes.ok) {
+                    const msgData = await msgRes.json();
+                    messagesTotal = msgData.totalConversations || 0;
+                }
+            } catch (e) {
+                console.warn('[Analytics] Messages API not available');
+            }
+
+            // Render the analytics cards with real data
+            this.renderAnalyticsCards(
+                { total: data.stats?.totalReactions || 0 },
+                { total: messagesTotal },
+                { total: data.stats?.totalShares || 0 },
+                { total: data.stats?.totalComments || 0 }
+            );
+
+            // Update Fan Count for the selected page
+            const selectedPageObj = this.fbPages.find(p => p.id === pageId);
+            const fanCountEl = document.getElementById('fbFanCount');
+
+            // Try to get from local object first if it has valid data
+            if (fanCountEl && selectedPageObj && (selectedPageObj.fan_count || selectedPageObj.followers_count)) {
+                const count = selectedPageObj.fan_count || selectedPageObj.followers_count || 0;
+                fanCountEl.textContent = this.formatNumber(count);
+                fanCountEl.title = count.toLocaleString('ar-EG');
+            } else if (fanCountEl) {
+                // Fallback: Fetch from Analytics API which guarantees fresh page data
+                try {
+                    console.log('[Analytics] Fetching fresh fan count for page:', pageId);
+                    const analyticsRes = await fetch(`${this.API_URL}/api/analytics/${pageId}?period=day`, {
+                        headers: { 'Authorization': `Bearer ${token}` }
+                    });
+                    if (analyticsRes.ok) {
+                        const analyticsData = await analyticsRes.json();
+                        // Verify we have the data
+                        if (analyticsData.pageStats && analyticsData.pageStats.fanCount !== undefined) {
+                            const newCount = analyticsData.pageStats.fanCount;
+                            fanCountEl.textContent = this.formatNumber(newCount);
+                            fanCountEl.title = newCount.toLocaleString('ar-EG');
+
+                            // Also update the local object for next time
+                            if (selectedPageObj) {
+                                selectedPageObj.fan_count = newCount;
+                            }
+                        }
+                    }
+                } catch (e) {
+                    console.warn('[Analytics] Failed to fetch fan count fallback:', e);
+                }
+            }
+
+        } catch (err) {
+            console.error('Error loading analytics:', err);
+            this.renderAnalyticsCards({ total: 0 }, { total: 0 }, { total: 0 }, { total: 0 });
+        } finally {
+            if (loading) loading.style.display = 'none';
+        }
+    }
+
+    updateDashboardStats(pageStats) {
+        // Load subscription settings regardless of page stats
+        this.loadSettings();
+
+        if (pageStats) {
+            // const postEl = document.getElementById('fbPostCount'); // Replaced by subscription
+            const fanEl = document.getElementById('fbFanCount');
+            // if (postEl) postEl.textContent = this.formatNumber(pageStats.postCount) + (pageStats.hasMore ? '+' : '');
+            if (fanEl) fanEl.textContent = this.formatNumber(pageStats.fanCount);
+        }
+    }
+
+    // Load settings for Admin Panel
+    async loadSettingsForAdmin() {
+        try {
+            const token = localStorage.getItem('octobot_token');
+            const res = await fetch(`${this.API_URL}/api/settings`);
+            const settings = await res.json();
+
+            const input = document.getElementById('settingSubscriptionText');
+            if (input) input.value = settings.subscriptionText || '';
+        } catch (err) {
+            console.error('Error loading settings:', err);
+        }
+    }
+
+    // Save Settings
+    async saveSettings() {
+        try {
+            const token = localStorage.getItem('octobot_token');
+            const subscriptionText = document.getElementById('settingSubscriptionText').value;
+
+            const res = await fetch(`${this.API_URL}/api/settings`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${token}`
+                },
+                body: JSON.stringify({ subscriptionText })
+            });
+
+            if (res.ok) {
+                this.showToast('تم حفظ الإعدادات بنجاح', 'success');
+                // Refresh dashboard immediately if possible
+                this.loadSettings();
+            } else {
+                this.showToast('فشل حفظ الإعدادات', 'error');
+            }
+        } catch (err) {
+            console.error('Error saving settings:', err);
+            this.showToast('حدث خطأ أثناء الحفظ', 'error');
+        }
+    }
+
+    // Load Settings for Dashboard (Public/User view)
+    async loadSettings() {
+        try {
+            const el = document.getElementById('subscriptionDuration');
+            if (!el) return;
+
+            console.log('[App] Loading subscription settings for role:', this.userRole);
+
+            // For non-admin users, show their personal subscription date
+            if (this.userRole !== 'admin') {
+                const token = localStorage.getItem('octobot_token');
+                const meRes = await fetch(`${this.API_URL}/api/auth/me`, {
+                    headers: { 'Authorization': `Bearer ${token}` }
+                });
+
+                if (!meRes.ok) {
+                    console.error('[App] Failed to fetch user info:', meRes.status);
+                    el.textContent = 'خطأ';
+                    return;
+                }
+
+                const meData = await meRes.json();
+                console.log('[App] User info loaded:', meData.user?.id, 'Expires:', meData.user?.subscriptionExpiresAt);
+
+                if (meData.user?.subscriptionExpiresAt) {
+                    const expiresAt = new Date(meData.user.subscriptionExpiresAt);
+                    const isActive = expiresAt > new Date();
+                    const formattedDate = expiresAt.toLocaleDateString('ar-EG', { year: 'numeric', month: 'long', day: 'numeric' });
+
+                    el.innerHTML = `<span style="color: ${isActive ? '#10b981' : '#ef4444'}; font-weight: bold;">${isActive ? 'ينتهي في ' : 'منتهي منذ '}${formattedDate}</span>`;
+
+                    // Update the card accent color based on status
+                    const card = el.closest('.stat-card');
+                    if (card) {
+                        card.style.setProperty('--accent', isActive ? '#10b981' : '#ef4444');
+                        // Add animated glow if active
+                        if (isActive) {
+                            card.style.boxShadow = '0 4px 20px rgba(16, 185, 129, 0.15)';
+                        }
+                    }
+                } else {
+                    el.innerHTML = '<span style="color:var(--text-secondary);font-size:14px;">لا يوجد اشتراك نشط</span>';
+                }
+            } else {
+                // Admin sees the global setting
+                const res = await fetch(`${this.API_URL}/api/settings`);
+                if (res.ok) {
+                    const settings = await res.json();
+                    el.textContent = settings.subscriptionText || 'مفتوح (Admin)';
+                }
+            }
+        } catch (err) {
+            console.error('Error loading dashboard settings:', err);
+            const el = document.getElementById('subscriptionDuration');
+            if (el) el.textContent = 'خطأ في التحميل';
+        }
+    }
+
+    // Render Ads Section
+    renderAdsSection(data, adAccountsData) {
+        const container = document.getElementById('adsSection');
+        if (!container) return;
+
+        // Check if no ad accounts
+        if (!adAccountsData?.accounts || adAccountsData.accounts.length === 0) {
+            if (adAccountsData?.error) {
+                container.innerHTML = `
+                    <div class="ads-section" style="margin-top:20px;">
+                        <h3 style="margin-bottom:16px;"><i class="fas fa-bullhorn"></i> الإعلانات</h3>
+                        <div style="background:var(--bg-card);border-radius:16px;padding:24px;border:1px solid var(--border-color);text-align:center;">
+                            <i class="fas fa-exclamation-triangle" style="font-size:32px;color:var(--warning);margin-bottom:12px;"></i>
+                            <p style="color:var(--text-secondary);margin:0;">${adAccountsData.error}</p>
+                            <p style="color:var(--text-muted);font-size:12px;margin-top:8px;">تأكد من منح صلاحية ads_read وإعادة تسجيل الدخول</p>
+                        </div>
+                    </div>`;
+            } else {
+                container.innerHTML = '';
+            }
+            return;
+        }
+
+        if (!data?.ads || data.ads.length === 0) {
+            container.innerHTML = `
+                <div class="ads-section" style="margin-top:20px;">
+                    <h3 style="margin-bottom:16px;"><i class="fas fa-bullhorn"></i> الإعلانات</h3>
+                    <div style="background:var(--bg-card);border-radius:16px;padding:24px;border:1px solid var(--border-color);text-align:center;">
+                        <i class="fas fa-ad" style="font-size:32px;color:var(--text-muted);margin-bottom:12px;"></i>
+                        <p style="color:var(--text-secondary);margin:0;">لا توجد إعلانات نشطة</p>
+                        <p style="color:var(--text-muted);font-size:12px;margin-top:8px;">حساب الإعلانات: ${adAccountsData.accounts[0].name}</p>
+                    </div>
+                </div>`;
+            return;
+        }
+
+        container.innerHTML = `
+            <div class="ads-section" style="margin-top:20px;">
+                <h3 style="margin-bottom:16px;"><i class="fas fa-bullhorn"></i> الإعلانات النشطة (${data.ads.length})</h3>
+                <div class="ads-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:16px;">
+                    ${data.ads.map(ad => `
+                        <div class="ad-card" style="background:var(--bg-card);border-radius:16px;padding:16px;border:1px solid var(--border-color);">
+                            <p style="margin-bottom:12px;font-size:14px;color:var(--text-primary);max-height:60px;overflow:hidden;font-weight:600;">${ad.name || 'بدون اسم'}</p>
+                            <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:8px;">
+                                <div style="background:var(--glass);padding:8px;border-radius:8px;text-align:center;">
+                                    <div style="font-weight:700;color:var(--primary);">${this.formatNumber(ad.impressions)}</div>
+                                    <small style="color:var(--text-secondary);font-size:11px;">مشاهدات</small>
+                                </div>
+                                <div style="background:var(--glass);padding:8px;border-radius:8px;text-align:center;">
+                                    <div style="font-weight:700;color:var(--success);">${this.formatNumber(ad.reach)}</div>
+                                    <small style="color:var(--text-secondary);font-size:11px;">وصول</small>
+                                </div>
+                                <div style="background:var(--glass);padding:8px;border-radius:8px;text-align:center;">
+                                    <div style="font-weight:700;color:var(--info);">${this.formatNumber(ad.clicks)}</div>
+                                    <small style="color:var(--text-secondary);font-size:11px;">نقرات</small>
+                                </div>
+                                <div style="background:var(--glass);padding:8px;border-radius:8px;text-align:center;">
+                                    <div style="font-weight:700;color:var(--warning);">$${ad.spend}</div>
+                                    <small style="color:var(--text-secondary);font-size:11px;">الإنفاق</small>
+                                </div>
+                            </div>
+                            <div style="margin-top:8px;font-size:11px;color:var(--text-secondary);">
+                                <i class="fas fa-circle" style="color:${ad.status === 'ACTIVE' ? 'var(--success)' : 'var(--text-secondary)'};font-size:8px;"></i> ${ad.status || 'غير معروف'}
+                            </div>
+                        </div>
+                    `).join('')}
+                </div>
+            </div>`;
+    }
+
+    renderAnalyticsCards(engagement, messages, shares, comments) {
+        const container = document.getElementById('analyticsCards');
+        if (!container) return;
+
+        const getTrendHtml = (item) => {
+            if (!item || !item.percentage) return '';
+            const trend = item.percentage >= 0 ? 'up' : 'down';
+            const icon = trend === 'up' ? 'arrow-up' : 'arrow-down';
+            // Determine color class: 'up' (green) or 'down' (red)
+            // Assuming CSS classes .up { color: green } and .down { color: red }
+            return `<div class="analytics-card-trend ${trend}"><i class="fas fa-${icon}"></i> ${Math.abs(item.percentage)}%</div>`;
+        };
+
+        container.innerHTML = `
+            <div class="analytics-card">
+                <div class="analytics-card-icon reactions"><i class="fas fa-heart"></i></div>
+                <div class="analytics-card-value">${this.formatNumber(engagement?.total || 0)}</div>
+                <div class="analytics-card-label">التفاعلات</div>
+                ${getTrendHtml(engagement)}
+            </div>
+            <div class="analytics-card">
+                <div class="analytics-card-icon comments"><i class="fas fa-comment"></i></div>
+                <div class="analytics-card-value">${this.formatNumber(comments?.total || 0)}</div>
+                <div class="analytics-card-label">التعليقات</div>
+                ${getTrendHtml(comments)}
+            </div>
+            <div class="analytics-card">
+                <div class="analytics-card-icon shares"><i class="fas fa-share"></i></div>
+                <div class="analytics-card-value">${this.formatNumber(shares?.total || 0)}</div>
+                <div class="analytics-card-label">المشاركات</div>
+                ${getTrendHtml(shares)}
+            </div>
+            <div class="analytics-card">
+                <div class="analytics-card-icon messages"><i class="fas fa-envelope"></i></div>
+                <div class="analytics-card-value">${this.formatNumber(messages?.total || 0)}</div>
+                <div class="analytics-card-label">المحادثات</div>
+                ${getTrendHtml(messages)}
+            </div>`;
+    }
+
+    // NOTE: updateAnalyticsRealTime is defined earlier in the file (line ~321) with proper pageId filtering
+    // Do not duplicate it here
+
+    renderEngagementChart(engagement) {
+        const container = document.getElementById('engagementChart');
+        if (!container) return;
+
+        const labels = engagement?.labels || [];
+        const datasets = engagement?.datasets || [];
+        const data = datasets[0]?.data || [];
+        const maxVal = Math.max(...data, 1);
+
+        console.log('[Engagement Chart] Rendering with:', { labels, data });
+
+        container.innerHTML = `
+            <h3><i class="fas fa-chart-bar"></i> التفاعل (${this.currentPeriod === 'day' ? 'اليومي' : (this.currentPeriod === 'week' ? 'الأسبوعي' : 'الشهري')})</h3>
+            <div class="chart-wrapper">
+                <div class="chart-bars">
+                    ${labels.map((label, i) => {
+            const value = data[i] || 0;
+            const height = maxVal > 0 ? (value / maxVal) * 180 : 0;
+            const isHighlighted = i === labels.length - 1;
+
+            return `
+                        <div class="chart-bar-item ${isHighlighted ? 'today' : ''}">
+                            <div class="chart-bar-value">${value}</div>
+                            <div class="chart-bar" style="height: ${Math.max(height, 4)}px; ${isHighlighted ? 'background: linear-gradient(180deg, #0EA5E9, #2563EB);' : ''}"></div>
+                            <div class="chart-bar-label" style="${isHighlighted ? 'font-weight:700;color:var(--primary);' : ''}">${label}</div>
+                        </div>`;
+        }).join('')}
+                </div>
+            </div>
+            <div style="text-align:center;margin-top:12px;font-size:12px;color:var(--text-secondary);">
+                <i class="fas fa-info-circle"></i> إجمالي التفاعلات: ${data.reduce((a, b) => a + b, 0)}
+            </div>`;
+    }
+
+    renderHealthScore(health) {
+        const container = document.getElementById('healthScoreCard');
+        if (!container) return;
+
+        const score = health?.score || 0;
+        const color = score >= 70 ? 'var(--success)' : score >= 40 ? 'var(--warning)' : 'var(--danger)';
+
+        container.innerHTML = `
+                    <div class="health-score-card">
+                <h3 style="margin-bottom: 16px;"><i class="fas fa-heartbeat"></i> صحة الصفحة</h3>
+                <div class="health-score-circle" style="--score: ${score}; background: conic-gradient(${color}${score * 3.6}deg, var(--glass) 0deg);">
+                    <div class="health-score-value">${score}</div>
+                </div>
+                <div class="health-score-label">${score >= 70 ? 'ممتاز!' : score >= 40 ? 'جيد' : 'يحتاج تحسين'}</div>
+                ${health?.tips?.length > 0 ? `
+                    <div style="margin-top: 16px; text-align: right; font-size: 13px; color: var(--text-secondary);">
+                        ${health.tips.map(tip => `<p style="margin-bottom: 4px;">💡 ${tip}</p>`).join('')}
+                    </div>
+                ` : ''
+            }
+            </div>`;
+    }
+
+    renderLiveEngagements(data) {
+        const container = document.getElementById('bestTimesCard');
+        if (!container) return;
+
+        const stats = data?.stats || {};
+        const lastUpdated = data?.lastUpdated ? new Date(data.lastUpdated).toLocaleTimeString('ar-EG') : '';
+
+        container.innerHTML = `
+            <div class="live-engagements-container" style="display:grid;grid-template-columns:repeat(3, 1fr);gap:16px;">
+                <!-- Reactions Card -->
+                <div class="engagement-card" style="background:linear-gradient(135deg, #0EA5E9, #F48FB1);border-radius:16px;padding:24px;text-align:center;color:white;box-shadow:0 4px 15px rgba(14,165,233,0.3);">
+                    <div style="font-size:40px;margin-bottom:10px;">❤️</div>
+                    <div style="font-size:32px;font-weight:700;">${this.formatNumber(stats.totalReactions || 0)}</div>
+                    <div style="font-size:14px;opacity:0.9;margin-top:5px;">تفاعل</div>
+                </div>
+
+                <!-- Comments Card -->
+                <div class="engagement-card" style="background:linear-gradient(135deg, #2196F3, #64B5F6);border-radius:16px;padding:24px;text-align:center;color:white;box-shadow:0 4px 15px rgba(33,150,243,0.3);">
+                    <div style="font-size:40px;margin-bottom:10px;">💬</div>
+                    <div style="font-size:32px;font-weight:700;">${this.formatNumber(stats.totalComments || 0)}</div>
+                    <div style="font-size:14px;opacity:0.9;margin-top:5px;">تعليق</div>
+                </div>
+
+                <!-- Shares Card -->
+                <div class="engagement-card" style="background:linear-gradient(135deg, #4CAF50, #81C784);border-radius:16px;padding:24px;text-align:center;color:white;box-shadow:0 4px 15px rgba(76,175,80,0.3);">
+                    <div style="font-size:40px;margin-bottom:10px;">🔄</div>
+                    <div style="font-size:32px;font-weight:700;">${this.formatNumber(stats.totalShares || 0)}</div>
+                    <div style="font-size:14px;opacity:0.9;margin-top:5px;">مشاركة</div>
+                </div>
+            </div>
+
+            <div style="text-align:center;margin-top:16px;font-size:12px;color:var(--text-muted);">
+                <i class="fas fa-sync-alt"></i> آخر تحديث: ${lastUpdated} • من آخر 10 منشورات
+            </div>
+        `;
+    }
+
+    formatTimeAgo(timestamp) {
+        if (!timestamp) return '';
+        const now = new Date();
+        const date = new Date(timestamp);
+        const seconds = Math.floor((now - date) / 1000);
+
+        if (seconds < 60) return 'الآن';
+        if (seconds < 3600) return `منذ ${Math.floor(seconds / 60)}د`;
+        if (seconds < 86400) return `منذ ${Math.floor(seconds / 3600)}س`;
+        return `منذ ${Math.floor(seconds / 86400)}ي`;
+    }
+
+    startLiveEngagementsPolling(pageId) {
+        // Clear any existing polling
+        if (this.liveEngagementsInterval) {
+            clearInterval(this.liveEngagementsInterval);
+        }
+
+        // Poll every 15 seconds
+        this.liveEngagementsInterval = setInterval(async () => {
+            try {
+                const data = await window.fbIntegration.getLiveEngagements(pageId);
+                this.renderLiveEngagements(data);
+            } catch (err) {
+                console.error('Error polling live engagements:', err);
+            }
+        }, 15000);
+    }
+
+    async changePeriod(period) {
+        this.currentPeriod = period;
+        await this.renderAnalyticsSection();
+    }
+
+    renderPagesSection() {
+        const container = document.getElementById('pagesContent');
+        if (!container) return;
+
+        if (!window.fbIntegration?.isConnected()) {
+            container.innerHTML = `
+            <div class="connect-prompt">
+                    <i class="fab fa-facebook"></i>
+                    <h2>ربط حساب فيسبوك</h2>
+                    <p>قم بربط حسابك على فيسبوك لإدارة صفحاتك ونشر المحتوى وجدولة المنشورات</p>
+                    <button class="btn btn-primary" onclick="app.connectFb()"><i class="fab fa-facebook"></i> ربط فيسبوك</button>
+                </div>`;
+            return;
+        }
+
+        if (this.fbPages.length === 0) {
+            container.innerHTML = `
+            <div class="connect-prompt">
+                    <i class="fas fa-folder-open"></i>
+                    <h2>لا توجد صفحات</h2>
+                    <p>لم يتم العثور على صفحات مرتبطة بحسابك.</p>
+                    <button class="btn btn-secondary" onclick="app.loadFbPages()"><i class="fas fa-sync"></i> إعادة تحميل</button>
+                </div>`;
+            return;
+        }
+
+        container.innerHTML = `
+            <div class="pages-grid">
+                ${this.fbPages.map(page => `
+                    <div class="page-card">
+                        <div class="page-card-header">
+                            <img src="${page.picture || 'https://placehold.co/56'}" class="page-avatar" alt="">
+                            <div class="page-info"><h3>${page.name}</h3><p>${page.category || 'صفحة'}</p></div>
+                        </div>
+                        <div class="page-stats">
+                            <div class="page-stat">
+                                <div class="page-stat-value">${this.formatNumber(page.fanCount || 0)}</div>
+                                <div class="page-stat-label">متابع</div>
+                            </div>
+                        </div>
+                        <div class="page-actions">
+                            <button class="btn btn-primary publish-btn" onclick="app.openPublishModal('${page.id}')"><i class="fas fa-paper-plane"></i> نشر</button>
+                        </div>
+                    </div>
+                `).join('')
+            }
+            </div>
+            <div class="scheduled-posts-section" style="margin-top: 32px;">
+                <h2 style="margin-bottom: 16px;"><i class="fas fa-clock"></i> المنشورات المجدولة</h2>
+                <div id="scheduledPostsList"></div>
+            </div>`;
+
+        this.loadScheduledPosts();
+
+        // Apply permission restrictions after render
+        this.applyPermissionRestrictions();
+    }
+
+    async loadScheduledPosts() {
+        const container = document.getElementById('scheduledPostsList');
+        if (!container) return;
+        const posts = await window.fbIntegration?.getScheduledPosts() || [];
+        if (posts.length === 0) {
+            container.innerHTML = '<div class="empty-state"><i class="fas fa-calendar-check"></i><p>لا توجد منشورات مجدولة</p></div>';
+            return;
+        }
+        container.innerHTML = posts.map(post => {
+            const date = new Date(post.scheduledTime);
+            return `
+                <div class="scheduled-post-item">
+                    <div class="post-page"><img src="https://placehold.co/36" alt=""><span>${post.pageName}</span></div>
+                    <div class="post-content">${post.message}</div>
+                    <div class="post-time">
+                        <div class="date">${date.toLocaleDateString('ar-EG')}</div>
+                        <div class="time">${date.toLocaleTimeString('ar-EG', { hour: '2-digit', minute: '2-digit' })}</div>
+                    </div>
+                    <button class="cancel-btn" onclick="app.cancelScheduledPost('${post.id}')"><i class="fas fa-times"></i></button>
+                </div>`;
+        }).join('');
+    }
+
+    async cancelScheduledPost(postId) {
+        await window.fbIntegration?.cancelScheduled(postId);
+        this.showToast('تم إلغاء المنشور المجدول', 'success');
+        this.loadScheduledPosts();
+    }
+
+    toggleWhatsAppInput() {
+        const cta = document.getElementById('publishCTA')?.value;
+        const waGroup = document.getElementById('whatsappInputGroup');
+        if (waGroup) {
+            waGroup.style.display = cta === 'WHATSAPP_MESSAGE' ? 'block' : 'none';
+        }
+    }
+
+    openPublishModal(pageId) {
+        this.selectedPage = pageId;
+        const modal = document.getElementById('publishModal');
+        const selector = document.getElementById('pageSelector');
+
+        // Hide the page selector section since page is already chosen from card
+        const pageSelectorGroup = selector.closest('.form-group');
+        if (pageSelectorGroup) {
+            pageSelectorGroup.style.display = 'none';
+        }
+
+        selector.innerHTML = this.fbPages.map(page => `
+            <div class="page-select-item ${page.id === pageId ? 'selected' : ''}" onclick="app.selectPage('${page.id}')">
+                <img src="${page.picture || 'https://placehold.co/32'}" alt=""><span>${page.name}</span>
+                </div>
+        `).join('');
+        document.getElementById('publishContent').value = '';
+        document.getElementById('publishLink').value = '';
+
+        // Reset media state
+        this.mediaFiles = [];
+        const mediaPreview = document.getElementById('mediaPreview');
+        if (mediaPreview) mediaPreview.innerHTML = '';
+        const mediaInput = document.getElementById('mediaInput');
+        if (mediaInput) mediaInput.value = '';
+
+        this.setPublishType('now');
+        modal.classList.add('active');
+    }
+
+    closePublishModal() { document.getElementById('publishModal').classList.remove('active'); }
+
+    selectPage(pageId) {
+        this.selectedPage = pageId;
+        document.querySelectorAll('.page-select-item').forEach(item => {
+            item.classList.toggle('selected', item.querySelector('span')?.textContent === this.fbPages.find(p => p.id === pageId)?.name);
+        });
+
+        // Automatically subscribe page to webhooks for real-time engagement notifications
+        if (window.fbIntegration) {
+            window.fbIntegration.subscribeToWebhook(pageId).then(result => {
+                if (result.success) {
+                    console.log(`[App] ✅ Page ${pageId} webhook subscription successful`);
+                }
+            }).catch(err => console.log('[App] Webhook subscription skipped:', err.message));
+        }
+    }
+
+    setPublishType(type) {
+        document.querySelectorAll('.publish-option').forEach(opt => opt.classList.toggle('selected', opt.dataset.type === type));
+        document.getElementById('scheduleInputs').classList.toggle('visible', type === 'schedule');
+        const btn = document.getElementById('publishBtn');
+        btn.innerHTML = type === 'now' ? '<i class="fas fa-paper-plane"></i> نشر الآن' : '<i class="fas fa-clock"></i> جدولة';
+    }
+
+    formatNumber(num) {
+        if (num === undefined || num === null) return '0';
+        if (num >= 1000000) return (num / 1000000).toFixed(1) + 'M';
+        if (num >= 1000) return (num / 1000).toFixed(1) + 'K';
+        return num.toString();
+    }
+
+    bindEvents() {
+        document.querySelectorAll('.nav-item').forEach(item => {
+            item.addEventListener('click', e => { e.preventDefault(); this.navigateTo(item.dataset.page); });
+        });
+        document.querySelectorAll('.view-all').forEach(link => {
+            link.addEventListener('click', e => { e.preventDefault(); this.navigateTo(link.dataset.page); });
+        });
+        document.getElementById('addPostBtn')?.addEventListener('click', () => this.openModal());
+        document.getElementById('calendarAddBtn')?.addEventListener('click', () => this.openModal());
+        document.getElementById('closeModal')?.addEventListener('click', () => this.closeModal());
+        document.getElementById('cancelModal')?.addEventListener('click', () => this.closeModal());
+        document.querySelector('#postModal .modal-overlay')?.addEventListener('click', () => this.closeModal());
+        document.getElementById('postForm')?.addEventListener('submit', e => this.handlePostSubmit(e));
+        document.getElementById('closePublishModal')?.addEventListener('click', () => this.closePublishModal());
+        document.querySelector('#publishModal .modal-overlay')?.addEventListener('click', () => this.closePublishModal());
+        document.getElementById('publishForm')?.addEventListener('submit', e => this.handlePublish(e));
+        document.getElementById('prevMonth')?.addEventListener('click', () => this.changeMonth(-1));
+        document.getElementById('nextMonth')?.addEventListener('click', () => this.changeMonth(1));
+        document.querySelectorAll('.filter-btn').forEach(btn => btn.addEventListener('click', () => this.setFilter(btn.dataset.platform)));
+        document.getElementById('themeToggle')?.addEventListener('click', () => this.toggleTheme());
+    }
+
+    async handlePublish(e) {
+        e.preventDefault();
+        const content = document.getElementById('publishContent').value;
+        const link = document.getElementById('publishLink').value;
+        const cta = document.getElementById('publishCTA')?.value || '';
+        const whatsappNumber = document.getElementById('publishWhatsApp')?.value || '';
+        const isScheduled = document.querySelector('.publish-option.selected').dataset.type === 'schedule';
+
+        if (!this.selectedPage) {
+            this.showToast('الرجاء اختيار صفحة', 'error');
+            return;
+        }
+
+        try {
+            // Upload media files first if any
+            this.showToast('جاري الرفع...', 'success');
+            const { mediaData, type: mediaType } = await this.uploadAllMedia();
+
+            let result;
+            if (isScheduled) {
+                const date = document.getElementById('scheduleDate').value;
+                const time = document.getElementById('scheduleTime').value;
+                if (!date || !time) {
+                    this.showToast('الرجاء تحديد التاريخ والوقت', 'error');
+                    return;
+                }
+                // Parse date and time properly for Egypt timezone (UTC+2)
+                const dateTimeStr = `${date}T${time}:00`;
+                const localDate = new Date(dateTimeStr);
+                if (isNaN(localDate.getTime())) {
+                    this.showToast('التاريخ أو الوقت غير صالح', 'error');
+                    return;
+                }
+                const scheduledTime = localDate.toISOString();
+                result = await window.fbIntegration.schedule(this.selectedPage, content, scheduledTime, { link, mediaData, mediaType, cta, whatsappNumber });
+            } else {
+                // Include imageUrls if no local media was uploaded (for product images)
+                const imageUrls = (mediaData.length === 0 && this.tempProductImageUrls && this.tempProductImageUrls.length > 0)
+                    ? this.tempProductImageUrls
+                    : null;
+                result = await window.fbIntegration.publish(this.selectedPage, content, { link, mediaData, mediaType, imageUrls, cta, whatsappNumber });
+            }
+
+            if (result.success) {
+                this.showToast(result.message || 'تم بنجاح!', 'success');
+                this.closePublishModal();
+                this.removeMedia(); // Clear media
+                if (isScheduled) this.loadScheduledPosts();
+            } else {
+                this.showToast(result.error || 'حدث خطأ', 'error');
+            }
+        } catch (err) {
+            console.error(err);
+            this.showToast('حدث خطأ في الاتصال', 'error');
+        }
+    }
+
+    navigateTo(page) {
+        document.querySelectorAll('.nav-item').forEach(item => item.classList.remove('active'));
+        document.querySelector(`[data-page="${page}"]`)?.classList.add('active');
+        document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+        document.getElementById(page)?.classList.add('active');
+        // Save current page to localStorage for persistence after refresh
+        localStorage.setItem('octobot_current_page', page);
+        // Load section data/initialize components
+        console.log('[Navigation] Navigating to page:', page);
+
+        if (page === 'sheets') {
+            this.renderSheetsSection();
+        } else {
+            this.navigateToPage(page);
+        }
+    }
+
+
+    // Restore saved page after refresh
+    restoreCurrentPage() {
+        const savedPage = localStorage.getItem('octobot_current_page');
+        console.log('[App] Restoring page:', savedPage);
+        if (savedPage) {
+            // Check if the page exists and is visible (based on permissions)
+            const navItem = document.querySelector(`[data-page="${savedPage}"]`);
+            const pageSection = document.getElementById(savedPage);
+            if (navItem && pageSection && navItem.style.display !== 'none') {
+                // Remove active from all nav items and pages first
+                document.querySelectorAll('.nav-item').forEach(item => item.classList.remove('active'));
+                document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+                // Add active to saved page
+                navItem.classList.add('active');
+                pageSection.classList.add('active');
+                console.log('[App] Restored to page:', savedPage);
+
+                // IMPORTANT: Trigger page-specific initialization
+                if (savedPage === 'sheets') {
+                    this.renderSheetsSection();
+                } else {
+                    this.navigateToPage(savedPage);
+                }
+            }
+        }
+    }
+
+
+    openModal(postId = null) {
+        this.editingPostId = postId;
+        const modal = document.getElementById('postModal');
+        const title = document.getElementById('modalTitle');
+        const form = document.getElementById('postForm');
+        form.reset();
+        document.querySelectorAll('[name="platform"]').forEach(cb => cb.checked = false);
+        if (postId) {
+            const post = this.posts.find(p => p.id === postId);
+            if (post) {
+                title.textContent = 'تعديل المنشور';
+                document.getElementById('postTitle').value = post.title;
+                document.getElementById('postContent').value = post.content;
+                document.getElementById('postDate').value = post.date;
+                document.getElementById('postTime').value = post.time || '';
+                document.getElementById('postStatus').value = post.status;
+                post.platforms?.forEach(p => {
+                    const cb = document.querySelector(`[name = "platform"][value = "${p}"]`);
+                    if (cb) cb.checked = true;
+                });
+            }
+        } else {
+            title.textContent = 'إضافة منشور جديد';
+            document.getElementById('postDate').value = new Date().toISOString().split('T')[0];
+        }
+        modal.classList.add('active');
+    }
+
+    closeModal() {
+        document.getElementById('postModal').classList.remove('active');
+        this.editingPostId = null;
+    }
+
+    handlePostSubmit(e) {
+        e.preventDefault();
+        const platforms = Array.from(document.querySelectorAll('[name="platform"]:checked')).map(cb => cb.value);
+        const postData = {
+            id: this.editingPostId || Date.now().toString(),
+            title: document.getElementById('postTitle').value,
+            content: document.getElementById('postContent').value,
+            date: document.getElementById('postDate').value,
+            time: document.getElementById('postTime').value,
+            platforms,
+            status: document.getElementById('postStatus').value
+        };
+        if (this.editingPostId) {
+            const index = this.posts.findIndex(p => p.id === this.editingPostId);
+            if (index > -1) this.posts[index] = postData;
+        } else {
+            this.posts.push(postData);
+        }
+        this.savePosts();
+        this.closeModal();
+        this.updateDashboard();
+        this.renderCalendar();
+        this.showToast(this.editingPostId ? 'تم تحديث المنشور' : 'تم إضافة المنشور', 'success');
+    }
+
+    savePosts() { localStorage.setItem('smh_posts', JSON.stringify(this.posts)); }
+
+    async updateDashboard() {
+        const total = this.posts.length;
+        const published = this.posts.filter(p => p.status === 'published').length;
+        const scheduled = this.posts.filter(p => p.status === 'scheduled').length;
+
+        const totalEl = document.getElementById('totalPosts');
+        const publishedEl = document.getElementById('publishedPosts');
+        const scheduledEl = document.getElementById('scheduledPosts');
+        const fbPagesEl = document.getElementById('fbPagesCount');
+
+        if (totalEl) totalEl.textContent = total;
+        if (publishedEl) publishedEl.textContent = published;
+        if (scheduledEl) scheduledEl.textContent = scheduled;
+        if (fbPagesEl) fbPagesEl.textContent = this.fbPages.length;
+
+        await this.loadSettings();
+        this.renderUpcoming();
+        this.loadQuickNotes();
+        await this.renderAnalyticsSection();
+    }
+
+    renderUpcoming() {
+        const list = document.getElementById('upcomingList');
+        const empty = document.getElementById('upcomingEmpty');
+        const today = new Date().toISOString().split('T')[0];
+        const upcoming = this.posts.filter(p => p.date >= today && p.status === 'scheduled').sort((a, b) => a.date.localeCompare(b.date)).slice(0, 5);
+        if (upcoming.length === 0) { list.innerHTML = ''; empty.style.display = 'block'; return; }
+        empty.style.display = 'none';
+        list.innerHTML = upcoming.map(post => {
+            const date = new Date(post.date);
+            const months = ['يناير', 'فبراير', 'مارس', 'أبريل', 'مايو', 'يونيو', 'يوليو', 'أغسطس', 'سبتمبر', 'أكتوبر', 'نوفمبر', 'ديسمبر'];
+            return `
+            <div class="post-item" onclick="app.openModal('${post.id}')">
+                    <div class="post-date"><div class="day">${date.getDate()}</div><div class="month">${months[date.getMonth()]}</div></div>
+                    <div class="post-info"><h4>${post.title}</h4><div class="post-platforms">${(post.platforms || []).map(p => `<i class="fab fa-${p}"></i>`).join('')}</div></div>
+                </div>`;
+        }).join('');
+    }
+
+    // ============= QUICK NOTES =============
+
+    loadQuickNotes() {
+        const userData = JSON.parse(localStorage.getItem('octobot_user') || '{}');
+        const userId = userData.id || 'guest';
+        const notes = JSON.parse(localStorage.getItem(`octobot_notes_${userId}`) || '[]');
+        this.renderQuickNotes(notes);
+    }
+
+    saveQuickNote() {
+        const input = document.getElementById('quickNoteInput');
+        const noteText = input.value.trim();
+
+        if (!noteText) {
+            this.showToast('اكتب ملاحظة أولاً', 'error');
+            return;
+        }
+
+        const userData = JSON.parse(localStorage.getItem('octobot_user') || '{}');
+        const userId = userData.id || 'guest';
+        const notes = JSON.parse(localStorage.getItem(`octobot_notes_${userId}`) || '[]');
+
+        const newNote = {
+            id: Date.now(),
+            text: noteText,
+            author: userData.name || 'مستخدم',
+            authorId: userId,
+            createdAt: new Date().toISOString()
+        };
+
+        notes.unshift(newNote);
+        localStorage.setItem(`octobot_notes_${userId}`, JSON.stringify(notes.slice(0, 30))); // Keep max 30 notes
+
+        input.value = '';
+        this.renderQuickNotes(notes);
+        this.showToast('تم حفظ الملاحظة ✓', 'success');
+    }
+
+    deleteQuickNote(noteId) {
+        const userData = JSON.parse(localStorage.getItem('octobot_user') || '{}');
+        const userId = userData.id || 'guest';
+        let notes = JSON.parse(localStorage.getItem(`octobot_notes_${userId}`) || '[]');
+
+        // Check if user owns this note
+        const note = notes.find(n => n.id === noteId);
+        if (!note || note.authorId !== userId) {
+            this.showToast('لا يمكنك حذف هذه الملاحظة', 'error');
+            return;
+        }
+
+        notes = notes.filter(n => n.id !== noteId);
+        localStorage.setItem(`octobot_notes_${userId}`, JSON.stringify(notes));
+        this.renderQuickNotes(notes);
+        this.showToast('تم حذف الملاحظة', 'success');
+    }
+
+    renderQuickNotes(notes) {
+        const container = document.getElementById('quickNotesList');
+        if (!container) return;
+
+        const userData = JSON.parse(localStorage.getItem('octobot_user') || '{}');
+        const currentUserId = userData.id || 'guest';
+
+        if (notes.length === 0) {
+            container.innerHTML = `
+                <div style="text-align:center;padding:24px;color:var(--text-muted);">
+                    <i class="fas fa-sticky-note" style="font-size:28px;margin-bottom:10px;opacity:0.4;"></i>
+                    <p style="font-size:13px;">لا توجد ملاحظات بعد</p>
+                    <p style="font-size:11px;margin-top:4px;opacity:0.7;">اكتب ملاحظتك الأولى!</p>
+                </div>`;
+            return;
+        }
+
+        container.innerHTML = notes.slice(0, 15).map(note => {
+            const timeAgo = this.formatTimeAgo(note.createdAt);
+            const canDelete = note.authorId === currentUserId;
+            return `
+                <div class="note-item" style="display:flex;align-items:flex-start;gap:10px;padding:12px;background:var(--glass);border-radius:10px;border-right:3px solid var(--primary);transition:all 0.2s;">
+                    <div style="flex:1;min-width:0;">
+                        <div style="font-size:13px;color:var(--text-primary);line-height:1.6;word-break:break-word;">${note.text}</div>
+                        <div style="display:flex;align-items:center;gap:6px;margin-top:8px;font-size:10px;color:var(--text-muted);">
+                            <span style="display:inline-flex;align-items:center;gap:4px;background:var(--glass-strong);padding:2px 8px;border-radius:10px;">
+                                <i class="fas fa-clock"></i> ${timeAgo}
+                            </span>
+                        </div>
+                    </div>
+                    ${canDelete ? `
+                        <button onclick="app.deleteQuickNote(${note.id})" class="delete-note-btn" style="background:var(--glass);border:none;color:var(--text-muted);cursor:pointer;padding:6px 8px;border-radius:6px;opacity:0.5;transition:all 0.2s;" onmouseover="this.style.opacity='1';this.style.background='rgba(244,67,54,0.15)';this.style.color='#f44336'" onmouseout="this.style.opacity='0.5';this.style.background='var(--glass)';this.style.color='var(--text-muted)'">
+                            <i class="fas fa-times"></i>
+                        </button>
+                    ` : ''}
+                </div>`;
+        }).join('');
+    }
+
+    renderCalendar() {
+        const grid = document.getElementById('calendarGrid');
+        const monthDisplay = document.getElementById('currentMonth');
+        if (!grid || !monthDisplay) return;
+
+        const year = this.currentDate.getFullYear();
+        const month = this.currentDate.getMonth();
+        const months = ['يناير', 'فبراير', 'مارس', 'أبريل', 'مايو', 'يونيو', 'يوليو', 'أغسطس', 'سبتمبر', 'أكتوبر', 'نوفمبر', 'ديسمبر'];
+        monthDisplay.textContent = `${months[month]} ${year}`;
+
+        const firstDay = new Date(year, month, 1).getDay();
+        const daysInMonth = new Date(year, month + 1, 0).getDate();
+        const daysInPrevMonth = new Date(year, month, 0).getDate();
+        // Use local date, not UTC, for correct 'today' highlighting
+        const now = new Date();
+        const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+
+        let html = '';
+
+        // Previous month days
+        for (let i = firstDay - 1; i >= 0; i--) {
+            html += `<div class="calendar-cell other-month" style="min-height:80px;padding:8px;background:var(--bg-secondary);opacity:0.5;"><div class="cell-date" style="font-weight:600;color:var(--text-muted);font-size:14px;">${daysInPrevMonth - i}</div></div>`;
+        }
+
+        // Current month days
+        for (let day = 1; day <= daysInMonth; day++) {
+            const dateStr = `${year}-${String(month + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+            const isToday = dateStr === today;
+            const isPast = dateStr < today;
+            const dayPosts = this.posts.filter(p => p.date === dateStr);
+            const scheduledCount = dayPosts.filter(p => p.status === 'scheduled').length;
+
+            html += `
+                <div class="calendar-cell${isToday ? ' today' : ''}${isPast ? ' past' : ''}" 
+                     onclick="${dayPosts.length > 0 ? `app.viewDayPosts('${dateStr}')` : (isPast ? '' : `app.openScheduleModal('${dateStr}')`)}" 
+                     style="min-height:80px;padding:8px;background:${isToday ? 'rgba(14,165,233,0.1)' : isPast ? 'var(--bg-secondary)' : 'var(--bg-card)'};cursor:${isPast && dayPosts.length === 0 ? 'not-allowed' : 'pointer'};transition:all 0.2s;border:1px solid ${isToday ? 'var(--primary)' : 'var(--border-color)'};${isToday ? 'box-shadow:0 4px 15px rgba(14,165,233,0.3);' : ''}${isPast ? 'opacity:0.6;' : ''}"
+                     ${!isPast ? `onmouseover="this.style.background='rgba(14,165,233,0.05)';this.style.transform='scale(1.02)'" onmouseout="this.style.background='${isToday ? 'rgba(14,165,233,0.1)' : 'var(--bg-card)'}';this.style.transform='scale(1)'"` : ''}>
+                    <div style="display:flex;justify-content:space-between;align-items:center;">
+                        <div class="cell-date" style="font-weight:700;color:${isToday ? 'var(--primary)' : isPast ? 'var(--text-muted)' : 'var(--text-primary)'};font-size:16px;">${day}</div>
+                        ${scheduledCount > 0 ? `<span style="background:${isPast ? 'var(--text-muted)' : 'var(--primary)'};color:white;font-size:10px;padding:2px 6px;border-radius:10px;font-weight:600;">${scheduledCount}</span>` : ''}
+                    </div>
+                    ${dayPosts.length > 0 ? `
+                        <div style="margin-top:4px;display:flex;flex-direction:column;gap:2px;">
+                            ${dayPosts.slice(0, 2).map(p => `
+                                <div onclick="event.stopPropagation(); app.viewScheduledPost('${p.id}')" 
+                                     style="font-size:10px;padding:3px 6px;background:${p.status === 'published' ? 'var(--success)' : isPast ? 'var(--text-muted)' : 'var(--primary)'};color:white;border-radius:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:pointer;">
+                                    ${p.title || 'منشور'}
+                                </div>
+                            `).join('')}
+                            ${dayPosts.length > 2 ? `<span style="font-size:9px;color:var(--text-muted);">+${dayPosts.length - 2} المزيد</span>` : ''}
+                        </div>
+                    ` : (isPast ? '' : `<div style="margin-top:8px;text-align:center;"><i class="fas fa-plus" style="color:var(--text-muted);opacity:0.3;font-size:12px;"></i></div>`)}
+                </div>`;
+        }
+
+        // Next month days
+        const totalCells = firstDay + daysInMonth;
+        const remaining = 42 - totalCells;
+        for (let i = 1; i <= remaining; i++) {
+            html += `<div class="calendar-cell other-month" style="min-height:80px;padding:8px;background:var(--bg-secondary);opacity:0.5;"><div class="cell-date" style="font-weight:600;color:var(--text-muted);font-size:14px;">${i}</div></div>`;
+        }
+
+        grid.innerHTML = html;
+    }
+
+    // ============= CALENDAR SCHEDULING =============
+
+    populateCalendarPageSelector() {
+        const select = document.getElementById('calendarPageSelect');
+        if (!select) return;
+
+        select.innerHTML = '<option value="">-- اختر صفحة --</option>';
+        this.fbPages.forEach(page => {
+            select.innerHTML += `<option value="${page.id}">${page.name}</option>`;
+        });
+
+        // Restore previously selected page
+        if (this.calendarSelectedPage) {
+            select.value = this.calendarSelectedPage;
+            this.updateSelectedPageInfo();
+        }
+    }
+
+    selectCalendarPage(pageId) {
+        this.calendarSelectedPage = pageId;
+        this.updateSelectedPageInfo();
+
+        if (pageId) {
+            this.showToast('تم اختيار الصفحة ✓', 'success');
+        }
+    }
+
+    updateSelectedPageInfo() {
+        const infoDiv = document.getElementById('selectedPageInfo');
+        const picEl = document.getElementById('selectedPagePic');
+        const nameEl = document.getElementById('selectedPageName');
+
+        if (!infoDiv || !this.calendarSelectedPage) {
+            if (infoDiv) infoDiv.style.display = 'none';
+            return;
+        }
+
+        const page = this.fbPages.find(p => p.id === this.calendarSelectedPage);
+        if (page) {
+            picEl.src = page.picture || 'https://placehold.co/28';
+            nameEl.textContent = page.name;
+            infoDiv.style.display = 'flex';
+        }
+    }
+
+    openScheduleModal(dateStr) {
+        if (!this.calendarSelectedPage) {
+            this.showToast('اختر صفحة أولاً من القائمة', 'error');
+            return;
+        }
+
+        const page = this.fbPages.find(p => p.id === this.calendarSelectedPage);
+        const dateObj = new Date(dateStr);
+        const dayNames = ['الأحد', 'الإثنين', 'الثلاثاء', 'الأربعاء', 'الخميس', 'الجمعة', 'السبت'];
+        const monthNames = ['يناير', 'فبراير', 'مارس', 'أبريل', 'مايو', 'يونيو', 'يوليو', 'أغسطس', 'سبتمبر', 'أكتوبر', 'نوفمبر', 'ديسمبر'];
+
+        // Create modal
+        const modalHtml = `
+            <div id="calendarScheduleModal" class="modal active" style="position:fixed;inset:0;z-index:1000;display:flex;align-items:center;justify-content:center;">
+                <div class="modal-overlay" onclick="app.closeScheduleModal()" style="position:absolute;inset:0;background:rgba(0,0,0,0.6);backdrop-filter:blur(4px);"></div>
+                <div class="modal-content" style="position:relative;background:var(--bg-card);border-radius:20px;padding:24px;width:90%;max-width:500px;max-height:90vh;overflow-y:auto;border:1px solid var(--border-color);">
+                    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px;">
+                        <h2 style="font-size:20px;display:flex;align-items:center;gap:10px;">
+                            <i class="fas fa-calendar-plus" style="color:var(--primary);"></i>
+                            جدولة منشور
+                        </h2>
+                        <button onclick="app.closeScheduleModal()" style="background:none;border:none;font-size:20px;color:var(--text-muted);cursor:pointer;"><i class="fas fa-times"></i></button>
+                    </div>
+                    
+                    <!-- Selected Page & Date -->
+                    <div style="display:flex;gap:12px;margin-bottom:20px;flex-wrap:wrap;">
+                        <div style="flex:1;min-width:150px;padding:12px;background:var(--glass);border-radius:10px;display:flex;align-items:center;gap:10px;">
+                            <img src="${page?.picture || 'https://placehold.co/32'}" style="width:32px;height:32px;border-radius:50%;">
+                            <div>
+                                <div style="font-size:11px;color:var(--text-muted);">الصفحة</div>
+                                <div style="font-weight:600;color:var(--text-primary);">${page?.name || 'غير محدد'}</div>
+                            </div>
+                        </div>
+                        <div style="flex:1;min-width:150px;padding:12px;background:var(--glass);border-radius:10px;display:flex;align-items:center;gap:10px;">
+                            <i class="fas fa-calendar" style="font-size:24px;color:var(--primary);"></i>
+                            <div>
+                                <div style="font-size:11px;color:var(--text-muted);">التاريخ</div>
+                                <div style="font-weight:600;color:var(--text-primary);">${dayNames[dateObj.getDay()]}، ${dateObj.getDate()} ${monthNames[dateObj.getMonth()]}</div>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <form id="calendarScheduleForm" onsubmit="app.submitScheduleFromCalendar(event, '${dateStr}')">
+                        <!-- Caption -->
+                        <div style="margin-bottom:16px;">
+                            <label style="display:block;margin-bottom:8px;font-weight:600;color:var(--text-primary);">
+                                <i class="fas fa-pen"></i> نص المنشور
+                            </label>
+                            <textarea id="calScheduleCaption" placeholder="اكتب نص المنشور هنا..." required
+                                style="width:100%;min-height:100px;padding:14px;border-radius:12px;border:2px solid var(--border-color);background:var(--bg-secondary);color:var(--text-primary);font-family:inherit;font-size:14px;resize:vertical;transition:border-color 0.3s;"
+                                onfocus="this.style.borderColor='var(--primary)'" onblur="this.style.borderColor='var(--border-color)'"></textarea>
+                        </div>
+                        
+                        <!-- Time with Egypt Timezone -->
+                        <div style="margin-bottom:16px;">
+                            <label style="display:block;margin-bottom:8px;font-weight:600;color:var(--text-primary);">
+                                <i class="fas fa-clock"></i> وقت النشر <span style="font-size:11px;color:var(--text-muted);font-weight:400;">(توقيت القاهرة 🇪🇬 UTC+2)</span>
+                            </label>
+                            <input type="time" id="calScheduleTime" required
+                                style="width:100%;padding:12px 16px;border-radius:12px;border:2px solid var(--border-color);background:var(--bg-secondary);color:var(--text-primary);font-size:16px;cursor:pointer;">
+                        </div>
+                        
+                        <!-- Media Upload - Multiple Files -->
+                        <div style="margin-bottom:20px;">
+                            <label style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+                                <span style="font-weight:600;color:var(--text-primary);">
+                                    <i class="fas fa-images"></i> الوسائط <span style="font-size:11px;color:var(--text-muted);font-weight:400;">(حتى 10 ملفات)</span>
+                                </span>
+                                <span id="mediaCount" style="font-size:12px;color:var(--text-muted);">0/10</span>
+                            </label>
+                            
+                            <!-- Preview Container -->
+                            <div id="calMediaPreviewContainer" style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:10px;"></div>
+                            
+                            <!-- Upload Button -->
+                            <label style="display:flex;align-items:center;justify-content:center;gap:10px;padding:20px;border:2px dashed var(--border-color);border-radius:12px;cursor:pointer;transition:all 0.3s;color:var(--text-secondary);background:var(--bg-secondary);"
+                                   onmouseover="this.style.borderColor='var(--primary)';this.style.background='rgba(14,165,233,0.05)'"
+                                   onmouseout="this.style.borderColor='var(--border-color)';this.style.background='var(--bg-secondary)'">
+                                <i class="fas fa-cloud-upload-alt" style="font-size:24px;color:var(--primary);"></i>
+                                <div style="text-align:center;">
+                                    <div style="font-weight:600;">اضغط لإضافة صور أو فيديوهات</div>
+                                    <div style="font-size:11px;margin-top:4px;opacity:0.7;">يمكنك اختيار عدة ملفات</div>
+                                </div>
+                                <input type="file" id="calMediaInput" accept="image/*,video/*" multiple onchange="app.previewCalendarMedia(event)" style="display:none;">
+                            </label>
+                        </div>
+                        
+                        <!-- Submit Button - Professional Design -->
+                        <button type="submit" id="scheduleSubmitBtn" style="width:100%;padding:16px 24px;background:linear-gradient(135deg,#0EA5E9 0%,#2563EB 50%,#7C4DFF 100%);border:none;color:white;border-radius:14px;font-size:17px;font-weight:700;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:12px;transition:all 0.3s;box-shadow:0 4px 15px rgba(14,165,233,0.4);"
+                                onmouseover="this.style.transform='translateY(-2px)';this.style.boxShadow='0 6px 20px rgba(14,165,233,0.5)'" 
+                                onmouseout="this.style.transform='translateY(0)';this.style.boxShadow='0 4px 15px rgba(14,165,233,0.4)'">
+                            <i class="fas fa-paper-plane" style="font-size:18px;"></i>
+                            <span>جدولة المنشور</span>
+                        </button>
+                        <div style="text-align:center;margin-top:10px;font-size:11px;color:var(--text-muted);">
+                            <i class="fas fa-info-circle"></i> سيتم نشر المنشور تلقائياً في الموعد المحدد
+                        </div>
+                    </form>
+                </div>
+            </div>`;
+
+        document.body.insertAdjacentHTML('beforeend', modalHtml);
+
+        // Initialize media files array
+        this.calendarMediaFiles = [];
+
+        // Set default time to next hour
+        const now = new Date();
+        now.setHours(now.getHours() + 1, 0, 0, 0);
+        document.getElementById('calScheduleTime').value = `${String(now.getHours()).padStart(2, '0')}:00`;
+    }
+
+    closeScheduleModal() {
+        document.getElementById('calendarScheduleModal')?.remove();
+        this.calendarMediaFiles = [];
+    }
+
+    previewCalendarMedia(event) {
+        console.log('[Calendar] previewCalendarMedia called');
+        const files = Array.from(event.target.files);
+        console.log('[Calendar] Files selected:', files.length);
+        if (!files.length) return;
+
+        // Initialize array if not exists
+        if (!this.calendarMediaFiles) this.calendarMediaFiles = [];
+
+        // Check limit
+        const remaining = 10 - this.calendarMediaFiles.length;
+        if (remaining <= 0) {
+            this.showToast('الحد الأقصى 10 ملفات', 'error');
+            return;
+        }
+
+        // Add new files (up to limit)
+        const newFiles = files.slice(0, remaining);
+        this.calendarMediaFiles.push(...newFiles);
+        console.log('[Calendar] Total files now:', this.calendarMediaFiles.length);
+
+        // Get the container directly
+        const container = document.getElementById('calMediaPreviewContainer');
+        console.log('[Calendar] Container found:', !!container);
+
+        if (container) {
+            // Build preview HTML directly here
+            let html = '';
+            this.calendarMediaFiles.forEach((file, index) => {
+                const isImage = file.type.startsWith('image/');
+                const isVideo = file.type.startsWith('video/');
+                const url = URL.createObjectURL(file);
+                console.log('[Calendar] Creating preview for:', file.name, 'isImage:', isImage, 'url:', url);
+
+                html += `
+                <div style="position:relative;width:70px;height:70px;border-radius:10px;overflow:hidden;border:2px solid #0EA5E9;background:#1a1a2e;flex-shrink:0;">
+                    ${isImage ? `<img src="${url}" style="width:100%;height:100%;object-fit:cover;display:block;">` : ''}
+                    ${isVideo ? `
+                        <video src="${url}" style="width:100%;height:100%;object-fit:cover;"></video>
+                        <div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.4);">
+                            <i class="fas fa-play" style="color:white;font-size:18px;"></i>
+                        </div>
+                    ` : ''}
+                    <button type="button" onclick="event.stopPropagation();app.removeCalendarMediaAt(${index})"
+                        style="position:absolute;top:2px;right:2px;width:20px;height:20px;border-radius:50%;background:#ef4444;border:2px solid white;color:white;cursor:pointer;font-size:10px;display:flex;align-items:center;justify-content:center;box-shadow:0 2px 6px rgba(0,0,0,0.4);">
+                        ×
+                    </button>
+                </div>`;
+            });
+
+            container.innerHTML = html;
+            container.style.display = 'flex';
+            container.style.flexWrap = 'wrap';
+            container.style.gap = '8px';
+            container.style.marginBottom = '12px';
+            container.style.padding = '10px';
+            container.style.background = 'rgba(14,165,233,0.1)';
+            container.style.borderRadius = '12px';
+            console.log('[Calendar] Preview HTML set, container innerHTML length:', container.innerHTML.length);
+        }
+
+        // Update count
+        const countEl = document.getElementById('mediaCount');
+        if (countEl) {
+            countEl.textContent = `${this.calendarMediaFiles.length}/10`;
+        }
+
+        // Clear input to allow re-selecting same files
+        event.target.value = '';
+    }
+
+    renderMediaPreviews() {
+        const container = document.getElementById('calMediaPreviewContainer');
+        if (!container) {
+            console.error('[Calendar] Preview container not found!');
+            return;
+        }
+
+        if (!this.calendarMediaFiles || this.calendarMediaFiles.length === 0) {
+            container.innerHTML = '';
+            container.style.display = 'none';
+            return;
+        }
+
+        // Make sure container is visible
+        container.style.display = 'flex';
+
+        let html = '';
+        this.calendarMediaFiles.forEach((file, index) => {
+            const isImage = file.type.startsWith('image/');
+            const isVideo = file.type.startsWith('video/');
+            const url = URL.createObjectURL(file);
+
+            html += `
+                <div style="position:relative;width:80px;height:80px;border-radius:12px;overflow:hidden;border:2px solid var(--primary);background:var(--bg-secondary);flex-shrink:0;">
+                    ${isImage ? `<img src="${url}" style="width:100%;height:100%;object-fit:cover;display:block;" onerror="this.src='';this.style.display='none';">` : ''}
+                    ${isVideo ? `
+                        <video src="${url}" style="width:100%;height:100%;object-fit:cover;"></video>
+                        <div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.3);">
+                            <i class="fas fa-play" style="color:white;font-size:20px;"></i>
+                        </div>
+                    ` : ''}
+                    <button type="button" onclick="event.stopPropagation();app.removeCalendarMediaAt(${index})" 
+                        style="position:absolute;top:4px;right:4px;width:22px;height:22px;border-radius:50%;background:linear-gradient(135deg,#ef4444,#dc2626);border:2px solid white;color:white;cursor:pointer;font-size:10px;display:flex;align-items:center;justify-content:center;box-shadow:0 2px 6px rgba(0,0,0,0.3);z-index:10;">
+                        <i class="fas fa-times"></i>
+                    </button>
+                </div>`;
+        });
+
+        container.innerHTML = html;
+        console.log('[Calendar] Rendered', this.calendarMediaFiles.length, 'media previews');
+    }
+
+    removeCalendarMediaAt(index) {
+        this.calendarMediaFiles.splice(index, 1);
+        this.renderMediaPreviews();
+        document.getElementById('mediaCount').textContent = `${this.calendarMediaFiles.length}/10`;
+    }
+
+    removeCalendarMedia() {
+        this.calendarMediaFiles = [];
+        this.renderMediaPreviews();
+        document.getElementById('mediaCount').textContent = '0/10';
+        document.getElementById('calMediaInput').value = '';
+    }
+
+    async submitScheduleFromCalendar(event, dateStr) {
+        event.preventDefault();
+
+        const caption = document.getElementById('calScheduleCaption').value.trim();
+        const time = document.getElementById('calScheduleTime').value;
+
+        if (!caption) {
+            this.showToast('اكتب نص المنشور', 'error');
+            return;
+        }
+
+        if (!time) {
+            this.showToast('اختر وقت النشر', 'error');
+            return;
+        }
+
+        // Create date in local timezone and send as ISO string
+        // The server will parse this correctly
+        const localDate = new Date(`${dateStr}T${time}:00`);
+        const scheduledTime = localDate.toISOString();
+
+        try {
+            this.showToast('جاري الجدولة...', 'success');
+
+            let mediaUrls = [];
+            let mediaType = null;
+
+            // Upload multiple media files
+            if (this.calendarMediaFiles && this.calendarMediaFiles.length > 0) {
+                for (const file of this.calendarMediaFiles) {
+                    const formData = new FormData();
+                    formData.append('media', file);
+
+                    try {
+                        const uploadRes = await fetch('/api/upload', {
+                            method: 'POST',
+                            body: formData
+                        });
+
+                        if (uploadRes.ok) {
+                            const uploadData = await uploadRes.json();
+                            mediaUrls.push(uploadData.url);
+
+                            // Set media type (all files should be same type for FB)
+                            if (!mediaType) {
+                                mediaType = file.type.startsWith('image/') ? 'photo' : 'video';
+                            }
+                        }
+                    } catch (uploadErr) {
+                        console.error('Upload error:', uploadErr);
+                    }
+                }
+            }
+
+            const result = await window.fbIntegration.schedule(
+                this.calendarSelectedPage,
+                caption,
+                scheduledTime,
+                {
+                    mediaData: mediaUrls.length === 1 ? mediaUrls[0] : mediaUrls,
+                    mediaType: mediaUrls.length > 1 ? 'photos' : mediaType,
+                    mediaUrls: mediaUrls // Pass all URLs
+                }
+            );
+
+            if (result.success) {
+                this.showToast('تم جدولة المنشور بنجاح! ✓', 'success');
+                this.closeScheduleModal();
+
+                // Add to local posts for display
+                this.posts.push({
+                    id: Date.now().toString(),
+                    title: caption.substring(0, 30) + (caption.length > 30 ? '...' : ''),
+                    content: caption,
+                    date: dateStr,
+                    time: time,
+                    status: 'scheduled',
+                    pageId: this.calendarSelectedPage,
+                    mediaUrls: mediaUrls,
+                    mediaType: mediaType
+                });
+                this.savePosts();
+                this.renderCalendar();
+            } else {
+                this.showToast(result.error || 'فشل في الجدولة', 'error');
+            }
+        } catch (err) {
+            console.error('Schedule error:', err);
+            this.showToast('حدث خطأ', 'error');
+        }
+    }
+
+    // View/Edit/Delete scheduled post
+    viewScheduledPost(postId) {
+        const post = this.posts.find(p => p.id === postId);
+        if (!post) return;
+
+        const page = this.fbPages.find(p => p.id === post.pageId);
+
+        const modalHtml = `
+            <div id="viewPostModal" class="modal active" style="position:fixed;inset:0;z-index:1000;display:flex;align-items:center;justify-content:center;">
+                <div class="modal-overlay" onclick="app.closeViewPostModal()" style="position:absolute;inset:0;background:rgba(0,0,0,0.6);backdrop-filter:blur(4px);"></div>
+                <div class="modal-content" style="position:relative;background:var(--bg-card);border-radius:20px;padding:24px;width:90%;max-width:450px;max-height:90vh;overflow-y:auto;border:1px solid var(--border-color);">
+                    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px;">
+                        <h2 style="font-size:18px;display:flex;align-items:center;gap:10px;">
+                            <i class="fas fa-file-alt" style="color:var(--primary);"></i>
+                            تفاصيل المنشور
+                        </h2>
+                        <button onclick="app.closeViewPostModal()" style="background:none;border:none;font-size:20px;color:var(--text-muted);cursor:pointer;"><i class="fas fa-times"></i></button>
+                    </div>
+                    
+                    <!-- Status Badge -->
+                    <div style="margin-bottom:16px;">
+                        <span style="display:inline-flex;align-items:center;gap:6px;padding:6px 12px;border-radius:20px;font-size:12px;font-weight:600;background:${post.status === 'published' ? 'rgba(76,175,80,0.15)' : 'rgba(14,165,233,0.15)'};color:${post.status === 'published' ? 'var(--success)' : 'var(--primary)'};">
+                            <i class="fas ${post.status === 'published' ? 'fa-check-circle' : 'fa-clock'}"></i>
+                            ${post.status === 'published' ? 'تم النشر' : 'مجدول'}
+                        </span>
+                    </div>
+                    
+                    <!-- Page & Date -->
+                    <div style="display:flex;gap:10px;margin-bottom:16px;flex-wrap:wrap;">
+                        <div style="flex:1;min-width:120px;padding:10px;background:var(--glass);border-radius:10px;text-align:center;">
+                            <div style="font-size:11px;color:var(--text-muted);">الصفحة</div>
+                            <div style="font-weight:600;color:var(--text-primary);font-size:13px;margin-top:4px;">${page?.name || 'غير محدد'}</div>
+                        </div>
+                        <div style="flex:1;min-width:120px;padding:10px;background:var(--glass);border-radius:10px;text-align:center;">
+                            <div style="font-size:11px;color:var(--text-muted);">التاريخ</div>
+                            <div style="font-weight:600;color:var(--text-primary);font-size:13px;margin-top:4px;">${post.date}</div>
+                        </div>
+                        <div style="flex:1;min-width:120px;padding:10px;background:var(--glass);border-radius:10px;text-align:center;">
+                            <div style="font-size:11px;color:var(--text-muted);">الوقت</div>
+                            <div style="font-weight:600;color:var(--text-primary);font-size:13px;margin-top:4px;">${post.time || 'غير محدد'}</div>
+                        </div>
+                    </div>
+                    
+                    <!-- Content -->
+                    <div style="margin-bottom:20px;">
+                        <div style="font-size:12px;color:var(--text-muted);margin-bottom:8px;"><i class="fas fa-align-right"></i> المحتوى:</div>
+                        <div style="padding:14px;background:var(--bg-secondary);border-radius:10px;font-size:14px;color:var(--text-primary);line-height:1.6;white-space:pre-wrap;">${post.content || post.title}</div>
+                    </div>
+                    
+                    <!-- Actions -->
+                    <div style="display:flex;gap:10px;">
+                        ${post.status === 'scheduled' ? `
+                            <button onclick="app.editScheduledPost('${post.id}')" style="flex:1;padding:12px;background:var(--glass);border:2px solid var(--border-color);color:var(--text-primary);border-radius:10px;font-size:14px;font-weight:600;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:8px;transition:all 0.2s;" onmouseover="this.style.borderColor='var(--primary)'" onmouseout="this.style.borderColor='var(--border-color)'">
+                                <i class="fas fa-edit"></i> تعديل
+                            </button>
+                        ` : ''}
+                        <button onclick="app.deleteScheduledPost('${post.id}')" style="flex:1;padding:12px;background:rgba(244,67,54,0.1);border:2px solid rgba(244,67,54,0.3);color:#f44336;border-radius:10px;font-size:14px;font-weight:600;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:8px;transition:all 0.2s;" onmouseover="this.style.background='rgba(244,67,54,0.2)'" onmouseout="this.style.background='rgba(244,67,54,0.1)'">
+                            <i class="fas fa-trash-alt"></i> حذف
+                        </button>
+                    </div>
+                </div>
+            </div>`;
+
+        document.body.insertAdjacentHTML('beforeend', modalHtml);
+    }
+
+    closeViewPostModal() {
+        document.getElementById('viewPostModal')?.remove();
+    }
+
+    editScheduledPost(postId) {
+        const post = this.posts.find(p => p.id === postId);
+        if (!post) return;
+
+        this.closeViewPostModal();
+
+        // Store current post ID and existing media for editing
+        this.editingScheduledPostId = postId;
+        this.editScheduleExistingMedia = [];
+        this.editScheduleNewMedia = [];
+
+        // Get existing media
+        const mediaUrls = post.mediaUrls || post.imageUrl || [];
+        const mediaArray = Array.isArray(mediaUrls) ? mediaUrls : [mediaUrls];
+
+        mediaArray.forEach(media => {
+            if (media) {
+                let filename = '';
+                if (typeof media === 'object' && media.filename) {
+                    filename = media.filename;
+                } else if (typeof media === 'string') {
+                    filename = media.includes('/uploads/') ? media.split('/uploads/').pop() : media;
+                }
+                if (filename) {
+                    this.editScheduleExistingMedia.push(filename);
+                }
+            }
+        });
+
+        const modalHtml = `
+            <div id="calendarScheduleModal" class="modal active" style="position:fixed;inset:0;z-index:1000;display:flex;align-items:center;justify-content:center;">
+                <div class="modal-overlay" onclick="app.closeScheduleModal()" style="position:absolute;inset:0;background:rgba(0,0,0,0.6);backdrop-filter:blur(4px);"></div>
+                <div class="modal-content" style="position:relative;background:var(--bg-card);border-radius:20px;padding:24px;width:90%;max-width:520px;max-height:90vh;overflow-y:auto;border:1px solid var(--border-color);">
+                    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px;">
+                        <h2 style="font-size:20px;display:flex;align-items:center;gap:10px;">
+                            <i class="fas fa-edit" style="color:var(--primary);"></i>
+                            تعديل المنشور المجدول
+                        </h2>
+                        <button onclick="app.closeScheduleModal()" style="background:none;border:none;font-size:20px;color:var(--text-muted);cursor:pointer;"><i class="fas fa-times"></i></button>
+                    </div>
+                    
+                    <form id="editScheduleForm" onsubmit="app.updateScheduledPost(event, '${post.id}')">
+                        <!-- Caption -->
+                        <div style="margin-bottom:16px;">
+                            <label style="display:block;margin-bottom:8px;font-weight:600;color:var(--text-primary);"><i class="fas fa-pen"></i> نص المنشور</label>
+                            <textarea id="editScheduleCaption" required style="width:100%;min-height:100px;padding:14px;border-radius:12px;border:2px solid var(--border-color);background:var(--bg-secondary);color:var(--text-primary);font-family:inherit;font-size:14px;resize:vertical;">${post.content || post.title}</textarea>
+                        </div>
+                        
+                        <!-- Media Section - Editable -->
+                        <div style="margin-bottom:16px;">
+                            <label style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+                                <span style="font-weight:600;color:var(--text-primary);">
+                                    <i class="fas fa-images"></i> الوسائط
+                                </span>
+                                <span id="editMediaCount" style="font-size:12px;color:var(--text-muted);">0/10</span>
+                            </label>
+                            
+                            <!-- Existing + New Media Preview -->
+                            <div id="editMediaPreviewContainer" style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:10px;"></div>
+                            
+                            <!-- Upload Button -->
+                            <label style="display:flex;align-items:center;justify-content:center;gap:10px;padding:16px;border:2px dashed var(--border-color);border-radius:12px;cursor:pointer;transition:all 0.3s;color:var(--text-secondary);background:var(--bg-secondary);"
+                                   onmouseover="this.style.borderColor='var(--primary)';this.style.background='rgba(14,165,233,0.05)'"
+                                   onmouseout="this.style.borderColor='var(--border-color)';this.style.background='var(--bg-secondary)'">
+                                <i class="fas fa-plus-circle" style="font-size:20px;color:var(--primary);"></i>
+                                <span style="font-weight:600;">إضافة صور أو فيديوهات</span>
+                                <input type="file" id="editMediaInput" accept="image/*,video/*" multiple onchange="app.previewEditScheduleMedia(event)" style="display:none;">
+                            </label>
+                        </div>
+                        
+                        <!-- Date & Time -->
+                        <div style="display:flex;gap:12px;margin-bottom:20px;">
+                            <div style="flex:1;">
+                                <label style="display:block;margin-bottom:8px;font-weight:600;color:var(--text-primary);"><i class="fas fa-calendar"></i> التاريخ</label>
+                                <input type="date" id="editScheduleDate" value="${post.date}" required style="width:100%;padding:12px;border-radius:12px;border:2px solid var(--border-color);background:var(--bg-secondary);color:var(--text-primary);">
+                            </div>
+                            <div style="flex:1;">
+                                <label style="display:block;margin-bottom:8px;font-weight:600;color:var(--text-primary);"><i class="fas fa-clock"></i> الوقت</label>
+                                <input type="time" id="editScheduleTime" value="${post.time || '12:00'}" required style="width:100%;padding:12px;border-radius:12px;border:2px solid var(--border-color);background:var(--bg-secondary);color:var(--text-primary);">
+                            </div>
+                        </div>
+                        
+                        <!-- Submit -->
+                        <button type="submit" style="width:100%;padding:14px;background:linear-gradient(135deg,var(--primary),var(--secondary));border:none;color:white;border-radius:12px;font-size:16px;font-weight:600;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:10px;">
+                            <i class="fas fa-save"></i> حفظ التعديلات
+                        </button>
+                    </form>
+                </div>
+            </div>`;
+
+        document.body.insertAdjacentHTML('beforeend', modalHtml);
+
+        // Render existing media preview
+        this.renderEditScheduleMediaPreview();
+    }
+
+    // Render media preview for edit modal
+    renderEditScheduleMediaPreview() {
+        const container = document.getElementById('editMediaPreviewContainer');
+        if (!container) return;
+
+        const totalCount = (this.editScheduleExistingMedia?.length || 0) + (this.editScheduleNewMedia?.length || 0);
+
+        // Update count
+        const countEl = document.getElementById('editMediaCount');
+        if (countEl) countEl.textContent = `${totalCount}/10`;
+
+        if (totalCount === 0) {
+            container.innerHTML = '';
+            container.style.display = 'none';
+            return;
+        }
+
+        container.style.display = 'flex';
+        let html = '';
+
+        // Render existing media (from server)
+        this.editScheduleExistingMedia?.forEach((filename, index) => {
+            const isVideo = filename.match(/\.(mp4|mov|avi|webm)$/i);
+            const imgUrl = '/uploads/' + filename;
+
+            html += `
+                <div style="position:relative;width:80px;height:80px;border-radius:10px;overflow:hidden;border:2px solid #10b981;background:var(--bg-secondary);flex-shrink:0;">
+                    ${!isVideo ? `<img src="${imgUrl}" style="width:100%;height:100%;object-fit:cover;" onerror="this.style.display='none'">` : `
+                        <div style="width:100%;height:100%;display:flex;align-items:center;justify-content:center;background:#1a1a2e;">
+                            <i class="fas fa-video" style="font-size:20px;color:var(--primary);"></i>
+                        </div>
+                    `}
+                    <button type="button" onclick="app.removeEditExistingMedia(${index})" 
+                        style="position:absolute;top:2px;right:2px;width:22px;height:22px;border-radius:50%;background:#ef4444;border:2px solid white;color:white;cursor:pointer;font-size:12px;display:flex;align-items:center;justify-content:center;">
+                        ×
+                    </button>
+                    <div style="position:absolute;bottom:0;left:0;right:0;padding:2px;background:rgba(16,185,129,0.9);font-size:8px;color:white;text-align:center;">محفوظ</div>
+                </div>`;
+        });
+
+        // Render new media (not yet uploaded)
+        this.editScheduleNewMedia?.forEach((file, index) => {
+            const isImage = file.type.startsWith('image/');
+            const isVideo = file.type.startsWith('video/');
+            const url = URL.createObjectURL(file);
+
+            html += `
+                <div style="position:relative;width:80px;height:80px;border-radius:10px;overflow:hidden;border:2px solid var(--primary);background:var(--bg-secondary);flex-shrink:0;">
+                    ${isImage ? `<img src="${url}" style="width:100%;height:100%;object-fit:cover;">` : ''}
+                    ${isVideo ? `
+                        <video src="${url}" style="width:100%;height:100%;object-fit:cover;"></video>
+                        <div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.3);pointer-events:none;">
+                            <i class="fas fa-play" style="color:white;font-size:20px;"></i>
+                        </div>
+                    ` : ''}
+                    <button type="button" onclick="app.removeEditNewMedia(${index})" 
+                        style="position:absolute;top:2px;right:2px;width:22px;height:22px;border-radius:50%;background:#ef4444;border:2px solid white;color:white;cursor:pointer;font-size:12px;display:flex;align-items:center;justify-content:center;">
+                        ×
+                    </button>
+                    <div style="position:absolute;bottom:0;left:0;right:0;padding:2px;background:rgba(14,165,233,0.9);font-size:8px;color:white;text-align:center;">جديد</div>
+                </div>`;
+        });
+
+        container.innerHTML = html;
+    }
+
+    // Preview new media for edit modal
+    previewEditScheduleMedia(event) {
+        const files = Array.from(event.target.files);
+        if (!files.length) return;
+
+        if (!this.editScheduleNewMedia) this.editScheduleNewMedia = [];
+
+        const currentTotal = (this.editScheduleExistingMedia?.length || 0) + this.editScheduleNewMedia.length;
+        const remaining = 10 - currentTotal;
+
+        if (remaining <= 0) {
+            this.showToast('الحد الأقصى 10 ملفات', 'error');
+            return;
+        }
+
+        const newFiles = files.slice(0, remaining);
+        this.editScheduleNewMedia.push(...newFiles);
+        this.renderEditScheduleMediaPreview();
+        event.target.value = '';
+    }
+
+    // Remove existing media (already uploaded)
+    removeEditExistingMedia(index) {
+        this.editScheduleExistingMedia.splice(index, 1);
+        this.renderEditScheduleMediaPreview();
+    }
+
+    // Remove new media (not yet uploaded)
+    removeEditNewMedia(index) {
+        this.editScheduleNewMedia.splice(index, 1);
+        this.renderEditScheduleMediaPreview();
+    }
+
+    async updateScheduledPost(event, postId) {
+        event.preventDefault();
+
+        const caption = document.getElementById('editScheduleCaption').value.trim();
+        const date = document.getElementById('editScheduleDate').value;
+        const time = document.getElementById('editScheduleTime').value;
+
+        this.showToast('جاري حفظ التعديلات...', 'success');
+
+        try {
+            // Combine existing media with newly uploaded media
+            let allMediaUrls = [];
+            let mediaType = null;
+
+            // Add existing media (already on server)
+            if (this.editScheduleExistingMedia && this.editScheduleExistingMedia.length > 0) {
+                allMediaUrls = this.editScheduleExistingMedia.map(filename => '/uploads/' + filename);
+                const firstFile = this.editScheduleExistingMedia[0];
+                mediaType = firstFile.match(/\.(mp4|mov|avi|webm)$/i) ? 'video' : 'photo';
+            }
+
+            // Upload new media files
+            if (this.editScheduleNewMedia && this.editScheduleNewMedia.length > 0) {
+                for (const file of this.editScheduleNewMedia) {
+                    const formData = new FormData();
+                    formData.append('media', file);
+
+                    try {
+                        const uploadRes = await fetch('/api/upload', {
+                            method: 'POST',
+                            body: formData
+                        });
+
+                        if (uploadRes.ok) {
+                            const uploadData = await uploadRes.json();
+                            allMediaUrls.push(uploadData.url);
+
+                            if (!mediaType) {
+                                mediaType = file.type.startsWith('image/') ? 'photo' : 'video';
+                            }
+                        }
+                    } catch (uploadErr) {
+                        console.error('Upload error:', uploadErr);
+                    }
+                }
+            }
+
+            // Update local post
+            const postIndex = this.posts.findIndex(p => p.id === postId);
+            if (postIndex > -1) {
+                this.posts[postIndex].content = caption;
+                this.posts[postIndex].title = caption.substring(0, 30) + (caption.length > 30 ? '...' : '');
+                this.posts[postIndex].date = date;
+                this.posts[postIndex].time = time;
+                this.posts[postIndex].mediaUrls = allMediaUrls;
+                this.posts[postIndex].mediaType = allMediaUrls.length > 1 ? 'photos' : mediaType;
+                this.savePosts();
+            }
+
+            // TODO: Update server scheduled post (reschedule with new data)
+            // For now, cancel the old one and create a new one
+            try {
+                await window.fbIntegration.cancelScheduled(postId);
+
+                const scheduledTime = new Date(`${date}T${time}:00`).toISOString();
+                const post = this.posts[postIndex];
+
+                await window.fbIntegration.schedule(
+                    post.pageId,
+                    caption,
+                    scheduledTime,
+                    {
+                        mediaData: allMediaUrls.length === 1 ? allMediaUrls[0] : allMediaUrls,
+                        mediaType: allMediaUrls.length > 1 ? 'photos' : mediaType,
+                        mediaUrls: allMediaUrls
+                    }
+                );
+            } catch (serverErr) {
+                console.warn('Server update skipped:', serverErr);
+            }
+
+            // Cleanup
+            this.editScheduleExistingMedia = [];
+            this.editScheduleNewMedia = [];
+            this.editingScheduledPostId = null;
+
+            this.closeScheduleModal();
+            this.renderCalendar();
+            this.showToast('تم تحديث المنشور بنجاح ✓', 'success');
+        } catch (err) {
+            console.error('Update error:', err);
+            this.showToast('حدث خطأ أثناء التحديث', 'error');
+        }
+    }
+
+    deleteScheduledPost(postId) {
+        if (!confirm('هل أنت متأكد من حذف هذا المنشور؟')) return;
+
+        this.posts = this.posts.filter(p => p.id !== postId);
+        this.savePosts();
+
+        this.closeViewPostModal();
+        this.closePastDayModal();
+        this.renderCalendar();
+        this.showToast('تم حذف المنشور', 'success');
+    }
+
+    // View all posts for a specific day (both past and future)
+    viewDayPosts(dateStr) {
+        const dayPosts = this.posts.filter(p => p.date === dateStr);
+        if (dayPosts.length === 0) {
+            this.openScheduleModal(dateStr);
+            return;
+        }
+
+        const dateObj = new Date(dateStr);
+        const dayNames = ['الأحد', 'الإثنين', 'الثلاثاء', 'الأربعاء', 'الخميس', 'الجمعة', 'السبت'];
+        const monthNames = ['يناير', 'فبراير', 'مارس', 'أبريل', 'مايو', 'يونيو', 'يوليو', 'أغسطس', 'سبتمبر', 'أكتوبر', 'نوفمبر', 'ديسمبر'];
+
+        // Check if date is past
+        const now = new Date();
+        const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+        const isPast = dateStr < today;
+
+        const modalHtml = `
+            <div id="dayPostsModal" class="modal active" style="position:fixed;inset:0;z-index:1000;display:flex;align-items:center;justify-content:center;">
+                <div class="modal-overlay" onclick="app.closeDayPostsModal()" style="position:absolute;inset:0;background:rgba(0,0,0,0.6);backdrop-filter:blur(4px);"></div>
+                <div class="modal-content" style="position:relative;background:var(--bg-card);border-radius:20px;padding:24px;width:90%;max-width:500px;max-height:90vh;overflow-y:auto;border:1px solid var(--border-color);">
+                    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
+                        <h2 style="font-size:18px;display:flex;align-items:center;gap:10px;">
+                            <i class="fas fa-calendar-day" style="color:var(--primary);"></i>
+                            ${dayNames[dateObj.getDay()]}، ${dateObj.getDate()} ${monthNames[dateObj.getMonth()]}
+                        </h2>
+                        <button onclick="app.closeDayPostsModal()" style="background:none;border:none;font-size:20px;color:var(--text-muted);cursor:pointer;"><i class="fas fa-times"></i></button>
+                    </div>
+                    
+                    <!-- Posts count badge -->
+                    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;padding:10px 14px;background:rgba(14,165,233,0.08);border-radius:10px;">
+                        <span style="font-size:14px;color:var(--text-primary);font-weight:600;">
+                            <i class="fas fa-file-alt"></i> ${dayPosts.length} منشور${dayPosts.length > 1 ? 'ات' : ''}
+                        </span>
+                        ${isPast ? `<span style="font-size:12px;color:var(--warning);"><i class="fas fa-history"></i> يوم سابق</span>` :
+                `<span style="font-size:12px;color:var(--success);"><i class="fas fa-clock"></i> مجدول</span>`}
+                    </div>
+                    
+                    <!-- Posts list -->
+                    <div style="display:flex;flex-direction:column;gap:10px;margin-bottom:16px;">
+                        ${dayPosts.map((post, index) => {
+                    // Get media count
+                    const mediaUrls = post.mediaUrls || post.imageUrl || [];
+                    const mediaArray = Array.isArray(mediaUrls) ? mediaUrls : [mediaUrls];
+                    const mediaCount = mediaArray.filter(m => m).length;
+
+                    return `
+                            <div style="display:flex;align-items:stretch;gap:12px;padding:14px;background:var(--glass);border-radius:12px;border:1px solid var(--border-color);transition:all 0.2s;" onmouseover="this.style.borderColor='var(--primary)'" onmouseout="this.style.borderColor='var(--border-color)'">
+                                <!-- Post number -->
+                                <div style="width:32px;height:32px;background:var(--gradient-primary);border-radius:8px;display:flex;align-items:center;justify-content:center;color:white;font-weight:700;font-size:14px;flex-shrink:0;">
+                                    ${index + 1}
+                                </div>
+                                
+                                <!-- Post info -->
+                                <div style="flex:1;min-width:0;">
+                                    <div style="font-weight:600;color:var(--text-primary);font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-bottom:6px;">
+                                        ${post.title || post.content?.substring(0, 40) || 'منشور'}
+                                    </div>
+                                    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+                                        <span style="font-size:12px;color:var(--text-muted);display:flex;align-items:center;gap:4px;">
+                                            <i class="fas fa-clock"></i> ${post.time || 'غير محدد'}
+                                        </span>
+                                        ${mediaCount > 0 ? `
+                                            <span style="font-size:11px;color:var(--primary);background:rgba(14,165,233,0.1);padding:2px 8px;border-radius:10px;display:flex;align-items:center;gap:4px;">
+                                                <i class="fas fa-images"></i> ${mediaCount}
+                                            </span>
+                                        ` : ''}
+                                        <span style="font-size:11px;padding:2px 8px;border-radius:10px;${post.status === 'published' ?
+                            'background:rgba(16,185,129,0.1);color:#10b981;' :
+                            'background:rgba(14,165,233,0.1);color:var(--primary);'}">
+                                            ${post.status === 'published' ? '✓ تم النشر' : '⏱ مجدول'}
+                                        </span>
+                                    </div>
+                                </div>
+                                
+                                <!-- Actions -->
+                                <div style="display:flex;flex-direction:column;gap:6px;">
+                                    ${!isPast ? `
+                                        <button onclick="app.closeDayPostsModal(); app.editScheduledPost('${post.id}')" 
+                                            style="padding:8px 12px;background:rgba(59,130,246,0.1);border:1px solid rgba(59,130,246,0.3);color:#3b82f6;border-radius:8px;cursor:pointer;font-size:11px;display:flex;align-items:center;gap:4px;white-space:nowrap;" 
+                                            onmouseover="this.style.background='rgba(59,130,246,0.2)'" onmouseout="this.style.background='rgba(59,130,246,0.1)'">
+                                            <i class="fas fa-edit"></i> تعديل
+                                        </button>
+                                    ` : ''}
+                                    <button onclick="app.deleteScheduledPost('${post.id}')" 
+                                        style="padding:8px 12px;background:rgba(244,67,54,0.1);border:1px solid rgba(244,67,54,0.3);color:#f44336;border-radius:8px;cursor:pointer;font-size:11px;display:flex;align-items:center;gap:4px;white-space:nowrap;" 
+                                        onmouseover="this.style.background='rgba(244,67,54,0.2)'" onmouseout="this.style.background='rgba(244,67,54,0.1)'">
+                                        <i class="fas fa-trash-alt"></i> حذف
+                                    </button>
+                                </div>
+                            </div>`;
+                }).join('')}
+                    </div>
+                    
+                    <!-- Add new post button (only for future/today) -->
+                    ${!isPast ? `
+                        <button onclick="app.closeDayPostsModal(); app.openScheduleModal('${dateStr}')" 
+                            style="width:100%;padding:14px;background:linear-gradient(135deg,var(--primary),var(--secondary));border:none;color:white;border-radius:12px;font-size:15px;font-weight:600;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:10px;box-shadow:0 4px 15px rgba(14,165,233,0.3);transition:all 0.2s;"
+                            onmouseover="this.style.transform='translateY(-2px)';this.style.boxShadow='0 6px 20px rgba(14,165,233,0.4)'"
+                            onmouseout="this.style.transform='translateY(0)';this.style.boxShadow='0 4px 15px rgba(14,165,233,0.3)'">
+                            <i class="fas fa-plus-circle"></i>
+                            إضافة منشور جديد
+                        </button>
+                    ` : `
+                        <div style="text-align:center;padding:12px;background:rgba(255,193,7,0.1);border-radius:10px;color:var(--text-muted);font-size:13px;">
+                            <i class="fas fa-info-circle" style="color:#f59e0b;"></i>
+                            هذا اليوم مضى - لا يمكن إضافة منشورات جديدة
+                        </div>
+                    `}
+                </div>
+            </div>`;
+
+        document.body.insertAdjacentHTML('beforeend', modalHtml);
+    }
+
+    closeDayPostsModal() {
+        document.getElementById('dayPostsModal')?.remove();
+    }
+
+    // Legacy function for compatibility
+    viewPastDayPosts(dateStr) {
+        this.viewDayPosts(dateStr);
+    }
+
+    closePastDayModal() {
+        this.closeDayPostsModal();
+    }
+
+    changeMonth(delta) { this.currentDate.setMonth(this.currentDate.getMonth() + delta); this.renderCalendar(); }
+    setFilter(platform) {
+        this.currentFilter = platform;
+        document.querySelectorAll('.filter-btn').forEach(btn => btn.classList.toggle('active', btn.dataset.platform === platform));
+        this.renderCalendar();
+    }
+
+    initQuoteMaker() {
+        const gradients = [
+            'linear-gradient(135deg, #0EA5E9 0%, #2563EB 100%)',
+            'linear-gradient(135deg, #38BDF8 0%, #0EA5E9 100%)',
+            'linear-gradient(135deg, #4facfe 0%, #00f2fe 100%)',
+            'linear-gradient(135deg, #43e97b 0%, #38f9d7 100%)',
+            'linear-gradient(135deg, #fa709a 0%, #fee140 100%)',
+            'linear-gradient(135deg, #0c0c0c 0%, #1a1a2e 100%)',
+            'linear-gradient(135deg, #1877f2 0%, #0a5dc2 100%)'
+        ];
+        const container = document.getElementById('gradientPresets');
+        if (container) container.innerHTML = gradients.map((g, i) => `<div class="gradient-preset${i === 0 ? ' active' : ''}" data - gradient="${g}" style = "background: ${g}"></div> `).join('');
+        document.getElementById('quoteText')?.addEventListener('input', () => this.updateQuotePreview());
+        document.getElementById('quoteAuthor')?.addEventListener('input', () => this.updateQuotePreview());
+        document.getElementById('fontFamily')?.addEventListener('change', () => this.updateQuotePreview());
+        document.getElementById('textColor')?.addEventListener('input', () => this.updateQuotePreview());
+        document.getElementById('solidColor')?.addEventListener('input', () => this.updateQuotePreview());
+        document.querySelectorAll('.gradient-preset').forEach(preset => {
+            preset.addEventListener('click', () => {
+                document.querySelectorAll('.gradient-preset').forEach(p => p.classList.remove('active'));
+                preset.classList.add('active');
+                this.quoteSettings.background = preset.dataset.gradient;
+                this.updateQuotePreview();
+            });
+        });
+        document.querySelectorAll('.bg-tab').forEach(tab => {
+            tab.addEventListener('click', () => {
+                document.querySelectorAll('.bg-tab').forEach(t => t.classList.remove('active'));
+                tab.classList.add('active');
+                this.quoteSettings.bgType = tab.dataset.type;
+                document.getElementById('gradientOptions')?.classList.toggle('hidden', tab.dataset.type !== 'gradient');
+                document.getElementById('solidOptions')?.classList.toggle('hidden', tab.dataset.type !== 'solid');
+                this.updateQuotePreview();
+            });
+        });
+        document.querySelectorAll('.size-btn').forEach(btn => {
+            btn.addEventListener('click', () => {
+                document.querySelectorAll('.size-btn').forEach(b => b.classList.remove('active'));
+                btn.classList.add('active');
+                this.quoteSettings.size = btn.dataset.size;
+                this.updateQuotePreview();
+            });
+        });
+        document.getElementById('decreaseFont')?.addEventListener('click', () => {
+            this.quoteSettings.fontSize = Math.max(16, this.quoteSettings.fontSize - 2);
+            document.getElementById('fontSizeDisplay').textContent = this.quoteSettings.fontSize;
+            this.updateQuotePreview();
+        });
+        document.getElementById('increaseFont')?.addEventListener('click', () => {
+            this.quoteSettings.fontSize = Math.min(64, this.quoteSettings.fontSize + 2);
+            document.getElementById('fontSizeDisplay').textContent = this.quoteSettings.fontSize;
+            this.updateQuotePreview();
+        });
+        document.getElementById('downloadQuote')?.addEventListener('click', () => this.downloadQuote());
+        document.getElementById('saveQuote')?.addEventListener('click', () => this.saveQuote());
+    }
+
+    updateQuotePreview() {
+        const preview = document.getElementById('quotePreview');
+        if (!preview) return;
+        const text = document.getElementById('quoteText')?.value || 'اكتب الاقتباس هنا...';
+        const author = document.getElementById('quoteAuthor')?.value || '';
+        const bg = this.quoteSettings.bgType === 'solid' ? document.getElementById('solidColor')?.value : this.quoteSettings.background;
+        preview.style.background = bg;
+        preview.style.fontFamily = document.getElementById('fontFamily')?.value || 'Cairo';
+        const previewText = document.getElementById('previewText');
+        const previewAuthor = document.getElementById('previewAuthor');
+        if (previewText) {
+            previewText.textContent = `"${text}"`;
+            previewText.style.fontSize = `${this.quoteSettings.fontSize * 0.75} px`;
+            previewText.style.color = document.getElementById('textColor')?.value || '#ffffff';
+        }
+        if (previewAuthor) {
+            previewAuthor.textContent = author;
+            previewAuthor.style.color = document.getElementById('textColor')?.value || '#ffffff';
+            previewAuthor.style.display = author ? 'block' : 'none';
+        }
+        const [w, h] = this.quoteSettings.size.split('x').map(Number);
+        preview.style.aspectRatio = `${w}/${h}`;
+    }
+
+    async downloadQuote() {
+        const preview = document.getElementById('quotePreview');
+        const [w] = this.quoteSettings.size.split('x').map(Number);
+        try {
+            const canvas = await html2canvas(preview, { scale: w / preview.offsetWidth, useCORS: true });
+            const link = document.createElement('a');
+            link.download = `quote-${Date.now()}.png`;
+            link.href = canvas.toDataURL('image/png');
+            link.click();
+            this.showToast('تم تحميل الصورة بنجاح', 'success');
+        } catch { this.showToast('حدث خطأ في التحميل', 'error'); }
+    }
+
+    saveQuote() {
+        const quote = { id: Date.now().toString(), text: document.getElementById('quoteText')?.value || '', author: document.getElementById('quoteAuthor')?.value || '', settings: { ...this.quoteSettings } };
+        this.quotes.push(quote);
+        localStorage.setItem('smh_quotes', JSON.stringify(this.quotes));
+        this.updateDashboard();
+        this.showToast('تم حفظ الاقتباس', 'success');
+    }
+
+    showToast(message, type = 'success') {
+        const container = document.getElementById('toastContainer');
+        const toast = document.createElement('div');
+        toast.className = `toast ${type}`;
+        toast.innerHTML = `<i class="fas fa-${type === 'success' ? 'check-circle' : 'exclamation-circle'}"></i><span>${message}</span>`;
+        container.appendChild(toast);
+        setTimeout(() => toast.remove(), 3000);
+    }
+
+    toggleTheme() {
+        const isLight = document.body.classList.toggle('light-theme');
+        localStorage.setItem('dk_theme', isLight ? 'light' : 'dark');
+        const icon = document.querySelector('#themeToggle i');
+        if (icon) {
+            icon.className = isLight ? 'fas fa-sun' : 'fas fa-moon';
+        }
+    }
+
+    initTheme() {
+        const savedTheme = localStorage.getItem('dk_theme');
+        if (savedTheme === 'light') {
+            document.body.classList.add('light-theme');
+            const icon = document.querySelector('#themeToggle i');
+            if (icon) icon.className = 'fas fa-sun';
+        }
+    }
+
+    handleMediaUpload(event) {
+        const files = Array.from(event.target.files);
+        if (!files.length) return;
+
+        // Store all files
+        this.mediaFiles = this.mediaFiles || [];
+        files.forEach(file => {
+            const type = file.type.startsWith('video') ? 'video' : 'image';
+            this.mediaFiles.push({ file, type });
+        });
+
+        this.updateMediaPreview();
+    }
+
+    updateMediaPreview() {
+        const preview = document.getElementById('mediaPreview');
+        if (!preview) return;
+
+        if (!this.mediaFiles || this.mediaFiles.length === 0) {
+            preview.innerHTML = '';
+            return;
+        }
+
+        let html = '<div class="media-preview-grid">';
+        this.mediaFiles.forEach((item, index) => {
+            // Use URL.createObjectURL for instant preview
+            const url = URL.createObjectURL(item.file);
+
+            if (item.type === 'video') {
+                html += `
+                    <div class="media-preview-item">
+                        <video src="${url}" style="width:100px;height:100px;object-fit:cover;border-radius:10px;"></video>
+                        <div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none;">
+                            <i class="fas fa-play-circle" style="font-size:28px;color:white;text-shadow:0 2px 8px rgba(0,0,0,0.5);"></i>
+                        </div>
+                        <button class="remove-media" onclick="app.removeMediaAt(${index})">
+                            <i class="fas fa-times"></i>
+                        </button>
+                    </div>`;
+            } else {
+                html += `
+                    <div class="media-preview-item">
+                        <img src="${url}" alt="preview">
+                        <button class="remove-media" onclick="app.removeMediaAt(${index})">
+                            <i class="fas fa-times"></i>
+                        </button>
+                    </div>`;
+            }
+        });
+        html += '</div>';
+
+        // Add file count badge
+        html += `<div class="media-count-badge"><i class="fas fa-images"></i> ${this.mediaFiles.length} ملف</div>`;
+
+        preview.innerHTML = html;
+    }
+
+    async addRemoteImageToMedia(url) {
+        if (!url) return;
+        try {
+            const response = await fetch(url);
+            const blob = await response.blob();
+            const filename = url.split('/').pop().split('?')[0] || `image_${Date.now()}.jpg`;
+            const file = new File([blob], filename, { type: blob.type });
+
+            this.mediaFiles = this.mediaFiles || [];
+            this.mediaFiles.push({ file, type: blob.type.startsWith('video') ? 'video' : 'image' });
+            this.updateMediaPreview();
+        } catch (err) {
+            console.error('Error fetching remote image:', err);
+        }
+    }
+
+    removeMediaAt(index) {
+        if (this.mediaFiles) {
+            this.mediaFiles.splice(index, 1);
+            this.updateMediaPreview();
+        }
+    }
+
+    removeMedia() {
+        this.mediaFiles = [];
+        document.getElementById('mediaPreview').innerHTML = '';
+        document.getElementById('mediaInput').value = '';
+    }
+
+    // Upload all media files to server
+    async uploadAllMedia() {
+        if (!this.mediaFiles || this.mediaFiles.length === 0) return { mediaData: [], type: null };
+
+        const mediaData = [];
+        let mediaType = null;
+
+        for (const item of this.mediaFiles) {
+            const formData = new FormData();
+            formData.append('media', item.file);
+            formData.append('userId', window.fbIntegration.userId);
+
+            try {
+                const res = await fetch('/api/upload', {
+                    method: 'POST',
+                    body: formData
+                });
+                const data = await res.json();
+                if (data.filename) {
+                    mediaData.push({ filename: data.filename });
+                    mediaType = item.type;
+                }
+            } catch (err) {
+                console.error('Upload failed:', err);
+            }
+        }
+
+        return { mediaData, type: mediaType };
+    }
+
+    // Custom logo handler
+    handleLogoUpload(event) {
+        const file = event.target.files[0];
+        if (!file) return;
+
+        const reader = new FileReader();
+        reader.onload = (e) => {
+            this.customLogo = e.target.result;
+            localStorage.setItem('dk_custom_logo', this.customLogo);
+            this.updateLogo();
+            this.showToast('تم تحديث اللوجو', 'success');
+        };
+        reader.readAsDataURL(file);
+    }
+
+    updateLogo() {
+        const logoContainer = document.querySelector('.logo');
+        if (logoContainer && this.customLogo) {
+            logoContainer.innerHTML = `<img src="${this.customLogo}" class="logo-img" alt="Logo"><span>DK-OctoBot</span>`;
+        }
+    }
+
+    // ============= INBOX MANAGEMENT =============
+
+    populateInboxPageSelect() {
+        const select = document.getElementById('inboxPageSelect');
+        if (!select || this.fbPages.length === 0) return;
+        select.innerHTML = this.fbPages.map(p => `<option value="${p.id}">${p.name} (${p.id})</option>`).join('');
+    }
+
+    // Pagination state for inbox
+    inboxConversations = [];
+    inboxNextCursor = null;
+
+    async loadConversations(loadMore = false) {
+        const select = document.getElementById('inboxPageSelect');
+        const container = document.getElementById('conversationsContent');
+        if (!select || !container) return;
+
+        const pageId = select.value;
+        if (!pageId) {
+            container.innerHTML = '<div class="empty-state"><p>اختر صفحة</p></div>';
+            return;
+        }
+
+        if (!loadMore) {
+            this.inboxConversations = [];
+            this.inboxNextCursor = null;
+            container.innerHTML = '<div class="loading-spinner"><div class="spinner"></div></div>';
+        }
+
+        const data = await window.fbIntegration.getConversations(pageId, 100, this.inboxNextCursor);
+
+        // Append or replace conversations
+        if (loadMore) {
+            this.inboxConversations = [...this.inboxConversations, ...(data.conversations || [])];
+        } else {
+            this.inboxConversations = data.conversations || [];
+        }
+
+        // Update cursor
+        this.inboxNextCursor = data.nextCursor;
+
+        if (this.inboxConversations.length === 0) {
+            container.innerHTML = '<div class="empty-state" style="padding:20px;text-align:center;"><i class="fas fa-inbox"></i><p>لا توجد رسائل</p></div>';
+            return;
+        }
+
+        // Render conversations list (needsReply = customer sent last message, page hasn't replied)
+        let html = this.inboxConversations.map(c => {
+            // Check if page hasn't replied (based on backend needsReply) AND we haven't opened it locally
+            const needsReply = c.needsReply && !this.isConversationReadLocally(c.id, c.updatedTime);
+            const initials = c.participant ? c.participant.charAt(0).toUpperCase() : '?';
+            const shortId = c.participantId?.substring(0, 10) || '';
+            return `
+            <div class="msg-conv ${needsReply ? 'active' : ''}" onclick="app.loadMessages('${pageId}', '${c.id}', '${c.participant}', '${c.participantId}')">
+                <div class="msg-conv-avatar">${initials}</div>
+                <div class="msg-conv-info">
+                    <div class="msg-conv-name">${c.participant}</div>
+                    <div class="msg-conv-preview">${c.snippet || 'لا يوجد نص'}</div>
+                    <div class="msg-conv-id" onclick="event.stopPropagation(); navigator.clipboard.writeText('${c.participantId}'); app.showToast('تم نسخ الـ ID', 'success');" title="انقر للنسخ">
+                        <i class="fas fa-copy"></i> ${shortId}...
+                    </div>
+                </div>
+                <div class="msg-conv-meta">
+                    <div class="msg-conv-time">${new Date(c.updatedTime).toLocaleString('ar-EG', { hour: '2-digit', minute: '2-digit' })}</div>
+                    ${needsReply ? '<div class="msg-conv-badge">جديد</div>' : ''}
+                </div>
+            </div>
+        `}).join('');
+
+        // Add Load More button if there's more data
+        if (data.hasMore) {
+            html += `
+                <div style="padding:16px;text-align:center;">
+                    <button onclick="app.loadConversations(true)" class="btn btn-secondary" style="width:100%;">
+                        <i class="fas fa-download"></i> تحميل المزيد (${this.inboxConversations.length} محادثة)
+                    </button>
+                </div>
+            `;
+        }
+
+        container.innerHTML = html;
+
+        // Update inbox statistics
+        this.updateInboxStats();
+
+        // Start polling for new messages
+        this.startFbInboxPolling();
+    }
+
+    // Update inbox hero statistics
+    async updateInboxStats() {
+        try {
+            // Get the currently selected page ID from dropdown
+            const pageSelect = document.getElementById('inboxPageSelect');
+            const selectedPageId = pageSelect?.value || '';
+
+            // Fetch webhook stats for the selected page
+            const url = selectedPageId
+                ? `${this.API_URL}/api/webhook/stats?pageId=${selectedPageId}`
+                : `${this.API_URL}/api/webhook/stats`;
+            const response = await fetch(url);
+            const data = await response.json();
+
+            // Update today's message count (for selected page only)
+            const todayMsgEl = document.getElementById('todayMsgCount');
+            if (todayMsgEl) {
+                todayMsgEl.textContent = data.today?.messages || 0;
+            }
+
+            // Calculate "average response time" - we'll show number of pending conversations
+            const pendingCount = this.inboxConversations?.filter(c => c.needsReply)?.length || 0;
+            const avgResponseEl = document.getElementById('avgResponseTime');
+            if (avgResponseEl) {
+                if (pendingCount > 0) {
+                    avgResponseEl.textContent = pendingCount;
+                    avgResponseEl.title = 'محادثات تحتاج رد';
+                } else {
+                    avgResponseEl.textContent = '✓';
+                    avgResponseEl.title = 'لا توجد محادثات معلقة';
+                }
+            }
+        } catch (err) {
+            console.log('[Stats] Error updating inbox stats:', err.message);
+        }
+    }
+
+    async loadMessages(pageId, conversationId, participantName, participantId) {
+        // Handle case where participantId is undefined or string 'undefined'
+        let resolvedParticipantId = participantId;
+
+        if (!resolvedParticipantId || resolvedParticipantId === 'undefined' || resolvedParticipantId === 'null') {
+            // Try to get from stored conversations
+            const conversation = this.inboxConversations?.find(c => c.id === conversationId);
+            if (conversation?.participantId) {
+                resolvedParticipantId = conversation.participantId;
+                console.log('[loadMessages] Retrieved participantId from stored conversation:', resolvedParticipantId);
+            } else {
+                console.warn('[loadMessages] ⚠️ participantId not available for conversation:', conversationId);
+            }
+        }
+
+        this.currentConversation = { pageId, conversationId, participantName, participantId: resolvedParticipantId };
+        console.log('[loadMessages] Current conversation set:', this.currentConversation);
+
+        // Mark conversation as read locally (update UI and persist)
+        const convIndex = this.inboxConversations?.findIndex(c => c.id === conversationId);
+        if (convIndex !== -1 && this.inboxConversations[convIndex]) {
+            this.inboxConversations[convIndex].unreadCount = 0;
+
+            // Save to localStorage for persistence
+            this.markConversationAsRead(conversationId);
+
+            // Update the conversation item UI to remove highlight and badge
+            const convItems = document.querySelectorAll('.conversation-item');
+            if (convItems[convIndex]) {
+                convItems[convIndex].style.background = '';
+                convItems[convIndex].onmouseout = function () { this.style.background = ''; };
+                // Remove badge
+                const badge = convItems[convIndex].querySelector('span[style*="background:var(--primary)"]');
+                if (badge) badge.remove();
+            }
+        }
+
+        document.getElementById('chatHeader').style.display = 'flex';
+        document.getElementById('chatWith').textContent = participantName;
+
+        // Update chat avatar with initials
+        const chatAvatarEl = document.getElementById('chatAvatar');
+        if (chatAvatarEl) {
+            const initials = participantName ? participantName.charAt(0).toUpperCase() : '?';
+            chatAvatarEl.textContent = initials;
+        }
+
+        // Update premium classification tag
+        this.updateClassificationTag(resolvedParticipantId);
+
+        // Load and display user's labels
+        this.loadUserLabels(pageId, resolvedParticipantId);
+
+        // Only show chat input if user has send permission
+        const chatInputEl = document.getElementById('chatInput');
+        if (chatInputEl) {
+            chatInputEl.style.display = this.hasPermission('facebook', 'send') ? 'block' : 'none';
+        }
+
+        const container = document.getElementById('chatMessages');
+        container.innerHTML = '<div class="loading-spinner"><div class="spinner"></div></div>';
+
+        const data = await window.fbIntegration.getMessages(pageId, conversationId);
+
+        if (!data.messages || data.messages.length === 0) {
+            container.innerHTML = '<div class="empty-state"><p>لا توجد رسائل في هذه المحادثة</p></div>';
+            return;
+        }
+        // Page messages on RIGHT, Customer messages on LEFT
+        // Multiple checks for reliability:
+        // 1. If from.id === pageId → Page (RIGHT)
+        // 2. If from.id === participantId → Customer (LEFT)
+        // 3. If from.id is missing → Customer (LEFT) - safer default
+        const currentPageId = this.currentConversation.pageId;
+        const currentParticipantId = this.currentConversation.participantId;
+        console.log('[DEBUG] Loading messages - PageID:', currentPageId, 'ParticipantID:', currentParticipantId);
+
+        // Load stored orders from localStorage for matching
+        const storedOrders = JSON.parse(localStorage.getItem('dk_stored_orders') || '{}');
+
+        container.innerHTML = data.messages.reverse().map((m, index, array) => {
+            // Check if this message has a stored order (template messages have no text/attachments from API)
+            if (storedOrders[m.id]) {
+                const od = storedOrders[m.id];
+                return `
+                    <div style="display:flex;flex-direction:column;align-items:flex-start;margin-bottom:12px;">
+                        ${this.renderOrderCardHtml(od)}
+                        <small style="font-size:10px;opacity:0.5;margin-top:4px;">${new Date(m.created_time).toLocaleString('ar-EG')}</small>
+                    </div>
+                `;
+            }
+
+            // Determine if message is from page with comprehensive logic
+            let isFromPage = false;
+
+            if (!m.from || !m.from.id) {
+                // No from.id - default to customer (safer)
+                isFromPage = false;
+                console.log('[DEBUG] Message has no from.id - treating as customer');
+            } else if (m.from.id === currentPageId) {
+                // Exact match with page ID
+                isFromPage = true;
+                if (m.attachments && m.attachments.data && m.attachments.data.length > 0) {
+                    console.log('[DEBUG] ✓ Page message with attachment detected');
+                }
+            } else if (m.from.id === currentParticipantId) {
+                // Exact match with participant (customer)
+                isFromPage = false;
+                if (m.attachments && m.attachments.data && m.attachments.data.length > 0) {
+                    console.log('[DEBUG] ✓ Customer message with attachment detected');
+                }
+            } else {
+                // from.id doesn't match either - log for debugging
+                console.warn('[DEBUG] Unknown from.id:', m.from.id, '- treating as customer');
+                isFromPage = false;
+            }
+
+            // SMART FIX: Facebook API bug workaround (ONLY for images, not videos)
+            // Enhanced: Check content of previous message for product keywords
+            const hasAttachments = m.attachments && m.attachments.data && m.attachments.data.length > 0;
+            const hasText = !!m.message;
+
+            // Check if attachment is a video - videos should NOT be re-attributed
+            const isVideoAttachment = hasAttachments && m.attachments.data.some(att =>
+                att.video_data || (att.mime_type && att.mime_type.startsWith('video/'))
+            );
+
+            if (!isFromPage && hasAttachments && !hasText && !isVideoAttachment && index > 0) {
+                for (let lookback = 1; lookback <= Math.min(2, index); lookback++) {
+                    const prevMsg = array[index - lookback];
+                    const prevMsgIsPage = prevMsg.from && prevMsg.from.id === currentPageId;
+
+                    // CHAIN BREAKER: If we encounter a Customer message, STOP looking back.
+                    // The image belongs to the current flow (Customer), not a previous Page flow.
+                    if (!prevMsgIsPage) {
+                        break;
+                    }
+
+                    const prevMsgContent = prevMsg.message || '';
+
+                    // Check if previous message looks like a product (contains price, code, etc.)
+                    const isProductMsg = prevMsgContent.includes('EGP') || prevMsgContent.includes('السعر') || prevMsgContent.includes('كود') || prevMsgContent.includes('🛍️');
+
+                    if (prevMsgIsPage) {
+                        const timeDiff = new Date(m.created_time) - new Date(prevMsg.created_time);
+                        // If it's a product message, allow larger time window (2 mins) because uploads can be slow
+                        // Otherwise use 60s window
+                        const allowedTime = isProductMsg ? 120000 : 60000;
+
+                        if (timeDiff >= 0 && timeDiff < allowedTime) {
+                            isFromPage = true;
+                            console.log('[DEBUG] 🔄 Smart Fix: Re-attributed image to Page (Context: Product/Time match)');
+                            break;
+                        }
+                    }
+                }
+            }
+            // Variables are already defined above for the smart fix check
+            // const hasAttachments = m.attachments && m.attachments.data && m.attachments.data.length > 0;
+            // const hasText = !!m.message;
+
+            // Log final isFromPage value for messages with attachments
+            if (hasAttachments) {
+                console.log('[DEBUG] Final isFromPage value:', isFromPage, 'for message:', m.id);
+            }
+
+            // Build attachment HTML - display without bubble background
+            let attachmentHtml = '';
+            if (hasAttachments) {
+                for (const attachment of m.attachments.data) {
+                    if (attachment.image_data && attachment.image_data.url) {
+                        // Image attachment - no background
+                        attachmentHtml += `<img src="${attachment.image_data.url}"
+                            style="max-width:250px;max-height:250px;border-radius:12px;cursor:pointer;display:block;box-shadow:0 2px 8px rgba(0,0,0,0.15);"
+                            onclick="window.open('${attachment.image_data.url}', '_blank')"
+                            onerror="this.style.display='none'">`;
+                    } else if (attachment.video_data && attachment.video_data.url) {
+                        // Video attachment
+                        attachmentHtml += `<video src="${attachment.video_data.url}" controls
+                            style="max-width:250px;max-height:250px;border-radius:12px;box-shadow:0 2px 8px rgba(0,0,0,0.15);"></video>`;
+                    } else if (attachment.file_url) {
+                        // File/image URL fallback
+                        const mimeType = attachment.mime_type || '';
+                        if (mimeType.startsWith('image/')) {
+                            attachmentHtml += `<img src="${attachment.file_url}"
+                                style="max-width:250px;max-height:250px;border-radius:12px;cursor:pointer;display:block;box-shadow:0 2px 8px rgba(0,0,0,0.15);"
+                                onclick="window.open('${attachment.file_url}', '_blank')"
+                                onerror="this.style.display='none'">`;
+                        } else if (mimeType.startsWith('video/')) {
+                            attachmentHtml += `<video src="${attachment.file_url}" controls
+                                style="max-width:250px;max-height:250px;border-radius:12px;box-shadow:0 2px 8px rgba(0,0,0,0.15);"></video>`;
+                        } else {
+                            // Generic file - keep in bubble
+                            attachmentHtml += `<a href="${attachment.file_url}" target="_blank"
+                                style="display:block;padding:8px 12px;background:var(--glass);border-radius:8px;color:inherit;text-decoration:none;margin-bottom:4px;">
+                                <i class="fas fa-file"></i> ${attachment.name || 'ملف مرفق'}</a>`;
+                        }
+                    } else if (attachment.title || attachment.type === 'template' || attachment.type === 'share' || attachment.type === 'fallback') {
+                        // Template/Share/Fallback attachment (e.g., Order cards, generic templates)
+                        // Facebook returns template messages as type 'fallback' in Conversations API
+                        const attTitle = attachment.title || attachment.name || 'Order';
+                        const attSubtitle = attachment.subtitle || '';
+                        const attUrl = attachment.url || '';
+                        const attImageUrl = attachment.payload?.url || attachment.image_url || '';
+
+                        // Detect if it's an order
+                        const isOrder = attTitle.toLowerCase().includes('order') || attTitle.includes('طلب');
+                        const cardIcon = isOrder ? '🧾' : '📋';
+
+                        attachmentHtml += `<div style="
+                            max-width:280px;
+                            background:linear-gradient(135deg, rgba(245,158,11,0.12), rgba(217,119,6,0.08));
+                            border:1px solid rgba(245,158,11,0.3);
+                            border-radius:16px;
+                            overflow:hidden;
+                            box-shadow:0 2px 12px rgba(0,0,0,0.08);
+                        ">
+                            ${attImageUrl ? `<img src="${attImageUrl}" style="width:100%;max-height:160px;object-fit:cover;" onerror="this.style.display='none'">` : ''}
+                            <div style="padding:14px 16px;">
+                                <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
+                                    <span style="font-size:22px;">${cardIcon}</span>
+                                    <strong style="font-size:14px;color:var(--text-primary,#1a1a2e);">${attTitle}</strong>
+                                </div>
+                                ${attSubtitle ? `<p style="margin:0 0 8px 0;font-size:12px;opacity:0.7;line-height:1.4;">${attSubtitle}</p>` : ''}
+                                ${attUrl ? `<a href="${attUrl}" target="_blank" style="
+                                    display:inline-flex;align-items:center;gap:4px;
+                                    font-size:12px;color:#f59e0b;text-decoration:none;font-weight:600;
+                                "><i class="fas fa-external-link-alt"></i> عرض التفاصيل</a>` : ''}
+                            </div>
+                        </div>`;
+                    } else {
+                        // Unknown attachment type - show order-style placeholder
+                        attachmentHtml += `<div style="
+                            max-width:260px;padding:12px 16px;
+                            background:var(--glass, rgba(255,255,255,0.05));
+                            border:1px solid rgba(255,255,255,0.1);
+                            border-radius:14px;
+                            display:flex;align-items:center;gap:10px;
+                        ">
+                            <span style="font-size:20px;">🏷️</span>
+                            <div>
+                                <div style="font-size:13px;font-weight:600;">Order</div>
+                                <div style="font-size:11px;opacity:0.6;">Waiting for payment</div>
+                            </div>
+                        </div>`;
+                    }
+                }
+            }
+
+            // If message has only attachments (no text), display without bubble
+            if (hasAttachments && !hasText) {
+                // In RTL: flex-start is Right (Page), flex-end is Left (Customer)
+                return `
+                    <div style="display:flex;flex-direction:column;align-items:${isFromPage ? 'flex-start' : 'flex-end'};margin-bottom:12px;">
+                        ${attachmentHtml}
+                        <small style="font-size:10px;opacity:0.5;margin-top:4px;">${new Date(m.created_time).toLocaleString('ar-EG')}</small>
+                    </div>
+                `;
+            }
+
+            // If message has both attachments and text, show attachment first then text bubble
+            if (hasAttachments && hasText) {
+                return `
+                    <div style="display:flex;flex-direction:column;align-items:${isFromPage ? 'flex-start' : 'flex-end'};margin-bottom:12px;">
+                        ${attachmentHtml}
+                        <div class="${isFromPage ? 'page-bubble' : 'customer-bubble'}">
+                            <p style="margin:0;">${m.message}</p>
+                            <small style="font-size:10px;opacity:0.7;">${new Date(m.created_time).toLocaleString('ar-EG')}</small>
+                        </div>
+                    </div>
+                `;
+            }
+
+            // Text-only message with bubble
+            // Skip empty page messages (likely template orders without stored data)
+            if (!m.message && isFromPage) {
+                // Try to find stored order data for rich rendering
+                const storedOrders = JSON.parse(localStorage.getItem('dk_stored_orders') || '{}');
+                let orderHtml = null;
+                for (const mid in storedOrders) {
+                    if (storedOrders[mid] && m.id && m.id === mid) {
+                        orderHtml = this.renderOrderCardHtml(storedOrders[mid]);
+                        break;
+                    }
+                }
+                if (!orderHtml) {
+                    // Check by attachment title for order pattern
+                    orderHtml = `<div style="
+                        max-width:260px;padding:12px 16px;
+                        background:var(--glass, rgba(255,255,255,0.05));
+                        border:1px solid rgba(255,255,255,0.1);
+                        border-radius:14px;
+                        display:flex;align-items:center;gap:10px;
+                    ">
+                        <span style="font-size:20px;">🏷️</span>
+                        <div>
+                            <div style="font-size:13px;font-weight:600;">Order</div>
+                            <div style="font-size:11px;opacity:0.6;">Waiting for payment</div>
+                        </div>
+                    </div>`;
+                }
+                return `
+                    <div style="display:flex;flex-direction:column;align-items:flex-start;margin-bottom:12px;">
+                        ${orderHtml}
+                        <small style="font-size:10px;opacity:0.5;margin-top:4px;">${new Date(m.created_time).toLocaleString('ar-EG')}</small>
+                    </div>
+                `;
+            }
+
+            // In RTL: flex-start is Right (Page), flex-end is Left (Customer)
+            return `
+                <div style="display:flex;justify-content:${isFromPage ? 'flex-start' : 'flex-end'};margin-bottom:12px;">
+                    <div class="${isFromPage ? 'page-bubble' : 'customer-bubble'}">
+                        <p style="margin:0;">${m.message || ''}</p>
+                        <small style="font-size:10px;opacity:0.7;">${new Date(m.created_time).toLocaleString('ar-EG')}</small>
+                    </div>
+                </div>
+            `;
+        }).join('');
+
+        // Scroll to bottom - multiple attempts to handle image loading
+        container.scrollTop = container.scrollHeight;
+
+        // Additional scroll attempts after images might have loaded
+        setTimeout(() => { if (container) container.scrollTop = container.scrollHeight; }, 100);
+        setTimeout(() => { if (container) container.scrollTop = container.scrollHeight; }, 300);
+        setTimeout(() => { if (container) container.scrollTop = container.scrollHeight; }, 600);
+
+        // Start polling for new messages
+        this.startFbMessagePolling();
+    }
+
+    // Manual refresh for current chat
+    async refreshCurrentChat() {
+        if (!this.currentConversation) {
+            this.showToast('لا توجد محادثة مفتوحة', 'warning');
+            return;
+        }
+
+        const { pageId, conversationId, participantName, participantId } = this.currentConversation;
+
+        // Show refresh animation
+        const refreshBtn = document.querySelector('.msg-chat-action i.fa-sync-alt');
+        if (refreshBtn) {
+            refreshBtn.classList.add('fa-spin');
+        }
+
+        try {
+            await this.loadMessages(pageId, conversationId, participantName, participantId);
+            this.showToast('تم تحديث الرسائل', 'success');
+        } finally {
+            if (refreshBtn) {
+                setTimeout(() => refreshBtn.classList.remove('fa-spin'), 500);
+            }
+        }
+    }
+
+    // Show customer classification popup
+    showCustomerClassification() {
+        if (!this.currentConversation?.participantId) {
+            this.showToast('لا توجد محادثة مفتوحة', 'warning');
+            return;
+        }
+
+        const participantId = this.currentConversation.participantId;
+        const participantName = this.currentConversation.participantName || 'العميل';
+
+        // Get current classification
+        const classifications = JSON.parse(localStorage.getItem('customer_classifications') || '{}');
+        const currentClass = classifications[participantId] || null;
+
+        // Classification options with icons
+        const options = [
+            { value: 'vip', label: 'عميل VIP', icon: '👑', color: '#FFD700', gradient: 'linear-gradient(135deg, #FFD700, #FFA500)' },
+            { value: 'potential', label: 'عميل محتمل', icon: '💎', color: '#9b59b6', gradient: 'linear-gradient(135deg, #9b59b6, #8e44ad)' },
+            { value: 'regular', label: 'عميل دائم', icon: '🔄', color: '#3498db', gradient: 'linear-gradient(135deg, #3498db, #2980b9)' },
+            { value: 'new', label: 'عميل جديد', icon: '✨', color: '#2ecc71', gradient: 'linear-gradient(135deg, #2ecc71, #27ae60)' },
+            { value: 'followup', label: 'يحتاج متابعة', icon: '📞', color: '#e74c3c', gradient: 'linear-gradient(135deg, #e74c3c, #c0392b)' },
+            { value: null, label: 'بدون تصنيف', icon: '➖', color: '#95a5a6', gradient: 'linear-gradient(135deg, #95a5a6, #7f8c8d)' }
+        ];
+
+        // Check if dark mode
+        const isDark = document.body.classList.contains('dark-mode') ||
+            document.documentElement.getAttribute('data-theme') === 'dark' ||
+            window.matchMedia('(prefers-color-scheme: dark)').matches;
+
+        // Create modal
+        const modal = document.createElement('div');
+        modal.id = 'classificationModal';
+        modal.style.cssText = `
+            position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+            background: rgba(0,0,0,0.6); backdrop-filter: blur(10px);
+            display: flex; align-items: center; justify-content: center;
+            z-index: 10000; opacity: 0; transition: opacity 0.3s ease;
+        `;
+
+        const cardBg = isDark
+            ? 'linear-gradient(145deg, rgba(30,30,50,0.95), rgba(20,20,35,0.98))'
+            : 'linear-gradient(145deg, rgba(255,255,255,0.98), rgba(245,245,250,0.95))';
+        const textColor = isDark ? '#fff' : '#1a1a2e';
+        const subText = isDark ? 'rgba(255,255,255,0.6)' : 'rgba(0,0,0,0.5)';
+        const cardBorder = isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.08)';
+
+        modal.innerHTML = `
+            <div class="classification-card" style="
+                background: ${cardBg};
+                border: 1px solid ${cardBorder};
+                border-radius: 24px;
+                padding: 28px;
+                min-width: 380px;
+                max-width: 90vw;
+                box-shadow: 0 25px 80px rgba(0,0,0,0.4), 0 0 0 1px ${cardBorder};
+                transform: scale(0.9) translateY(20px);
+                transition: transform 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+            ">
+                <!-- Header -->
+                <div style="text-align: center; margin-bottom: 24px;">
+                    <div style="
+                        width: 60px; height: 60px; margin: 0 auto 16px;
+                        background: linear-gradient(135deg, #667eea, #764ba2);
+                        border-radius: 16px;
+                        display: flex; align-items: center; justify-content: center;
+                        font-size: 28px;
+                        box-shadow: 0 10px 30px rgba(102,126,234,0.3);
+                    ">🏷️</div>
+                    <h3 style="margin: 0 0 6px 0; color: ${textColor}; font-size: 20px; font-weight: 600;">تصنيف العميل</h3>
+                    <p style="margin: 0; color: ${subText}; font-size: 14px;">${participantName}</p>
+                </div>
+
+                <!-- Options Grid -->
+                <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; margin-bottom: 20px;">
+                    ${options.map(opt => `
+                        <button onclick="app.setCustomerClassification('${participantId}', ${opt.value ? `'${opt.value}'` : 'null'})"
+                            class="class-option-btn"
+                            style="
+                                padding: 16px 12px;
+                                border: 2px solid ${currentClass === opt.value ? opt.color : 'transparent'};
+                                background: ${currentClass === opt.value ? opt.color + '15' : (isDark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.03)')};
+                                border-radius: 14px;
+                                cursor: pointer;
+                                transition: all 0.25s ease;
+                                display: flex;
+                                flex-direction: column;
+                                align-items: center;
+                                gap: 8px;
+                                position: relative;
+                                overflow: hidden;
+                            "
+                            onmouseover="this.style.transform='translateY(-3px)'; this.style.boxShadow='0 8px 25px ${opt.color}30'; this.style.borderColor='${opt.color}';"
+                            onmouseout="this.style.transform='translateY(0)'; this.style.boxShadow='none'; this.style.borderColor='${currentClass === opt.value ? opt.color : 'transparent'}';"
+                        >
+                            <span style="
+                                font-size: 28px;
+                                display: block;
+                                ${currentClass === opt.value ? 'transform: scale(1.1);' : ''}
+                            ">${opt.icon}</span>
+                            <span style="
+                                color: ${textColor};
+                                font-size: 13px;
+                                font-weight: 500;
+                            ">${opt.label}</span>
+                            ${currentClass === opt.value ? `
+                                <span style="
+                                    position: absolute;
+                                    top: 8px;
+                                    left: 8px;
+                                    width: 20px;
+                                    height: 20px;
+                                    background: ${opt.gradient};
+                                    border-radius: 50%;
+                                    display: flex;
+                                    align-items: center;
+                                    justify-content: center;
+                                    font-size: 11px;
+                                    color: white;
+                                    box-shadow: 0 3px 10px ${opt.color}50;
+                                ">✓</span>
+                            ` : ''}
+                        </button>
+                    `).join('')}
+                </div>
+
+                <!-- Cancel Button -->
+                <button onclick="document.getElementById('classificationModal').remove()"
+                    style="
+                        width: 100%;
+                        padding: 14px;
+                        background: ${isDark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.03)'};
+                        border: 1px solid ${cardBorder};
+                        color: ${subText};
+                        border-radius: 12px;
+                        cursor: pointer;
+                        font-size: 14px;
+                        transition: all 0.2s ease;
+                    "
+                    onmouseover="this.style.background='${isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.06)'}'"
+                    onmouseout="this.style.background='${isDark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.03)'}'"
+                >إغلاق</button>
+            </div>
+        `;
+
+        modal.onclick = (e) => { if (e.target === modal) modal.remove(); };
+        document.body.appendChild(modal);
+
+        // Animate in
+        requestAnimationFrame(() => {
+            modal.style.opacity = '1';
+            modal.querySelector('.classification-card').style.transform = 'scale(1) translateY(0)';
+        });
+    }
+
+    // Set customer classification
+    setCustomerClassification(participantId, classification) {
+        const classifications = JSON.parse(localStorage.getItem('customer_classifications') || '{}');
+
+        if (classification) {
+            classifications[participantId] = classification;
+            this.showToast(`تم تصنيف العميل ✓`, 'success');
+        } else {
+            delete classifications[participantId];
+            this.showToast('تم إزالة التصنيف', 'info');
+        }
+
+        localStorage.setItem('customer_classifications', JSON.stringify(classifications));
+
+        // Close modal
+        document.getElementById('classificationModal')?.remove();
+
+        // Update conversation list to show classification badge
+        this.updateConversationClassificationBadge(participantId, classification);
+
+        // Update premium tag in chat header
+        this.updateClassificationTag(participantId);
+    }
+
+    // Get customer classification
+    getCustomerClassification(participantId) {
+        const classifications = JSON.parse(localStorage.getItem('customer_classifications') || '{}');
+        return classifications[participantId] || null;
+    }
+
+    // Update conversation badge to show classification
+    updateConversationClassificationBadge(participantId, classification) {
+        // Find conversation element and add badge
+        const convItems = document.querySelectorAll('.msg-conv');
+        convItems.forEach(item => {
+            const onclick = item.getAttribute('onclick') || '';
+            if (onclick.includes(participantId)) {
+                // Remove old badge
+                const oldBadge = item.querySelector('.classification-badge');
+                if (oldBadge) oldBadge.remove();
+
+                if (classification) {
+                    const badges = {
+                        vip: { icon: '⭐', color: '#FFD700' },
+                        regular: { icon: '👤', color: '#4A90D9' },
+                        new: { icon: '🆕', color: '#28a745' },
+                        followup: { icon: '📞', color: '#ff6b6b' },
+                        potential: { icon: '💎', color: '#9b59b6' }
+                    };
+                    const badge = badges[classification];
+                    if (badge) {
+                        const badgeEl = document.createElement('span');
+                        badgeEl.className = 'classification-badge';
+                        badgeEl.style.cssText = `position: absolute; top: 8px; left: 8px; font-size: 14px;`;
+                        badgeEl.textContent = badge.icon;
+                        item.style.position = 'relative';
+                        item.appendChild(badgeEl);
+                    }
+                }
+            }
+        });
+    }
+
+    // Update classification tag in chat header with premium design
+    updateClassificationTag(participantId) {
+        const tagContainer = document.getElementById('classificationTag');
+        if (!tagContainer) return;
+
+        const classification = this.getCustomerClassification(participantId);
+
+        if (!classification) {
+            tagContainer.innerHTML = '';
+            return;
+        }
+
+        const classData = {
+            vip: {
+                label: 'VIP',
+                icon: '👑',
+                gradient: 'linear-gradient(135deg, #FFD700 0%, #FFA500 100%)',
+                glow: 'rgba(255, 215, 0, 0.4)',
+                textColor: '#1a1a2e'
+            },
+            potential: {
+                label: 'محتمل',
+                icon: '💎',
+                gradient: 'linear-gradient(135deg, #9b59b6 0%, #8e44ad 100%)',
+                glow: 'rgba(155, 89, 182, 0.4)',
+                textColor: '#fff'
+            },
+            regular: {
+                label: 'دائم',
+                icon: '🔄',
+                gradient: 'linear-gradient(135deg, #3498db 0%, #2980b9 100%)',
+                glow: 'rgba(52, 152, 219, 0.4)',
+                textColor: '#fff'
+            },
+            new: {
+                label: 'جديد',
+                icon: '✨',
+                gradient: 'linear-gradient(135deg, #2ecc71 0%, #27ae60 100%)',
+                glow: 'rgba(46, 204, 113, 0.4)',
+                textColor: '#fff'
+            },
+            followup: {
+                label: 'متابعة',
+                icon: '📞',
+                gradient: 'linear-gradient(135deg, #e74c3c 0%, #c0392b 100%)',
+                glow: 'rgba(231, 76, 60, 0.4)',
+                textColor: '#fff'
+            }
+        };
+
+        const data = classData[classification];
+        if (!data) {
+            tagContainer.innerHTML = '';
+            return;
+        }
+
+        tagContainer.innerHTML = `
+            <div class="premium-tag" style="
+                display: inline-flex;
+                align-items: center;
+                gap: 6px;
+                padding: 4px 12px 4px 8px;
+                background: ${data.gradient};
+                border-radius: 20px;
+                box-shadow: 0 4px 15px ${data.glow}, inset 0 1px 0 rgba(255,255,255,0.3);
+                font-size: 12px;
+                font-weight: 600;
+                color: ${data.textColor};
+                letter-spacing: 0.3px;
+                position: relative;
+                overflow: hidden;
+                cursor: pointer;
+                transition: all 0.3s ease;
+                animation: tagPulse 2s ease-in-out infinite;
+            " onclick="app.showCustomerClassification()" title="انقر لتغيير التصنيف">
+                <span style="font-size: 14px;">${data.icon}</span>
+                <span>${data.label}</span>
+                <div style="
+                    position: absolute;
+                    top: 0;
+                    left: -100%;
+                    width: 100%;
+                    height: 100%;
+                    background: linear-gradient(90deg, transparent, rgba(255,255,255,0.3), transparent);
+                    animation: shimmer 2s infinite;
+                "></div>
+            </div>
+            <style>
+                @keyframes shimmer {
+                    0% { left: -100%; }
+                    50%, 100% { left: 100%; }
+                }
+                @keyframes tagPulse {
+                    0%, 100% { transform: scale(1); }
+                    50% { transform: scale(1.02); }
+                }
+                .premium-tag:hover {
+                    transform: translateY(-2px) scale(1.05) !important;
+                    box-shadow: 0 8px 25px ${data.glow} !important;
+                }
+            </style>
+        `;
+    }
+
+    // ============= FACEBOOK CUSTOM LABELS =============
+
+    // Load and display labels for the current user
+    async loadUserLabels(pageId, psid) {
+        const container = document.getElementById('clientLabelsContainer');
+        if (!container) return;
+        if (!psid || psid === 'undefined') {
+            container.innerHTML = '';
+            return;
+        }
+
+        try {
+            const res = await fetch(`${this.API_URL}/api/labels/${pageId}/user/${psid}`);
+            const data = await res.json();
+            if (data.labels && data.labels.length > 0) {
+                this.renderClientLabels(data.labels);
+            } else {
+                container.innerHTML = '';
+            }
+        } catch (err) {
+            console.log('[Labels] Could not load user labels:', err.message);
+            container.innerHTML = '';
+        }
+    }
+
+    // Render label badges in the chat header
+    renderClientLabels(labels) {
+        const container = document.getElementById('clientLabelsContainer');
+        if (!container) return;
+
+        if (!labels || labels.length === 0) {
+            container.innerHTML = '';
+            return;
+        }
+
+        const colors = ['#667eea', '#f59e0b', '#10b981', '#ef4444', '#8b5cf6', '#ec4899', '#06b6d4', '#84cc16'];
+        container.innerHTML = labels.map((label, i) => {
+            const color = colors[i % colors.length];
+            return `<span class="client-label-badge" style="
+                display:inline-flex;align-items:center;gap:4px;
+                padding:2px 10px;border-radius:12px;font-size:11px;font-weight:600;
+                background:${color}22;color:${color};border:1px solid ${color}44;
+                margin-inline-end:4px;margin-bottom:2px;white-space:nowrap;
+            "><i class="fas fa-tag" style="font-size:8px;"></i>${label.name}</span>`;
+        }).join('');
+    }
+
+    // Open the Labels management modal
+    async openLabelsModal() {
+        if (!this.currentConversation?.pageId) {
+            this.showToast('افتح محادثة أولاً', 'warning');
+            return;
+        }
+
+        const { pageId, participantId, participantName } = this.currentConversation;
+        if (!participantId || participantId === 'undefined') {
+            this.showToast('لا يمكن تحديد العميل', 'warning');
+            return;
+        }
+
+        // Remove existing modal if any
+        document.getElementById('labelsModal')?.remove();
+
+        const isDark = !document.body.classList.contains('light-theme');
+        const cardBg = isDark
+            ? 'linear-gradient(145deg, rgba(30,30,50,0.97), rgba(20,20,35,0.99))'
+            : 'linear-gradient(145deg, rgba(255,255,255,0.98), rgba(245,245,250,0.95))';
+        const textColor = isDark ? '#fff' : '#1a1a2e';
+        const subText = isDark ? 'rgba(255,255,255,0.6)' : 'rgba(0,0,0,0.5)';
+        const inputBg = isDark ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.04)';
+        const cardBorder = isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.08)';
+
+        const modal = document.createElement('div');
+        modal.id = 'labelsModal';
+        modal.style.cssText = `
+            position:fixed;top:0;left:0;right:0;bottom:0;
+            background:rgba(0,0,0,0.6);backdrop-filter:blur(10px);
+            display:flex;align-items:center;justify-content:center;
+            z-index:10000;opacity:0;transition:opacity 0.3s ease;
+        `;
+
+        modal.innerHTML = `
+            <div style="
+                background:${cardBg};border:1px solid ${cardBorder};
+                border-radius:24px;padding:28px;min-width:400px;max-width:90vw;max-height:80vh;
+                box-shadow:0 25px 80px rgba(0,0,0,0.4);
+                transform:scale(0.9) translateY(20px);transition:transform 0.3s cubic-bezier(0.34,1.56,0.64,1);
+                display:flex;flex-direction:column;
+            ">
+                <!-- Header -->
+                <div style="text-align:center;margin-bottom:20px;">
+                    <div style="
+                        width:56px;height:56px;margin:0 auto 14px;
+                        background:linear-gradient(135deg,#667eea,#764ba2);border-radius:16px;
+                        display:flex;align-items:center;justify-content:center;font-size:26px;
+                        box-shadow:0 10px 30px rgba(102,126,234,0.3);
+                    ">🏷️</div>
+                    <h3 style="margin:0 0 4px 0;color:${textColor};font-size:18px;font-weight:600;">إدارة Labels</h3>
+                    <p style="margin:0;color:${subText};font-size:13px;">${participantName || 'العميل'}</p>
+                </div>
+
+                <!-- Create new label -->
+                <div style="display:flex;gap:8px;margin-bottom:16px;">
+                    <input type="text" id="newLabelInput" placeholder="اسم Label جديد..."
+                        style="flex:1;padding:10px 14px;border-radius:12px;border:1px solid ${cardBorder};
+                        background:${inputBg};color:${textColor};font-size:13px;outline:none;"
+                        onkeydown="if(event.key==='Enter'){event.preventDefault();app.createNewLabel();}">
+                    <button onclick="app.createNewLabel()" style="
+                        padding:10px 18px;border-radius:12px;border:none;
+                        background:linear-gradient(135deg,#667eea,#764ba2);color:white;
+                        font-size:13px;font-weight:600;cursor:pointer;white-space:nowrap;
+                        transition:transform 0.2s;
+                    " onmouseover="this.style.transform='scale(1.05)'" onmouseout="this.style.transform='scale(1)'">
+                        <i class="fas fa-plus"></i> إنشاء
+                    </button>
+                </div>
+
+                <!-- Labels list -->
+                <div id="labelsListContainer" style="
+                    flex:1;overflow-y:auto;max-height:350px;
+                    padding-inline-end:4px;
+                ">
+                    <div style="text-align:center;padding:30px;color:${subText};">
+                        <div class="spinner" style="margin:0 auto 12px;width:28px;height:28px;border:3px solid ${cardBorder};border-top-color:#667eea;border-radius:50%;animation:spin 0.8s linear infinite;"></div>
+                        جاري التحميل...
+                    </div>
+                </div>
+
+                <!-- Close button -->
+                <button onclick="document.getElementById('labelsModal')?.remove();" style="
+                    margin-top:16px;padding:12px;border-radius:12px;border:1px solid ${cardBorder};
+                    background:transparent;color:${subText};font-size:14px;cursor:pointer;
+                    transition:all 0.2s;
+                " onmouseover="this.style.background='${inputBg}'" onmouseout="this.style.background='transparent'">
+                    إغلاق
+                </button>
+            </div>
+        `;
+
+        // Close on backdrop click
+        modal.addEventListener('click', (e) => {
+            if (e.target === modal) modal.remove();
+        });
+
+        document.body.appendChild(modal);
+
+        // Animate in
+        requestAnimationFrame(() => {
+            modal.style.opacity = '1';
+            modal.querySelector('div').style.transform = 'scale(1) translateY(0)';
+        });
+
+        // Load labels data
+        await this.refreshLabelsModal(pageId, participantId);
+    }
+
+    // Refresh the labels list inside the modal
+    async refreshLabelsModal(pageId, psid) {
+        const container = document.getElementById('labelsListContainer');
+        if (!container) return;
+
+        const isDark = !document.body.classList.contains('light-theme');
+        const textColor = isDark ? '#fff' : '#1a1a2e';
+        const subText = isDark ? 'rgba(255,255,255,0.5)' : 'rgba(0,0,0,0.4)';
+        const itemBg = isDark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.03)';
+        const itemBorder = isDark ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.06)';
+
+        try {
+            // Fetch page labels and user labels in parallel
+            const [pageRes, userRes] = await Promise.all([
+                fetch(`${this.API_URL}/api/labels/${pageId}`),
+                fetch(`${this.API_URL}/api/labels/${pageId}/user/${psid}`)
+            ]);
+            const pageData = await pageRes.json();
+            const userData = await userRes.json();
+
+            const allLabels = pageData.labels || [];
+            const userLabelIds = new Set((userData.labels || []).map(l => l.id));
+
+            if (allLabels.length === 0) {
+                container.innerHTML = `
+                    <div style="text-align:center;padding:40px 20px;color:${subText};">
+                        <i class="fas fa-tags" style="font-size:36px;margin-bottom:12px;display:block;opacity:0.4;"></i>
+                        <p style="margin:0;font-size:14px;">لا توجد Labels بعد</p>
+                        <p style="margin:4px 0 0;font-size:12px;opacity:0.7;">أنشئ Label جديد من الحقل أعلاه</p>
+                    </div>
+                `;
+                return;
+            }
+
+            const colors = ['#667eea', '#f59e0b', '#10b981', '#ef4444', '#8b5cf6', '#ec4899', '#06b6d4', '#84cc16'];
+
+            container.innerHTML = allLabels.map((label, i) => {
+                const isAssigned = userLabelIds.has(label.id);
+                const color = colors[i % colors.length];
+                return `
+                    <div style="
+                        display:flex;align-items:center;gap:12px;padding:12px 14px;
+                        border-radius:14px;margin-bottom:8px;
+                        background:${isAssigned ? color + '15' : itemBg};
+                        border:1px solid ${isAssigned ? color + '40' : itemBorder};
+                        transition:all 0.2s;
+                    ">
+                        <label style="flex:1;display:flex;align-items:center;gap:10px;cursor:pointer;">
+                            <input type="checkbox" ${isAssigned ? 'checked' : ''}
+                                onchange="app.toggleLabelAssignment('${pageId}', '${label.id}', '${psid}', this.checked)"
+                                style="width:18px;height:18px;accent-color:${color};cursor:pointer;">
+                            <span style="
+                                display:inline-flex;align-items:center;gap:6px;
+                                padding:4px 12px;border-radius:10px;font-size:13px;font-weight:500;
+                                background:${color}20;color:${color};
+                            "><i class="fas fa-tag" style="font-size:10px;"></i>${label.name}</span>
+                        </label>
+                        <button onclick="app.deletePageLabel('${pageId}', '${label.id}', '${psid}')"
+                            title="حذف Label"
+                            style="
+                                width:32px;height:32px;border-radius:10px;border:none;
+                                background:rgba(239,68,68,0.1);color:#ef4444;cursor:pointer;
+                                display:flex;align-items:center;justify-content:center;
+                                transition:all 0.2s;font-size:12px;
+                            " onmouseover="this.style.background='rgba(239,68,68,0.2)'" onmouseout="this.style.background='rgba(239,68,68,0.1)'">
+                            <i class="fas fa-trash-alt"></i>
+                        </button>
+                    </div>
+                `;
+            }).join('');
+
+        } catch (err) {
+            console.error('[Labels] Error loading labels:', err);
+            container.innerHTML = `
+                <div style="text-align:center;padding:30px;color:#ef4444;">
+                    <i class="fas fa-exclamation-triangle" style="font-size:24px;margin-bottom:8px;display:block;"></i>
+                    <p style="margin:0;font-size:13px;">فشل في تحميل Labels</p>
+                    <p style="margin:4px 0 0;font-size:11px;opacity:0.7;">${err.message}</p>
+                </div>
+            `;
+        }
+    }
+
+    // Create a new label
+    async createNewLabel() {
+        const input = document.getElementById('newLabelInput');
+        if (!input) return;
+
+        const labelName = input.value.trim();
+        if (!labelName) {
+            this.showToast('اكتب اسم Label', 'warning');
+            input.focus();
+            return;
+        }
+
+        const { pageId, participantId } = this.currentConversation || {};
+        if (!pageId) return;
+
+        try {
+            const res = await fetch(`${this.API_URL}/api/labels/${pageId}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ labelName })
+            });
+            const data = await res.json();
+
+            if (data.success || data.labelId) {
+                input.value = '';
+                this.showToast(`تم إنشاء Label "${labelName}"`, 'success');
+                await this.refreshLabelsModal(pageId, participantId);
+            } else {
+                this.showToast(data.error || 'فشل في إنشاء Label', 'error');
+            }
+        } catch (err) {
+            console.error('[Labels] Create error:', err);
+            this.showToast('خطأ في الاتصال', 'error');
+        }
+    }
+
+    // Toggle label assignment for a user
+    async toggleLabelAssignment(pageId, labelId, psid, assign) {
+        try {
+            const method = assign ? 'POST' : 'DELETE';
+            const res = await fetch(`${this.API_URL}/api/labels/${pageId}/${labelId}/user/${psid}`, { method });
+            const data = await res.json();
+
+            if (data.success) {
+                this.showToast(assign ? 'تم تعيين Label' : 'تم إزالة Label', 'success');
+                // Refresh header badges
+                await this.loadUserLabels(pageId, psid);
+                // Refresh modal list
+                await this.refreshLabelsModal(pageId, psid);
+            } else {
+                this.showToast(data.error || 'فشل العملية', 'error');
+                // Revert checkbox
+                await this.refreshLabelsModal(pageId, psid);
+            }
+        } catch (err) {
+            console.error('[Labels] Toggle error:', err);
+            this.showToast('خطأ في الاتصال', 'error');
+            await this.refreshLabelsModal(pageId, psid);
+        }
+    }
+
+    // Delete a page label (with confirmation)
+    async deletePageLabel(pageId, labelId, psid) {
+        if (!confirm('هل أنت متأكد من حذف هذا الـ Label؟ سيتم إزالته من جميع العملاء.')) return;
+
+        try {
+            const res = await fetch(`${this.API_URL}/api/labels/${pageId}/${labelId}`, { method: 'DELETE' });
+            const data = await res.json();
+
+            if (data.success) {
+                this.showToast('تم حذف Label', 'success');
+                await this.refreshLabelsModal(pageId, psid);
+                await this.loadUserLabels(pageId, psid);
+            } else {
+                this.showToast(data.error || 'فشل حذف Label', 'error');
+            }
+        } catch (err) {
+            console.error('[Labels] Delete error:', err);
+            this.showToast('خطأ في الاتصال', 'error');
+        }
+    }
+
+    // Start Facebook message polling for real-time sync
+    startFbMessagePolling() {
+        // Clear any existing polling
+        this.stopFbMessagePolling();
+
+        console.log('[FB Message Polling] Starting polling for:', this.currentConversation?.participantId);
+
+        // Poll every 1 second for real-time updates
+        this.fbMessagePollingInterval = setInterval(async () => {
+            if (!this.currentConversation) {
+                this.stopFbMessagePolling();
+                return;
+            }
+
+            try {
+                const { pageId, conversationId, participantId } = this.currentConversation;
+                const data = await window.fbIntegration.getMessages(pageId, conversationId);
+
+                if (!data.messages || data.messages.length === 0) return;
+
+                const container = document.getElementById('chatMessages');
+                if (!container) return;
+
+                // Check if LAST message changed (more reliable than count)
+                if (!this.lastPolledMessageId) this.lastPolledMessageId = {};
+                const lastMsgInData = data.messages[0]; // Most recent message
+                const lastMsgId = lastMsgInData?.id || lastMsgInData?.created_time;
+
+                if (this.lastPolledMessageId[conversationId] === lastMsgId) {
+                    return; // Same last message, no update needed
+                }
+
+                this.lastPolledMessageId[conversationId] = lastMsgId;
+                // console.log('[FB Polling] ✅ New message detected! Last msg:', lastMsgId?.substring(0, 20));
+
+                // Save current scroll position before update
+                this.lastScrollPos = container.scrollTop;
+
+                // Check if we're already at bottom (to auto-scroll after update)
+                // Increased threshold to 250px to better detect "user is at bottom"
+                const wasAtBottom = container.scrollHeight - container.scrollTop <= container.clientHeight + 250;
+
+                // Page messages on RIGHT, Customer messages on LEFT
+                // Load stored orders for matching
+                const storedOrders = JSON.parse(localStorage.getItem('dk_stored_orders') || '{}');
+
+                container.innerHTML = data.messages.reverse().map((m, index, array) => {
+                    // Check if this message has a stored order first
+                    if (storedOrders[m.id]) {
+                        const od = storedOrders[m.id];
+                        return `
+                            <div style="display:flex;flex-direction:column;align-items:flex-start;margin-bottom:12px;">
+                                ${this.renderOrderCardHtml(od)}
+                                <small style="font-size:10px;opacity:0.5;margin-top:4px;">${new Date(m.created_time).toLocaleString('ar-EG')}</small>
+                            </div>
+                        `;
+                    }
+
+                    // Same comprehensive logic as loadMessages
+                    let isFromPage = false;
+                    if (!m.from || !m.from.id) {
+                        isFromPage = false;
+                    } else if (m.from.id === pageId) {
+                        isFromPage = true;
+                    } else if (m.from.id === participantId) {
+                        isFromPage = false;
+                    } else {
+                        isFromPage = false;
+                    }
+
+                    // SMART FIX: Facebook API bug workaround (Polling version - ONLY for images, not videos)
+                    const hasAttachments = m.attachments && m.attachments.data && m.attachments.data.length > 0;
+                    const hasText = !!m.message;
+
+                    // Check if attachment is a video - videos should NOT be re-attributed
+                    const isVideoAttachment = hasAttachments && m.attachments.data.some(att =>
+                        att.video_data || (att.mime_type && att.mime_type.startsWith('video/'))
+                    );
+
+                    if (!isFromPage && hasAttachments && !hasText && !isVideoAttachment && index > 0) {
+                        for (let lookback = 1; lookback <= Math.min(2, index); lookback++) {
+                            const prevMsg = array[index - lookback];
+                            const prevMsgIsPage = prevMsg.from && prevMsg.from.id === pageId;
+
+                            // CHAIN BREAKER: If we encounter a Customer message, STOP looking back.
+                            if (!prevMsgIsPage) {
+                                break;
+                            }
+
+                            const prevMsgContent = prevMsg.message || '';
+
+                            // Check if previous message looks like a product
+                            const isProductMsg = prevMsgContent.includes('EGP') || prevMsgContent.includes('السعر') || prevMsgContent.includes('كود') || prevMsgContent.includes('🛍️');
+
+                            if (prevMsgIsPage) {
+                                const timeDiff = new Date(m.created_time) - new Date(prevMsg.created_time);
+                                const allowedTime = isProductMsg ? 120000 : 60000;
+
+                                if (timeDiff >= 0 && timeDiff < allowedTime) {
+                                    isFromPage = true;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+
+                    // Build attachment HTML - display without bubble background
+                    let attachmentHtml = '';
+                    if (hasAttachments) {
+                        for (const attachment of m.attachments.data) {
+                            if (attachment.image_data && attachment.image_data.url) {
+                                // Image attachment - no background
+                                attachmentHtml += `<img src="${attachment.image_data.url}" 
+                                    style="max-width:250px;max-height:250px;border-radius:12px;cursor:pointer;display:block;box-shadow:0 2px 8px rgba(0,0,0,0.15);" 
+                                    onclick="window.open('${attachment.image_data.url}', '_blank')"
+                                    onerror="this.style.display='none'">`;
+                            } else if (attachment.video_data && attachment.video_data.url) {
+                                // Video attachment
+                                attachmentHtml += `<video src="${attachment.video_data.url}" controls 
+                                    style="max-width:250px;max-height:250px;border-radius:12px;box-shadow:0 2px 8px rgba(0,0,0,0.15);"></video>`;
+                            } else if (attachment.file_url) {
+                                // File/image URL fallback
+                                const mimeType = attachment.mime_type || '';
+                                if (mimeType.startsWith('image/')) {
+                                    attachmentHtml += `<img src="${attachment.file_url}" 
+                                        style="max-width:250px;max-height:250px;border-radius:12px;cursor:pointer;display:block;box-shadow:0 2px 8px rgba(0,0,0,0.15);" 
+                                        onclick="window.open('${attachment.file_url}', '_blank')"
+                                        onerror="this.style.display='none'">`;
+                                } else if (mimeType.startsWith('video/')) {
+                                    attachmentHtml += `<video src="${attachment.file_url}" controls 
+                                        style="max-width:250px;max-height:250px;border-radius:12px;box-shadow:0 2px 8px rgba(0,0,0,0.15);"></video>`;
+                                } else {
+                                    // Generic file - keep in bubble
+                                    attachmentHtml += `<a href="${attachment.file_url}" target="_blank" 
+                                        style="display:block;padding:8px 12px;background:var(--glass);border-radius:8px;color:inherit;text-decoration:none;margin-bottom:4px;">
+                                        <i class="fas fa-file"></i> ${attachment.name || 'ملف مرفق'}</a>`;
+                                }
+                            } else if (attachment.type === 'template' || attachment.type === 'share' || attachment.type === 'fallback' || attachment.title) {
+                                // Template/Order card - try stored order data
+                                const storedOrders = JSON.parse(localStorage.getItem('dk_stored_orders') || '{}');
+                                let foundOrder = null;
+                                for (const mid in storedOrders) {
+                                    if (storedOrders[mid] && m.id && m.id === mid) {
+                                        foundOrder = storedOrders[mid];
+                                        break;
+                                    }
+                                }
+                                if (foundOrder) {
+                                    attachmentHtml += this.renderOrderCardHtml(foundOrder);
+                                } else {
+                                    const attTitle = attachment.title || attachment.name || 'Order';
+                                    attachmentHtml += `<div style="
+                                        max-width:260px;padding:12px 16px;
+                                        background:var(--glass, rgba(255,255,255,0.05));
+                                        border:1px solid rgba(255,255,255,0.1);
+                                        border-radius:14px;
+                                        display:flex;align-items:center;gap:10px;
+                                    ">
+                                        <span style="font-size:20px;">🏷️</span>
+                                        <div>
+                                            <div style="font-size:13px;font-weight:600;">${attTitle}</div>
+                                            <div style="font-size:11px;opacity:0.6;">Waiting for payment</div>
+                                        </div>
+                                    </div>`;
+                                }
+                            } else {
+                                // Unknown attachment - show order-style card
+                                attachmentHtml += `<div style="
+                                    max-width:260px;padding:12px 16px;
+                                    background:var(--glass, rgba(255,255,255,0.05));
+                                    border:1px solid rgba(255,255,255,0.1);
+                                    border-radius:14px;
+                                    display:flex;align-items:center;gap:10px;
+                                ">
+                                    <span style="font-size:20px;">🏷️</span>
+                                    <div>
+                                        <div style="font-size:13px;font-weight:600;">Order</div>
+                                        <div style="font-size:11px;opacity:0.6;">Waiting for payment</div>
+                                    </div>
+                                </div>`;
+                            }
+                        }
+                    }
+
+                    // If message has only attachments (no text), display without bubble
+                    if (hasAttachments && !hasText) {
+                        return `
+                            <div style="display:flex;flex-direction:column;align-items:${isFromPage ? 'flex-start' : 'flex-end'};margin-bottom:12px;">
+                                ${attachmentHtml}
+                                <small style="font-size:10px;opacity:0.5;margin-top:4px;">${new Date(m.created_time).toLocaleString('ar-EG')}</small>
+                            </div>
+                        `;
+                    }
+
+                    if (hasAttachments && hasText) {
+                        return `
+                            <div style="display:flex;flex-direction:column;align-items:${isFromPage ? 'flex-start' : 'flex-end'};margin-bottom:12px;">
+                                ${attachmentHtml}
+                                <div class="${isFromPage ? 'page-bubble' : 'customer-bubble'}">
+                                    <p style="margin:0;">${m.message}</p>
+                                    <small style="font-size:10px;opacity:0.7;">${new Date(m.created_time).toLocaleString('ar-EG')}</small>
+                                </div>
+                            </div>
+                        `;
+                    }
+
+                    // Empty page message (likely template order without stored data)
+                    if (!m.message && isFromPage) {
+                        // Try to find stored order data
+                        const storedOrders = JSON.parse(localStorage.getItem('dk_stored_orders') || '{}');
+                        let orderHtml = null;
+                        for (const mid in storedOrders) {
+                            if (storedOrders[mid] && m.id && m.id === mid) {
+                                orderHtml = this.renderOrderCardHtml(storedOrders[mid]);
+                                break;
+                            }
+                        }
+                        if (!orderHtml) {
+                            orderHtml = `<div style="
+                                max-width:260px;padding:12px 16px;
+                                background:var(--glass, rgba(255,255,255,0.05));
+                                border:1px solid rgba(255,255,255,0.1);
+                                border-radius:14px;
+                                display:flex;align-items:center;gap:10px;
+                            ">
+                                <span style="font-size:20px;">🏷️</span>
+                                <div>
+                                    <div style="font-size:13px;font-weight:600;">Order</div>
+                                    <div style="font-size:11px;opacity:0.6;">Waiting for payment</div>
+                                </div>
+                            </div>`;
+                        }
+                        return `
+                            <div style="display:flex;flex-direction:column;align-items:flex-start;margin-bottom:12px;">
+                                ${orderHtml}
+                                <small style="font-size:10px;opacity:0.5;margin-top:4px;">${new Date(m.created_time).toLocaleString('ar-EG')}</small>
+                            </div>
+                        `;
+                    }
+
+                    // Text-only message with bubble
+                    return `
+                        <div style="display:flex;justify-content:${isFromPage ? 'flex-start' : 'flex-end'};margin-bottom:12px;">
+                            <div class="${isFromPage ? 'page-bubble' : 'customer-bubble'}">
+                                <p style="margin:0;">${m.message || ''}</p>
+                                <small style="font-size:10px;opacity:0.7;">${new Date(m.created_time).toLocaleString('ar-EG')}</small>
+                            </div>
+                        </div>
+                    `;
+                }).join('');
+
+                // Auto-scroll logic (Smart Scroll)
+                if (wasAtBottom) {
+                    // Force scroll to bottom immediately
+                    container.scrollTop = container.scrollHeight;
+
+                    // Force again after a tiny delay to handle image layout shifts
+                    setTimeout(() => {
+                        if (container) container.scrollTop = container.scrollHeight;
+                    }, 100);
+                } else {
+                    // User is reading history - STRICTLY maintain position
+                    // Only restore if valid, otherwise don't touch
+                    if (this.lastScrollPos !== undefined && this.lastScrollPos !== null) {
+                        container.scrollTop = this.lastScrollPos;
+                    }
+                }
+            } catch (err) {
+                console.log('[FB Polling] Error:', err.message);
+            }
+        }, 10000); // Every 10 seconds to prevent Facebook rate limiting
+    }
+
+    // Stop Facebook message polling
+    stopFbMessagePolling() {
+        if (this.fbMessagePollingInterval) {
+            clearInterval(this.fbMessagePollingInterval);
+            this.fbMessagePollingInterval = null;
+        }
+    }
+
+    // Start Facebook inbox polling for new message notifications
+    startFbInboxPolling() {
+        this.stopFbInboxPolling();
+
+        const pageId = document.getElementById('inboxPageSelect')?.value;
+        if (!pageId) return;
+
+        console.log('[FB Inbox] Starting inbox polling for page:', pageId);
+
+        // Poll every 10 seconds
+        this.fbInboxPollingInterval = setInterval(async () => {
+            const currentPageId = document.getElementById('inboxPageSelect')?.value;
+            if (!currentPageId) {
+                this.stopFbInboxPolling();
+                return;
+            }
+
+            try {
+                const data = await window.fbIntegration.getConversations(currentPageId, 20);
+                if (!data.conversations) return;
+
+                const newConversations = data.conversations;
+                const oldConversations = this.inboxConversations || [];
+
+                // Check for new messages
+                let hasNewMessage = false;
+                let newMessageConv = null;
+
+                for (const newConv of newConversations) {
+                    const oldConv = oldConversations.find(c => c.id === newConv.id);
+
+                    // New message detected if:
+                    // 1. Conversation didn't exist before, OR
+                    // 2. unreadCount increased, OR
+                    // 3. snippet changed (new message content)
+                    if (!oldConv) {
+                        hasNewMessage = true;
+                        newMessageConv = newConv;
+                        break;
+                    } else if (newConv.unreadCount > (oldConv.unreadCount || 0)) {
+                        hasNewMessage = true;
+                        newMessageConv = newConv;
+                        break;
+                    } else if (newConv.snippet !== oldConv.snippet && newConv.updatedTime !== oldConv.updatedTime) {
+                        // Snippet changed and is newer - likely new message
+                        hasNewMessage = true;
+                        newMessageConv = newConv;
+                        break;
+                    }
+                }
+
+                // Note: No sound or toast notifications - just silent update
+
+                // Check if anything changed (snippets, order, etc.)
+                const hasAnyChange = newConversations.some((newConv, i) => {
+                    const oldConv = oldConversations[i];
+                    if (!oldConv) return true;
+                    return newConv.snippet !== oldConv.snippet ||
+                        newConv.unreadCount !== oldConv.unreadCount ||
+                        newConv.updatedTime !== oldConv.updatedTime;
+                });
+
+                // Update stored conversations
+                this.inboxConversations = newConversations;
+
+                // Re-render list if anything changed
+                if (hasAnyChange) {
+                    const container = document.getElementById('conversationsContent');
+                    const pageId = currentPageId;
+                    if (container) {
+                        container.innerHTML = newConversations.map(c => {
+                            const needsReply = c.needsReply && !this.isConversationReadLocally(c.id, c.updatedTime);
+                            const initials = c.participant ? c.participant.charAt(0).toUpperCase() : '?';
+                            const shortId = c.participantId?.substring(0, 10) || '';
+                            return `
+                            <div class="msg-conv ${needsReply ? 'active' : ''}" onclick="app.loadMessages('${pageId}', '${c.id}', '${c.participant}', '${c.participantId}')">
+                                <div class="msg-conv-avatar">${initials}</div>
+                                <div class="msg-conv-info">
+                                    <div class="msg-conv-name">${c.participant}</div>
+                                    <div class="msg-conv-preview">${c.snippet || 'لا يوجد نص'}</div>
+                                    <div class="msg-conv-id" onclick="event.stopPropagation(); navigator.clipboard.writeText('${c.participantId}'); app.showToast('تم نسخ الـ ID', 'success');" title="انقر للنسخ">
+                                        <i class="fas fa-copy"></i> ${shortId}...
+                                    </div>
+                                </div>
+                                <div class="msg-conv-meta">
+                                    <div class="msg-conv-time">${new Date(c.updatedTime).toLocaleString('ar-EG', { hour: '2-digit', minute: '2-digit' })}</div>
+                                    ${needsReply ? '<div class="msg-conv-badge">جديد</div>' : ''}
+                                </div>
+                            </div>
+                        `}).join('');
+                    }
+                }
+
+            } catch (err) {
+                console.log('[FB Inbox Polling] Error:', err.message);
+            }
+        }, 2000); // Every 2 seconds for real-time updates
+    }
+
+    // Stop Facebook inbox polling
+    stopFbInboxPolling() {
+        if (this.fbInboxPollingInterval) {
+            clearInterval(this.fbInboxPollingInterval);
+            this.fbInboxPollingInterval = null;
+        }
+    }
+
+    // Mark conversation as read locally (persist in localStorage)
+    markConversationAsRead(conversationId) {
+        try {
+            const readConvs = JSON.parse(localStorage.getItem('fb_read_conversations') || '{}');
+            readConvs[conversationId] = Date.now();
+            localStorage.setItem('fb_read_conversations', JSON.stringify(readConvs));
+        } catch (e) {
+            console.log('[Inbox] Error saving read state:', e);
+        }
+    }
+
+    // Check if conversation was marked as read locally
+    isConversationReadLocally(conversationId, lastUpdateTime) {
+        try {
+            const readConvs = JSON.parse(localStorage.getItem('fb_read_conversations') || '{}');
+            const readTime = readConvs[conversationId];
+            if (!readTime) return false;
+
+            // Consider read if we read it after the last update
+            const updateTime = new Date(lastUpdateTime).getTime();
+            return readTime >= updateTime;
+        } catch (e) {
+            return false;
+        }
+    }
+
+    // Get effective unread count (considering local read state)
+    getEffectiveUnreadCount(conv) {
+        // If we've read it locally after the last update, it's read
+        if (this.isConversationReadLocally(conv.id, conv.updatedTime)) {
+            return 0;
+        }
+        return conv.unreadCount || 0;
+    }
+
+    // Update conversation in list instantly when new message arrives
+    updateConversationInList(senderId, message, pageId) {
+        const currentPageId = document.getElementById('inboxPageSelect')?.value;
+        if (currentPageId !== pageId) return;
+
+        const container = document.getElementById('conversationsContent');
+        if (!container) return;
+
+        // Find the conversation element with this sender
+        const convs = container.querySelectorAll('.msg-conv');
+        let foundConv = null;
+
+        convs.forEach(conv => {
+            const onclick = conv.getAttribute('onclick') || '';
+            if (onclick.includes(senderId)) {
+                foundConv = conv;
+            }
+        });
+
+        if (foundConv) {
+            // Update snippet
+            const preview = foundConv.querySelector('.msg-conv-preview');
+            if (preview) {
+                preview.textContent = message?.substring(0, 40) || '[مرفق]';
+            }
+
+            // Update time
+            const time = foundConv.querySelector('.msg-conv-time');
+            if (time) {
+                time.textContent = 'الآن';
+            }
+
+            // Add new badge
+            let badge = foundConv.querySelector('.msg-conv-badge');
+            if (!badge) {
+                const meta = foundConv.querySelector('.msg-conv-meta');
+                if (meta) {
+                    const newBadge = document.createElement('div');
+                    newBadge.className = 'msg-conv-badge';
+                    newBadge.textContent = 'جديد';
+                    meta.appendChild(newBadge);
+                }
+            }
+
+            // Move to top
+            container.insertBefore(foundConv, container.firstChild);
+
+            // Add highlight animation
+            foundConv.classList.add('active');
+            foundConv.style.animation = 'slideIn 0.3s ease';
+        }
+    }
+
+    async sendReply() {
+        if (!this.currentConversation) return;
+
+        const input = document.getElementById('replyMessage');
+        const message = input.value.trim();
+        if (!message) return;
+
+        const { pageId, participantId, conversationId, participantName } = this.currentConversation;
+
+        // Clear input immediately
+        input.value = '';
+
+        // OPTIMISTIC UPDATE: Add message to chat immediately (don't wait for API)
+        const container = document.getElementById('chatMessages');
+        if (container) {
+            const msgDiv = document.createElement('div');
+            msgDiv.style.cssText = 'display:flex;justify-content:flex-end;margin-bottom:12px;animation:fadeIn 0.3s ease;';
+            msgDiv.id = 'temp-sending-msg';
+            msgDiv.innerHTML = `
+                <div class="page-bubble" style="opacity:0.7;">
+                    <p style="margin:0;">${message}</p>
+                    <small style="font-size:10px;opacity:0.7;"><i class="fas fa-spinner fa-spin"></i> جاري الإرسال...</small>
+                </div>
+            `;
+            container.appendChild(msgDiv);
+            container.scrollTop = container.scrollHeight;
+        }
+
+        const result = await window.fbIntegration.sendReply(pageId, participantId, message);
+
+        if (result.success) {
+            this.showToast('تم إرسال الرد ✓', 'success');
+            // Track activity for performance dashboard
+            this.trackTeamActivity('message_sent', 'facebook', conversationId, message.length);
+
+            // Update the temp message to show sent status
+            const tempMsg = document.getElementById('temp-sending-msg');
+            if (tempMsg) {
+                tempMsg.querySelector('small').innerHTML = 'الآن ✓';
+                tempMsg.querySelector('div').style.opacity = '1';
+                tempMsg.removeAttribute('id');
+            }
+
+            // Update conversation list
+            this.updateConversationInList(participantId, '← ' + message.substring(0, 30), pageId);
+        } else {
+            // Remove temp message on failure
+            const tempMsg = document.getElementById('temp-sending-msg');
+            if (tempMsg) tempMsg.remove();
+
+            // Restore message to input
+            input.value = message;
+            this.showToast(result.details || 'فشل إرسال الرد', 'error');
+        }
+    }
+
+    // ============= CREATE ORDER =============
+
+    showCreateOrderModal() {
+        if (!this.currentConversation) {
+            this.showToast('اختر محادثة أولاً', 'error');
+            return;
+        }
+
+        const { participantName, participantId } = this.currentConversation;
+        const orderNum = `ORD-${new Date().toISOString().slice(0, 10).replace(/-/g, '')}-${Math.floor(Math.random() * 9000) + 1000}`;
+        const pageName = this.currentConversation?.pageName || '';
+
+        document.getElementById('createOrderModal')?.remove();
+
+        const modal = document.createElement('div');
+        modal.id = 'createOrderModal';
+        modal.style.cssText = 'position:fixed;inset:0;z-index:10000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.6);backdrop-filter:blur(4px);animation:fadeIn 0.3s ease;';
+        modal.onclick = (e) => { if (e.target === modal) modal.remove(); };
+
+        modal.innerHTML = `
+            <div style="background:var(--bg-card);border-radius:16px;width:95%;max-width:620px;max-height:90vh;overflow-y:auto;box-shadow:0 25px 60px rgba(0,0,0,0.4);border:1px solid var(--border-color);">
+                <!-- Header -->
+                <div style="padding:20px 24px;display:flex;justify-content:space-between;align-items:center;position:sticky;top:0;background:var(--bg-card);z-index:1;border-bottom:1px solid var(--border-color);border-radius:16px 16px 0 0;">
+                    <h3 style="margin:0;font-size:18px;display:flex;align-items:center;gap:10px;font-weight:700;">
+                        <div style="width:34px;height:34px;background:linear-gradient(135deg,#3b82f6,#1d4ed8);border-radius:10px;display:flex;align-items:center;justify-content:center;">
+                            <i class="fas fa-file-invoice" style="color:#fff;font-size:14px;"></i>
+                        </div>
+                        إنشاء طلب جديد
+                    </h3>
+                    <button onclick="document.getElementById('createOrderModal').remove()" style="background:none;border:none;color:var(--text-secondary);cursor:pointer;font-size:18px;padding:6px 8px;border-radius:8px;transition:all 0.2s;" onmouseover="this.style.background='var(--bg-secondary)'" onmouseout="this.style.background='none'"><i class="fas fa-times"></i></button>
+                </div>
+                <div style="padding:20px 24px 24px;">
+                    <!-- Page Info Banner -->
+                    ${pageName ? `<div style="background:linear-gradient(135deg,rgba(59,130,246,0.08),rgba(37,99,235,0.06));border:1px solid rgba(59,130,246,0.15);border-radius:10px;padding:12px 14px;margin-bottom:18px;display:flex;align-items:center;gap:10px;">
+                        <div style="width:34px;height:34px;background:linear-gradient(135deg,#3b82f6,#2563eb);border-radius:8px;display:flex;align-items:center;justify-content:center;flex-shrink:0;">
+                            <i class="fab fa-facebook" style="color:#fff;font-size:15px;"></i>
+                        </div>
+                        <div>
+                            <div style="font-size:11px;color:var(--text-secondary);font-weight:500;">الصفحة</div>
+                            <div style="font-size:14px;font-weight:600;color:var(--text-primary);">${pageName}</div>
+                        </div>
+                    </div>` : ''}
+                    
+                    <!-- Customer & Order Info -->
+                    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px;">
+                        <div>
+                            <label style="font-size:12px;color:var(--text-secondary);margin-bottom:5px;display:flex;align-items:center;gap:5px;font-weight:500;"><i class="fas fa-user" style="font-size:10px;color:#6366f1;"></i> اسم العميل</label>
+                            <input type="text" id="orderCustomerName" value="${participantName || ''}" style="width:100%;padding:9px 12px;border-radius:8px;border:1px solid var(--border-color);background:var(--bg-secondary);color:var(--text-primary);font-size:13px;transition:border-color 0.2s;" onfocus="this.style.borderColor='#3b82f6'" onblur="this.style.borderColor='var(--border-color)'">
+                        </div>
+                        <div>
+                            <label style="font-size:12px;color:var(--text-secondary);margin-bottom:5px;display:flex;align-items:center;gap:5px;font-weight:500;"><i class="fas fa-hashtag" style="font-size:10px;color:#6366f1;"></i> رقم الطلب</label>
+                            <input type="text" id="orderNumber" value="${orderNum}" style="width:100%;padding:9px 12px;border-radius:8px;border:1px solid var(--border-color);background:var(--bg-secondary);color:var(--text-primary);font-size:13px;transition:border-color 0.2s;" onfocus="this.style.borderColor='#3b82f6'" onblur="this.style.borderColor='var(--border-color)'">
+                        </div>
+                    </div>
+                    
+                    <!-- Currency, Payment, State -->
+                    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin-bottom:18px;">
+                        <div>
+                            <label style="font-size:12px;color:var(--text-secondary);margin-bottom:5px;display:flex;align-items:center;gap:5px;font-weight:500;"><i class="fas fa-coins" style="font-size:10px;color:#f59e0b;"></i> العملة</label>
+                            <select id="orderCurrency" style="width:100%;padding:9px 12px;border-radius:8px;border:1px solid var(--border-color);background:var(--bg-secondary);color:var(--text-primary);font-size:13px;">
+                                <option value="EGP">EGP - جنيه مصري</option>
+                                <option value="USD">USD - دولار أمريكي</option>
+                                <option value="SAR">SAR - ريال سعودي</option>
+                                <option value="AED">AED - درهم إماراتي</option>
+                                <option value="EUR">EUR - يورو</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label style="font-size:12px;color:var(--text-secondary);margin-bottom:5px;display:flex;align-items:center;gap:5px;font-weight:500;"><i class="fas fa-credit-card" style="font-size:10px;color:#10b981;"></i> طريقة الدفع</label>
+                            <select id="orderPaymentMethod" style="width:100%;padding:9px 12px;border-radius:8px;border:1px solid var(--border-color);background:var(--bg-secondary);color:var(--text-primary);font-size:13px;">
+                                <option value="Cash on Delivery"><i class="fas fa-money-bill"></i> الدفع عند الاستلام</option>
+                                <option value="Credit Card">بطاقة ائتمان</option>
+                                <option value="Bank Transfer">تحويل بنكي</option>
+                                <option value="Wallet">محفظة إلكترونية</option>
+                                <option value="PayPal">PayPal</option>
+                                <option value="Installments">تقسيط</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label style="font-size:12px;color:var(--text-secondary);margin-bottom:5px;display:flex;align-items:center;gap:5px;font-weight:500;"><i class="fas fa-map-marker-alt" style="font-size:10px;color:#ef4444;"></i> المحافظة</label>
+                            <select id="orderState" style="width:100%;padding:9px 12px;border-radius:8px;border:1px solid var(--border-color);background:var(--bg-secondary);color:var(--text-primary);font-size:13px;">
+                                <option value="">اختر المحافظة</option>
+                                <option value="القاهرة">القاهرة</option>
+                                <option value="الجيزة">الجيزة</option>
+                                <option value="الإسكندرية">الإسكندرية</option>
+                                <option value="الدقهلية">الدقهلية</option>
+                                <option value="الشرقية">الشرقية</option>
+                                <option value="المنوفية">المنوفية</option>
+                                <option value="الغربية">الغربية</option>
+                                <option value="كفر الشيخ">كفر الشيخ</option>
+                                <option value="البحيرة">البحيرة</option>
+                                <option value="الإسماعيلية">الإسماعيلية</option>
+                                <option value="السويس">السويس</option>
+                                <option value="بورسعيد">بورسعيد</option>
+                                <option value="دمياط">دمياط</option>
+                                <option value="الزقازيق">الزقازيق</option>
+                                <option value="أسيوط">أسيوط</option>
+                                <option value="سوهاج">سوهاج</option>
+                                <option value="قنا">قنا</option>
+                                <option value="أسوان">أسوان</option>
+                                <option value="الأقصر">الأقصر</option>
+                                <option value="البحر الأحمر">البحر الأحمر</option>
+                                <option value="مطروح">مطروح</option>
+                                <option value="الوادي الجديد">الوادي الجديد</option>
+                                <option value="شمال سيناء">شمال سيناء</option>
+                                <option value="جنوب سيناء">جنوب سيناء</option>
+                                <option value="المنيا">المنيا</option>
+                                <option value="بني سويف">بني سويف</option>
+                                <option value="الفيوم">الفيوم</option>
+                                <option value="أخرى">أخرى</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    <!-- Products Section -->
+                    <div style="margin-bottom:16px;">
+                        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
+                            <label style="font-size:13px;font-weight:600;color:var(--text-primary);display:flex;align-items:center;gap:6px;">
+                                <i class="fas fa-box" style="color:#8b5cf6;font-size:12px;"></i> المنتجات
+                            </label>
+                            <div style="display:flex;gap:6px;">
+                                <button onclick="app.addOrderItemWithSearch()" style="background:linear-gradient(135deg,#3b82f6,#2563eb);color:white;border:none;padding:5px 12px;border-radius:6px;cursor:pointer;font-size:11px;font-weight:600;display:flex;align-items:center;gap:4px;transition:all 0.2s;" onmouseover="this.style.opacity='0.9'" onmouseout="this.style.opacity='1'" title="بحث من المتجر"><i class="fas fa-search" style="font-size:10px;"></i> بحث</button>
+                                <button onclick="app.addOrderItem()" style="background:linear-gradient(135deg,#8b5cf6,#7c3aed);color:white;border:none;padding:5px 12px;border-radius:6px;cursor:pointer;font-size:11px;font-weight:600;display:flex;align-items:center;gap:4px;transition:all 0.2s;" onmouseover="this.style.opacity='0.9'" onmouseout="this.style.opacity='1'"><i class="fas fa-plus" style="font-size:10px;"></i> يدوي</button>
+                            </div>
+                        </div>
+                        <div style="background:var(--bg-secondary);border-radius:10px;padding:10px;border:1px solid var(--border-color);">
+                            <div style="display:grid;grid-template-columns:2fr 1fr 1fr 32px;gap:8px;margin-bottom:6px;padding:0 4px;">
+                                <span style="font-size:10px;color:var(--text-secondary);font-weight:600;text-transform:uppercase;letter-spacing:0.5px;">المنتج</span>
+                                <span style="font-size:10px;color:var(--text-secondary);font-weight:600;text-transform:uppercase;letter-spacing:0.5px;text-align:center;">الكمية</span>
+                                <span style="font-size:10px;color:var(--text-secondary);font-weight:600;text-transform:uppercase;letter-spacing:0.5px;text-align:center;">السعر</span>
+                                <span></span>
+                            </div>
+                            <div id="orderItemsList">
+                                <div class="order-item-row" style="display:grid;grid-template-columns:2fr 1fr 1fr 32px;gap:8px;margin-bottom:6px;align-items:center;">
+                                    <div style="position:relative;">
+                                        <input type="text" class="order-item-name" placeholder="ابحث أو اكتب اسم المنتج..." oninput="app.handleProductSearch(this)" autocomplete="off" style="width:100%;padding:8px 10px;border-radius:6px;border:1px solid var(--border-color);background:var(--bg-card);color:var(--text-primary);font-size:12px;transition:border-color 0.2s;" onfocus="this.style.borderColor='#3b82f6'" onblur="this.style.borderColor='var(--border-color)'">
+                                        <div class="product-search-dropdown" style="display:none;position:absolute;top:100%;left:0;right:0;max-height:200px;overflow-y:auto;background:var(--bg-card);border:1px solid var(--border-color);border-radius:8px;box-shadow:0 8px 24px rgba(0,0,0,0.15);z-index:100;margin-top:4px;"></div>
+                                    </div>
+                                    <div>
+                                        <input type="number" class="order-item-qty" value="1" min="1" oninput="app.recalcOrderTotal()" style="width:100%;padding:8px 6px;border-radius:6px;border:1px solid var(--border-color);background:var(--bg-card);color:var(--text-primary);font-size:12px;text-align:center;">
+                                    </div>
+                                    <div>
+                                        <input type="number" class="order-item-price" placeholder="0" min="0" step="0.01" oninput="app.recalcOrderTotal()" style="width:100%;padding:8px 6px;border-radius:6px;border:1px solid var(--border-color);background:var(--bg-card);color:var(--text-primary);font-size:12px;text-align:center;">
+                                    </div>
+                                    <div></div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Optional Sections -->
+                    <details style="margin-bottom:14px;">
+                        <summary style="cursor:pointer;font-size:12px;color:var(--text-secondary);padding:6px 0;display:flex;align-items:center;gap:6px;font-weight:500;"><i class="fas fa-map-marker-alt" style="font-size:10px;color:#ef4444;"></i> عنوان الشحن الإضافي <span style="font-size:10px;opacity:0.6;">(اختياري)</span></summary>
+                        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:8px;">
+                            <input type="text" id="orderStreet" placeholder="الشارع / المنطقة" style="padding:8px 10px;border-radius:6px;border:1px solid var(--border-color);background:var(--bg-secondary);color:var(--text-primary);font-size:12px;">
+                            <input type="text" id="orderCity" placeholder="المدينة / المركز" style="padding:8px 10px;border-radius:6px;border:1px solid var(--border-color);background:var(--bg-secondary);color:var(--text-primary);font-size:12px;">
+                            <input type="text" id="orderPostalCode" placeholder="الرقم البريدي" style="padding:8px 10px;border-radius:6px;border:1px solid var(--border-color);background:var(--bg-secondary);color:var(--text-primary);font-size:12px;">
+                            <input type="text" id="orderPhone" placeholder="رقم الهاتف البديل" style="padding:8px 10px;border-radius:6px;border:1px solid var(--border-color);background:var(--bg-secondary);color:var(--text-primary);font-size:12px;">
+                        </div>
+                    </details>
+
+                    <details style="margin-bottom:18px;">
+                        <summary style="cursor:pointer;font-size:12px;color:var(--text-secondary);padding:6px 0;display:flex;align-items:center;gap:6px;font-weight:500;"><i class="fas fa-link" style="font-size:10px;color:#3b82f6;"></i> رابط الطلب والملاحظات <span style="font-size:10px;opacity:0.6;">(اختياري)</span></summary>
+                        <div style="margin-top:8px;">
+                            <input type="text" id="orderUrl" placeholder="رابط صفحة الطلب" style="width:100%;padding:8px 10px;border-radius:6px;border:1px solid var(--border-color);background:var(--bg-secondary);color:var(--text-primary);font-size:12px;margin-bottom:8px;">
+                            <textarea id="orderNotes" placeholder="ملاحظات الطلب" style="width:100%;padding:8px 10px;border-radius:6px;border:1px solid var(--border-color);background:var(--bg-secondary);color:var(--text-primary);font-size:12px;resize:vertical;min-height:50px;"></textarea>
+                        </div>
+                    </details>
+
+                    <!-- Financial Summary -->
+                    <div style="background:var(--bg-secondary);border-radius:12px;padding:16px;margin-bottom:20px;border:1px solid var(--border-color);">
+                        <div style="display:flex;justify-content:space-between;margin-bottom:10px;font-size:13px;align-items:center;">
+                            <span style="color:var(--text-secondary);display:flex;align-items:center;gap:6px;"><i class="fas fa-layer-group" style="font-size:11px;color:#6366f1;"></i> المجموع الفرعي</span>
+                            <span id="orderSubtotal" style="font-weight:600;font-size:14px;">0.00</span>
+                        </div>
+                        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;font-size:13px;">
+                            <span style="color:var(--text-secondary);display:flex;align-items:center;gap:6px;"><i class="fas fa-tag" style="font-size:11px;color:#ef4444;"></i> الخصم</span>
+                            <div style="display:flex;align-items:center;gap:6px;">
+                                <input type="number" id="orderDiscount" value="0" min="0" step="0.01" oninput="app.recalcOrderTotal()" style="width:65px;padding:4px 8px;border-radius:6px;border:1px solid var(--border-color);background:var(--bg-card);color:var(--text-primary);font-size:12px;text-align:center;">
+                                <select id="orderDiscountType" onchange="app.recalcOrderTotal()" style="padding:4px 6px;border-radius:6px;border:1px solid var(--border-color);background:var(--bg-card);color:var(--text-primary);font-size:11px;">
+                                    <option value="fixed">مبلغ</option>
+                                    <option value="percent">%</option>
+                                </select>
+                                <span id="orderDiscountDisplay" style="font-size:11px;color:#ef4444;font-weight:600;"></span>
+                            </div>
+                        </div>
+                        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;font-size:13px;">
+                            <span style="color:var(--text-secondary);display:flex;align-items:center;gap:6px;"><i class="fas fa-truck" style="font-size:11px;color:#f59e0b;"></i> تكلفة الشحن</span>
+                            <input type="number" id="orderShipping" value="0" min="0" step="0.01" oninput="app.recalcOrderTotal()" style="width:75px;padding:4px 8px;border-radius:6px;border:1px solid var(--border-color);background:var(--bg-card);color:var(--text-primary);font-size:12px;text-align:center;">
+                        </div>
+                        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;font-size:13px;">
+                            <span style="color:var(--text-secondary);display:flex;align-items:center;gap:6px;"><i class="fas fa-receipt" style="font-size:11px;color:#10b981;"></i> الضريبة (14%)</span>
+                            <div style="display:flex;align-items:center;gap:8px;">
+                                <input type="number" id="orderTax" value="0" min="0" step="0.01" oninput="app.recalcOrderTotal()" style="width:65px;padding:4px 8px;border-radius:6px;border:1px solid var(--border-color);background:var(--bg-card);color:var(--text-primary);font-size:12px;text-align:center;">
+                                <label style="font-size:11px;cursor:pointer;display:flex;align-items:center;gap:4px;color:var(--text-secondary);"><input type="checkbox" id="orderTaxAuto" onchange="app.recalcOrderTotal()" style="accent-color:#3b82f6;"> تلقائي</label>
+                            </div>
+                        </div>
+                        <div style="border-top:2px solid var(--border-color);padding-top:12px;margin-top:6px;display:flex;justify-content:space-between;align-items:center;">
+                            <span style="font-size:15px;font-weight:700;display:flex;align-items:center;gap:6px;"><i class="fas fa-calculator" style="font-size:13px;color:#3b82f6;"></i> الإجمالي</span>
+                            <span id="orderTotal" style="font-size:20px;font-weight:800;color:#3b82f6;">0.00</span>
+                        </div>
+                    </div>
+
+                    <!-- Action Buttons -->
+                    <div style="display:flex;gap:10px;">
+                        <button onclick="document.getElementById('createOrderModal').remove()" style="flex:1;padding:12px;background:var(--bg-secondary);color:var(--text-primary);border:1px solid var(--border-color);border-radius:10px;font-size:13px;font-weight:600;cursor:pointer;transition:all 0.2s;" onmouseover="this.style.background='var(--border-color)'" onmouseout="this.style.background='var(--bg-secondary)'">إلغاء</button>
+                        <button onclick="app.createOrder()" style="flex:2;padding:12px;background:linear-gradient(135deg,#3b82f6,#1d4ed8);color:white;border:none;border-radius:10px;font-size:13px;font-weight:700;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:8px;transition:all 0.3s;box-shadow:0 2px 8px rgba(59,130,246,0.3);" onmouseover="this.style.transform='translateY(-1px)';this.style.boxShadow='0 6px 20px rgba(59,130,246,0.4)'" onmouseout="this.style.transform='none';this.style.boxShadow='0 2px 8px rgba(59,130,246,0.3)'">
+                            <i class="fab fa-facebook-messenger" style="font-size:15px;"></i> إرسال الطلب عبر ميتا
+                        </button>
+                    </div>
+                </div>
+            </div>
+        `;
+
+        document.body.appendChild(modal);
+        this.recalcOrderTotal();
+    }
+
+    addOrderItem() {
+        const list = document.getElementById('orderItemsList');
+        if (!list) return;
+
+        const row = document.createElement('div');
+        row.className = 'order-item-row';
+        row.style.cssText = 'display:grid;grid-template-columns:2fr 1fr 1fr 32px;gap:8px;margin-bottom:6px;align-items:center;animation:fadeIn 0.2s ease;';
+        row.innerHTML = `
+            <div style="position:relative;">
+                <input type="text" class="order-item-name" placeholder="ابحث أو اكتب اسم المنتج..." oninput="app.handleProductSearch(this)" autocomplete="off" style="width:100%;padding:8px 10px;border-radius:6px;border:1px solid var(--border-color);background:var(--bg-card);color:var(--text-primary);font-size:12px;transition:border-color 0.2s;" onfocus="this.style.borderColor='#3b82f6'" onblur="this.style.borderColor='var(--border-color)'">
+                <div class="product-search-dropdown" style="display:none;position:absolute;top:100%;left:0;right:0;max-height:200px;overflow-y:auto;background:var(--bg-card);border:1px solid var(--border-color);border-radius:8px;box-shadow:0 8px 24px rgba(0,0,0,0.15);z-index:100;margin-top:4px;"></div>
+            </div>
+            <div>
+                <input type="number" class="order-item-qty" value="1" min="1" oninput="app.recalcOrderTotal()" style="width:100%;padding:8px 6px;border-radius:6px;border:1px solid var(--border-color);background:var(--bg-card);color:var(--text-primary);font-size:12px;text-align:center;">
+            </div>
+            <div>
+                <input type="number" class="order-item-price" placeholder="0" min="0" step="0.01" oninput="app.recalcOrderTotal()" style="width:100%;padding:8px 6px;border-radius:6px;border:1px solid var(--border-color);background:var(--bg-card);color:var(--text-primary);font-size:12px;text-align:center;">
+            </div>
+            <button onclick="this.parentElement.remove();app.recalcOrderTotal()" style="width:32px;height:32px;border-radius:6px;border:none;background:rgba(239,68,68,0.08);color:#ef4444;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:all 0.2s;" onmouseover="this.style.background='rgba(239,68,68,0.15)'" onmouseout="this.style.background='rgba(239,68,68,0.08)'"><i class="fas fa-trash-alt" style="font-size:11px;"></i></button>
+        `;
+        list.appendChild(row);
+    }
+
+    addOrderItemWithSearch() {
+        this.addOrderItem();
+        // Focus the search input of the newly added row
+        const list = document.getElementById('orderItemsList');
+        if (list) {
+            const lastRow = list.lastElementChild;
+            const searchInput = lastRow?.querySelector('.order-item-name');
+            if (searchInput) {
+                setTimeout(() => searchInput.focus(), 100);
+            }
+        }
+    }
+
+    // Product search autocomplete handler - searches linked store products by name, SKU, or code
+    handleProductSearch(input) {
+        const query = input.value.trim();
+        const dropdown = input.parentElement.querySelector('.product-search-dropdown');
+        if (!dropdown) return;
+
+        // Clear previous timeout
+        if (this._productSearchTimeout) clearTimeout(this._productSearchTimeout);
+
+        if (query.length < 2) {
+            dropdown.style.display = 'none';
+            return;
+        }
+
+        // Show loading
+        dropdown.innerHTML = `<div style="padding:12px;text-align:center;color:var(--text-secondary);font-size:12px;"><i class="fas fa-spinner fa-spin"></i> جاري البحث عن "${query}"...</div>`;
+        dropdown.style.display = 'block';
+
+        // Debounce search
+        this._productSearchTimeout = setTimeout(async () => {
+            try {
+                const token = localStorage.getItem('octobot_token');
+                const url = `${this.API_URL}/api/ecommerce/products?search=${encodeURIComponent(query)}&limit=10`;
+                console.log('[ProductSearch] Searching:', url);
+
+                const response = await fetch(url, {
+                    headers: { 'Authorization': `Bearer ${token}` }
+                });
+
+                if (!response.ok) {
+                    console.error('[ProductSearch] API error:', response.status, response.statusText);
+                    dropdown.innerHTML = `<div style="padding:12px;text-align:center;color:#ef4444;font-size:12px;">خطأ في الاتصال (${response.status})</div>`;
+                    return;
+                }
+
+                const data = await response.json();
+                console.log('[ProductSearch] Results:', data.products?.length || 0, 'total:', data.total);
+                const products = data.products || [];
+
+                if (products.length === 0) {
+                    dropdown.innerHTML = `<div style="padding:12px;text-align:center;color:var(--text-secondary);font-size:12px;">لا توجد نتائج لـ "${query}"<br><span style="font-size:11px;opacity:0.7;">تأكد من مزامنة المنتجات من المتجر</span></div>`;
+                    dropdown.style.display = 'block';
+                    return;
+                }
+
+                dropdown.innerHTML = products.map(p => {
+                    const imgUrl = (p.images && p.images.length > 0) ? p.images[0] : '';
+                    const price = parseFloat(p.price || 0).toFixed(2);
+                    const stock = p.inventory || 0;
+                    const sku = p.sku || '';
+                    const skuLabel = sku ? `<span style="color:#3b82f6;font-size:10px;background:rgba(59,130,246,0.1);padding:1px 5px;border-radius:4px;">SKU: ${sku}</span>` : '';
+                    return `<div class="product-search-item" data-name="${(p.name || '').replace(/"/g, '&quot;')}" data-price="${p.price || 0}" data-image="${imgUrl}" data-id="${p.id || p.externalId || ''}" data-sku="${sku}" style="display:flex;align-items:center;gap:10px;padding:10px 12px;cursor:pointer;border-bottom:1px solid var(--border-color);transition:background 0.15s;" onmouseover="this.style.background='var(--bg-secondary)'" onmouseout="this.style.background='none'">
+                        ${imgUrl ? `<img src="${imgUrl}" style="width:40px;height:40px;border-radius:6px;object-fit:cover;border:1px solid var(--border-color);flex-shrink:0;" onerror="this.style.display='none'">` : `<div style="width:40px;height:40px;border-radius:6px;background:var(--bg-secondary);display:flex;align-items:center;justify-content:center;font-size:16px;flex-shrink:0;">📦</div>`}
+                        <div style="flex:1;min-width:0;">
+                            <div style="font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${p.name || 'منتج'}</div>
+                            <div style="font-size:11px;color:var(--text-secondary);display:flex;align-items:center;gap:6px;flex-wrap:wrap;">${price} ${p.currency || 'EGP'} ${stock > 0 ? `• متوفر: ${stock}` : ''} ${skuLabel}</div>
+                        </div>
+                    </div>`;
+                }).join('');
+                dropdown.style.display = 'block';
+
+                // Attach click events
+                dropdown.querySelectorAll('.product-search-item').forEach(item => {
+                    item.addEventListener('click', () => {
+                        const row = input.closest('.order-item-row');
+                        if (row) {
+                            input.value = item.dataset.name;
+                            row.querySelector('.order-item-price').value = parseFloat(item.dataset.price || 0).toFixed(2);
+                            // Store image URL for the Facebook card
+                            input.dataset.imageUrl = item.dataset.image || '';
+                            input.dataset.productId = item.dataset.id || '';
+                            input.dataset.sku = item.dataset.sku || '';
+                            this.recalcOrderTotal();
+                        }
+                        dropdown.style.display = 'none';
+                    });
+                });
+            } catch (err) {
+                console.error('[ProductSearch] Error:', err);
+                dropdown.innerHTML = `<div style="padding:12px;text-align:center;color:#ef4444;font-size:12px;"><i class="fas fa-exclamation-triangle"></i> خطأ في البحث<br><span style="font-size:10px;opacity:0.7;">${err.message}</span></div>`;
+                dropdown.style.display = 'block';
+            }
+        }, 300);
+
+        // Close dropdown when clicking outside
+        const closeDropdown = (e) => {
+            if (!input.parentElement.contains(e.target)) {
+                dropdown.style.display = 'none';
+                document.removeEventListener('click', closeDropdown);
+            }
+        };
+        document.addEventListener('click', closeDropdown);
+    }
+
+    recalcOrderTotal() {
+        const rows = document.querySelectorAll('#orderItemsList .order-item-row');
+        let subtotal = 0;
+        rows.forEach(row => {
+            const qty = parseFloat(row.querySelector('.order-item-qty')?.value) || 0;
+            const price = parseFloat(row.querySelector('.order-item-price')?.value) || 0;
+            subtotal += qty * price;
+        });
+
+        // Calculate discount
+        const discountInput = parseFloat(document.getElementById('orderDiscount')?.value) || 0;
+        const discountType = document.getElementById('orderDiscountType')?.value || 'fixed';
+        let discountAmount = 0;
+        if (discountType === 'percent') {
+            discountAmount = subtotal * (discountInput / 100);
+            const discountDisplay = document.getElementById('orderDiscountDisplay');
+            if (discountDisplay) discountDisplay.textContent = discountAmount > 0 ? `(-${discountAmount.toFixed(2)})` : '';
+        } else {
+            discountAmount = discountInput;
+            const discountDisplay = document.getElementById('orderDiscountDisplay');
+            if (discountDisplay) discountDisplay.textContent = '';
+        }
+
+        const afterDiscount = Math.max(0, subtotal - discountAmount);
+
+        const shipping = parseFloat(document.getElementById('orderShipping')?.value) || 0;
+        let tax = parseFloat(document.getElementById('orderTax')?.value) || 0;
+        const taxAuto = document.getElementById('orderTaxAuto')?.checked;
+
+        // Auto-calculate tax (14% for Egypt) on the discounted subtotal
+        if (taxAuto) {
+            tax = afterDiscount * 0.14;
+        }
+
+        const total = afterDiscount + shipping + tax;
+
+        const currency = document.getElementById('orderCurrency')?.value || 'EGP';
+        document.getElementById('orderSubtotal').textContent = `${subtotal.toFixed(2)} ${currency}`;
+        document.getElementById('orderTotal').textContent = `${total.toFixed(2)} ${currency}`;
+
+        // Update tax field if auto is checked
+        if (taxAuto && document.getElementById('orderTax')) {
+            document.getElementById('orderTax').value = tax.toFixed(2);
+        }
+    }
+
+    async createOrder() {
+        if (!this.currentConversation) return;
+
+        const { pageId, participantId, participantName } = this.currentConversation;
+        const fbUserId = localStorage.getItem('fb_user_id');
+        const storeName = this.currentConversation?.pageName || '';
+
+        const rows = document.querySelectorAll('#orderItemsList .order-item-row');
+        const items = [];
+        rows.forEach(row => {
+            const nameInput = row.querySelector('.order-item-name');
+            const title = nameInput?.value?.trim();
+            const quantity = parseInt(row.querySelector('.order-item-qty')?.value) || 1;
+            const price = parseFloat(row.querySelector('.order-item-price')?.value) || 0;
+            const image_url = nameInput?.dataset?.imageUrl || '';
+            const productId = nameInput?.dataset?.productId || '';
+            if (title && price > 0) {
+                items.push({ title, quantity, price, image_url, productId });
+            }
+        });
+
+        if (items.length === 0) {
+            this.showToast('أضف منتج واحد على الأقل مع السعر', 'error');
+            return;
+        }
+
+        const customerName = document.getElementById('orderCustomerName')?.value?.trim() || participantName || 'Customer';
+        const orderNumber = document.getElementById('orderNumber')?.value?.trim() || `ORD-${Date.now()}`;
+        const currency = document.getElementById('orderCurrency')?.value || 'EGP';
+        const paymentMethod = document.getElementById('orderPaymentMethod')?.value || 'Cash on Delivery';
+        const orderUrl = document.getElementById('orderUrl')?.value?.trim() || '';
+        const orderNotes = document.getElementById('orderNotes')?.value?.trim() || '';
+
+        const subtotal = items.reduce((sum, item) => sum + (item.quantity * item.price), 0);
+        const discountInput = parseFloat(document.getElementById('orderDiscount')?.value) || 0;
+        const discountType = document.getElementById('orderDiscountType')?.value || 'fixed';
+        const discountAmount = discountType === 'percent' ? subtotal * (discountInput / 100) : discountInput;
+        const afterDiscount = Math.max(0, subtotal - discountAmount);
+        const shippingCost = parseFloat(document.getElementById('orderShipping')?.value) || 0;
+        const totalTax = parseFloat(document.getElementById('orderTax')?.value) || 0;
+        const totalCost = afterDiscount + shippingCost + totalTax;
+
+        const street = document.getElementById('orderStreet')?.value?.trim();
+        const phone = document.getElementById('orderPhone')?.value?.trim();
+        let address = null;
+        if (street) {
+            address = {
+                street_1: street,
+                city: document.getElementById('orderCity')?.value?.trim() || '',
+                state: document.getElementById('orderState')?.value?.trim() || '',
+                postal_code: document.getElementById('orderPostalCode')?.value?.trim() || '',
+                country: 'EG',
+                phone: phone || ''
+            };
+        }
+
+        const submitBtn = document.querySelector('#createOrderModal button[onclick="app.createOrder()"]');
+        if (submitBtn) {
+            submitBtn.disabled = true;
+            submitBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> جاري الإرسال...';
+        }
+
+        try {
+            const response = await fetch(`${window.location.origin}/api/inbox/${fbUserId}/${pageId}/create-order`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    recipientId: participantId,
+                    recipientName: customerName,
+                    orderNumber,
+                    currency,
+                    paymentMethod,
+                    items,
+                    address,
+                    orderUrl,
+                    notes: orderNotes,
+                    storeName,
+                    discount: {
+                        type: discountType,
+                        value: discountInput,
+                        amount: discountAmount
+                    },
+                    summary: {
+                        subtotal,
+                        discount: discountAmount,
+                        after_discount: afterDiscount,
+                        shipping_cost: shippingCost,
+                        total_tax: totalTax,
+                        total_cost: totalCost,
+                        timestamp: Math.floor(Date.now() / 1000).toString()
+                    }
+                })
+            });
+
+            const data = await response.json();
+
+            if (data.success) {
+                this.showToast(`✅ تم إرسال الطلب ${data.orderNumber} بنجاح!`, 'success');
+                document.getElementById('createOrderModal')?.remove();
+
+                // Store order data in localStorage for dashboard display
+                if (data.messageId && data.orderData) {
+                    const storedOrders = JSON.parse(localStorage.getItem('dk_stored_orders') || '{}');
+                    storedOrders[data.messageId] = data.orderData;
+                    localStorage.setItem('dk_stored_orders', JSON.stringify(storedOrders));
+                }
+
+                // Manually append order card to chat
+                if (this.currentConversation) {
+                    const container = document.getElementById('chatMessages');
+                    if (container) {
+                        const orderCard = document.createElement('div');
+                        if (data.messageId) orderCard.id = `msg-${data.messageId}`;
+                        orderCard.style.cssText = 'display:flex;flex-direction:column;align-items:flex-start;margin-bottom:12px;';
+                        const od = data.orderData || { totalCost: 0, currency: 'EGP', itemNames: '', orderNumber: data.orderNumber };
+                        orderCard.innerHTML = this.renderOrderCardHtml(od);
+                        orderCard.innerHTML += `<small style="font-size:10px;opacity:0.5;margin-top:4px;">${new Date().toLocaleString('ar-EG')}</small>`;
+                        container.appendChild(orderCard);
+                        container.scrollTop = container.scrollHeight;
+                    }
+                }
+            } else {
+                this.showToast(data.error || 'فشل إرسال الطلب', 'error');
+                if (submitBtn) {
+                    submitBtn.disabled = false;
+                    submitBtn.innerHTML = '<i class="fas fa-receipt"></i> إرسال الطلب';
+                }
+            }
+        } catch (err) {
+            console.error('[CreateOrder] Error:', err);
+            this.showToast('حدث خطأ أثناء إرسال الطلب', 'error');
+            if (submitBtn) {
+                submitBtn.disabled = false;
+                submitBtn.innerHTML = '<i class="fas fa-receipt"></i> إرسال الطلب';
+            }
+        }
+    }
+
+    // Render order card HTML (Meta Business Suite Receipt Template style)
+    // This mirrors how Facebook Messenger renders the receipt template natively
+    renderOrderCardHtml(orderData) {
+        const od = orderData;
+        const curr = od.currency || 'EGP';
+        const total = parseFloat(od.totalCost || 0).toFixed(2);
+        const subtotal = parseFloat(od.subtotal || 0).toFixed(2);
+        const shippingCost = parseFloat(od.shippingCost || 0).toFixed(2);
+        const totalTax = parseFloat(od.totalTax || 0).toFixed(2);
+        const discountAmount = parseFloat(od.discount || 0).toFixed(2);
+        const orderNum = od.orderNumber || '';
+        const itemCount = od.itemCount || od.items?.reduce((s, i) => s + (i.quantity || 1), 0) || 0;
+        const payment = od.paymentMethod || 'Cash on Delivery';
+        const storeName = od.storeName || '';
+        const isPaid = od.status === 'paid' || od.paymentStatus === 'paid';
+        const cardId = orderNum ? `order-card-${orderNum}` : `order-card-${Date.now()}`;
+        const items = od.items || [];
+
+        // Store order data for re-rendering (e.g. after mark-as-paid)
+        const orderDataJson = JSON.stringify(od).replace(/'/g, '&#39;').replace(/"/g, '&quot;');
+
+        // Status config
+        const statusConfig = isPaid
+            ? { bg: '#e8f5e9', color: '#2e7d32', icon: 'fa-check-circle', text: 'تم الدفع ✓' }
+            : { bg: '#fff3e0', color: '#e65100', icon: 'fa-clock', text: 'في انتظار الدفع' };
+
+        // Build individual items HTML (like Meta receipt shows each product)
+        let itemsHtml = '';
+        if (items.length > 0) {
+            itemsHtml = items.map(item => {
+                const imgUrl = item.image_url || '';
+                const itemTotal = (parseFloat(item.price || 0) * parseInt(item.quantity || 1)).toFixed(2);
+                return `
+                <div style="display:flex;align-items:center;gap:10px;padding:10px 0;border-bottom:1px solid #f0f0f0;">
+                    ${imgUrl && imgUrl.startsWith('http') ?
+                        `<img src="${imgUrl}" style="width:44px;height:44px;border-radius:6px;object-fit:cover;border:1px solid #e5e7eb;flex-shrink:0;" onerror="this.style.display='none'">` :
+                        `<div style="width:44px;height:44px;border-radius:6px;background:#f3f4f6;display:flex;align-items:center;justify-content:center;font-size:18px;flex-shrink:0;">📦</div>`
+                    }
+                    <div style="flex:1;min-width:0;">
+                        <div style="font-size:13px;font-weight:600;color:#1a1a1a;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${item.title || 'Product'}</div>
+                        <div style="font-size:11px;color:#65676b;">x${item.quantity || 1}</div>
+                    </div>
+                    <div style="font-size:13px;font-weight:600;color:#1a1a1a;white-space:nowrap;">${curr} ${itemTotal}</div>
+                </div>`;
+            }).join('');
+        }
+
+        // Build address line
+        let addressLine = '';
+        if (od.address) {
+            const parts = [];
+            if (od.address.street_1) parts.push(od.address.street_1);
+            if (od.address.city) parts.push(od.address.city);
+            if (od.address.state) parts.push(od.address.state);
+            if (parts.length > 0) addressLine = parts.join(', ');
+        }
+
+        return `<div id="${cardId}" data-order="${orderDataJson}" style="
+            width:100%;max-width:340px;
+            background:#fff;border:1px solid #dddfe2;border-radius:8px;
+            overflow:hidden;box-shadow:0 1px 2px rgba(0,0,0,0.1);
+            font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;
+            direction:ltr;
+        ">
+            <!-- Meta-style Receipt Header (blue) -->
+            <div style="background:linear-gradient(135deg,#1877f2,#1565c0);padding:14px 16px;display:flex;align-items:center;justify-content:space-between;">
+                <div>
+                    <div style="font-size:11px;color:rgba(255,255,255,0.8);margin-bottom:2px;">${storeName}</div>
+                    <div style="font-size:11px;color:rgba(255,255,255,0.7);">Order #${orderNum.replace('ORD-', '')}</div>
+                </div>
+                <div style="display:flex;align-items:center;gap:6px;">
+                    <div style="font-size:20px;font-weight:700;color:#fff;">${curr} ${total}</div>
+                    <div style="width:28px;height:28px;background:rgba(255,255,255,0.2);border-radius:50%;display:flex;align-items:center;justify-content:center;">
+                        <i class="fas fa-receipt" style="font-size:12px;color:#fff;"></i>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Status Badge -->
+            <div style="background:${statusConfig.bg};color:${statusConfig.color};padding:8px 16px;font-size:12px;font-weight:600;display:flex;align-items:center;gap:6px;">
+                <i class="fas ${statusConfig.icon}" style="font-size:11px;"></i> ${statusConfig.text}
+            </div>
+
+            <!-- Product Items List -->
+            ${items.length > 0 ? `
+            <div style="padding:6px 16px 2px;">
+                <div style="font-size:11px;color:#65676b;font-weight:600;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px;">${itemCount} Item${itemCount > 1 ? 's' : ''}</div>
+                ${itemsHtml}
+            </div>` : ''}
+
+            <!-- Financial Summary -->
+            <div style="padding:12px 16px;border-top:${items.length > 0 ? 'none' : '1px solid #e5e7eb'};">
+                <div style="font-size:12px;color:#1a1a1a;">
+                    <div style="display:flex;justify-content:space-between;margin-bottom:4px;">
+                        <span style="color:#65676b;">Subtotal</span>
+                        <span>${curr} ${subtotal}</span>
+                    </div>
+                    ${parseFloat(discountAmount) > 0 ? `
+                    <div style="display:flex;justify-content:space-between;margin-bottom:4px;color:#e74c3c;">
+                        <span>Discount</span>
+                        <span>-${curr} ${discountAmount}</span>
+                    </div>` : ''}
+                    <div style="display:flex;justify-content:space-between;margin-bottom:4px;">
+                        <span style="color:#65676b;">Shipping</span>
+                        <span>${parseFloat(shippingCost) > 0 ? `${curr} ${shippingCost}` : 'Free'}</span>
+                    </div>
+                    ${parseFloat(totalTax) > 0 ? `
+                    <div style="display:flex;justify-content:space-between;margin-bottom:4px;">
+                        <span style="color:#65676b;">Tax</span>
+                        <span>${curr} ${totalTax}</span>
+                    </div>` : ''}
+                    <div style="display:flex;justify-content:space-between;padding-top:8px;margin-top:4px;border-top:1px solid #e5e7eb;font-size:14px;font-weight:700;">
+                        <span>Total</span>
+                        <span>${curr} ${total}</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Payment Method & Address -->
+            <div style="padding:0 16px 12px;font-size:11px;color:#65676b;">
+                <div style="display:flex;align-items:center;gap:4px;margin-bottom:2px;">
+                    <i class="fas fa-credit-card" style="font-size:10px;"></i> ${payment}
+                </div>
+                ${addressLine ? `<div style="display:flex;align-items:center;gap:4px;"><i class="fas fa-map-marker-alt" style="font-size:10px;"></i> ${addressLine}</div>` : ''}
+            </div>
+
+            <!-- Actions -->
+            ${!isPaid ? `
+            <div style="border-top:1px solid #e5e7eb;">
+                <button onclick="app.markOrderAsPaid('${orderNum}')" id="btn-${cardId}" style="
+                    width:100%;padding:12px;background:none;border:none;
+                    color:#1877f2;font-size:13px;font-weight:600;cursor:pointer;
+                    display:flex;align-items:center;justify-content:center;gap:6px;
+                    transition:background 0.15s;
+                " onmouseover="this.style.background='#f0f2f5'" onmouseout="this.style.background='none'">
+                    <i class="fas fa-check-circle"></i> Mark as Paid
+                </button>
+            </div>` : ''}
+        </div>`;
+    }
+
+    // Mark order as paid - sends confirmation to customer and updates UI
+    async markOrderAsPaid(orderNumber) {
+        if (!orderNumber || !this.currentConversation) {
+            this.showToast('لا يمكن تحديث حالة الطلب', 'error');
+            return;
+        }
+
+        const btn = document.getElementById(`btn-order-card-${orderNumber}`);
+        if (btn) {
+            btn.disabled = true;
+            btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> جاري التحديث...';
+        }
+
+        try {
+            const { pageId } = this.currentConversation;
+            const recipientId = this.currentConversation.participantId;
+            const userId = localStorage.getItem('dk_user_id');
+
+            const response = await fetch(`${this.API_URL}/api/inbox/${userId}/${pageId}/mark-paid`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ recipientId, orderNumber })
+            });
+
+            const data = await response.json();
+
+            if (data.success) {
+                // Re-render the entire card with paid status
+                const card = document.getElementById(`order-card-${orderNumber}`);
+                if (card) {
+                    // Try to get original order data from the stored data attribute
+                    let orderData = {};
+                    try {
+                        const storedData = card.getAttribute('data-order');
+                        if (storedData) orderData = JSON.parse(storedData);
+                    } catch (e) { }
+
+                    // Merge with API response (API data takes priority for updated fields)
+                    const apiOrder = data.order || {};
+                    orderData = {
+                        ...orderData,
+                        ...apiOrder,
+                        status: 'paid',
+                        paymentStatus: 'paid',
+                        orderNumber: orderNumber,
+                        // Preserve page name
+                        storeName: orderData.storeName || this.currentConversation?.pageName || ''
+                    };
+
+                    // Re-render the card with updated data
+                    const newHtml = this.renderOrderCardHtml(orderData);
+                    card.outerHTML = newHtml;
+                }
+
+                // Update localStorage
+                const storedOrders = JSON.parse(localStorage.getItem('dk_stored_orders') || '{}');
+                for (const mid in storedOrders) {
+                    if (storedOrders[mid].orderNumber === orderNumber) {
+                        storedOrders[mid].status = 'paid';
+                    }
+                }
+                localStorage.setItem('dk_stored_orders', JSON.stringify(storedOrders));
+
+                this.showToast('✅ تم تأكيد الدفع وإرسال تأكيد للعميل', 'success');
+            } else {
+                this.showToast(data.error || 'فشل تحديث حالة الطلب', 'error');
+                if (btn) {
+                    btn.disabled = false;
+                    btn.innerHTML = '<i class="fas fa-check-circle"></i> Mark as paid';
+                }
+            }
+        } catch (err) {
+            console.error('[MarkPaid] Error:', err);
+            this.showToast('حدث خطأ أثناء تحديث حالة الطلب', 'error');
+            if (btn) {
+                btn.disabled = false;
+                btn.innerHTML = '<i class="fas fa-check-circle"></i> Mark as paid';
+            }
+        }
+    }
+
+    // Search by Page ID (improved with debounce)
+    searchByPageId() {
+        if (this.searchTimeout) clearTimeout(this.searchTimeout);
+
+        this.searchTimeout = setTimeout(() => {
+            const input = document.getElementById('pageIdSearch')?.value?.trim();
+            if (!input) {
+                // Determine if we should clear search or not
+                return;
+            }
+
+            const select = document.getElementById('inboxPageSelect');
+            if (!select) return;
+
+            console.log('[PageSearch] Searching for:', input);
+
+            // Try exact match first
+            let matchedPage = this.fbPages.find(p => p.id === input);
+
+            // Try partial match if exact match fails
+            if (!matchedPage) {
+                matchedPage = this.fbPages.find(p => p.id.includes(input) || p.name.toLowerCase().includes(input.toLowerCase()));
+            }
+
+            if (matchedPage) {
+                select.value = matchedPage.id;
+                this.loadConversations();
+                this.updateInboxStats();
+                this.showToast(`تم اختيار الصفحة: ${matchedPage.name} (${matchedPage.id})`, 'success');
+            } else {
+                // If page not in dropdown, try to load it directly via API
+                this.loadConversationsByPageId(input);
+            }
+        }, 800); // 800ms debounce
+    }
+
+    // Load conversations directly by Page ID (even if not in dropdown)
+    async loadConversationsByPageId(pageId) {
+        const container = document.getElementById('conversationsContent');
+        if (!container) return;
+
+        container.innerHTML = '<div class="loading-spinner"><div class="spinner"></div><p>جاري البحث في فيسبوك...</p></div>';
+
+        try {
+            const data = await window.fbIntegration.getConversations(pageId, 100);
+
+            // Check for authentication error (401)
+            if (data && (data.error || data.message?.includes('401') || !data.conversations && !Array.isArray(data))) {
+                console.error('[PageSearch] Auth Error:', data);
+                container.innerHTML = '<div class="empty-state" style="padding:20px;text-align:center;"><i class="fas fa-sign-in-alt"></i><p>جلسة العمل انتهت. برجاء تسجيل الخروج والدخول مرة أخرى.</p></div>';
+                this.showToast('جلسة العمل انتهت. برجاء تسجيل الدخول مجدداً.', 'error');
+                return;
+            }
+
+            if (data.conversations && data.conversations.length > 0) {
+                this.inboxConversations = data.conversations;
+                this.inboxNextCursor = data.nextCursor;
+
+                let html = this.inboxConversations.map(c => {
+                    const needsReply = c.needsReply && !this.isConversationReadLocally(c.id, c.updatedTime);
+                    const initials = c.participant ? c.participant.charAt(0).toUpperCase() : '?';
+                    const shortId = c.participantId?.substring(0, 10) || '';
+                    return `
+                    <div class="msg-conv ${needsReply ? 'active' : ''}" onclick="app.loadMessages('${pageId}', '${c.id}', '${c.participant}', '${c.participantId}')">
+                        <div class="msg-conv-avatar">${initials}</div>
+                        <div class="msg-conv-info">
+                            <div class="msg-conv-name">${c.participant}</div>
+                            <div class="msg-conv-preview">${c.snippet || 'لا يوجد نص'}</div>
+                            <div class="msg-conv-id" onclick="event.stopPropagation(); navigator.clipboard.writeText('${c.participantId}'); app.showToast('تم نسخ الـ ID', 'success');" title="انقر للنسخ">
+                                <i class="fas fa-copy"></i> ${shortId}...
+                            </div>
+                        </div>
+                        <div class="msg-conv-meta">
+                            <div class="msg-conv-time">${new Date(c.updatedTime).toLocaleString('ar-EG', { hour: '2-digit', minute: '2-digit' })}</div>
+                            ${needsReply ? '<div class="msg-conv-badge">جديد</div>' : ''}
+                        </div>
+                    </div>
+                    `;
+                }).join('');
+
+                container.innerHTML = html;
+                this.showToast(`تم العثور على ${this.inboxConversations.length} محادثة`, 'success');
+
+                // Add the page to the dropdown if not already there
+                const select = document.getElementById('inboxPageSelect');
+                if (select && !Array.from(select.options).find(o => o.value === pageId)) {
+                    const option = document.createElement('option');
+                    option.value = pageId;
+                    option.textContent = `Page ${pageId}`;
+                    select.appendChild(option);
+                    select.value = pageId;
+                }
+            } else {
+                container.innerHTML = '<div class="empty-state" style="padding:20px;text-align:center;"><i class="fas fa-inbox"></i><p>لا توجد محادثات لهذا الـ Page ID</p></div>';
+                this.showToast('لا توجد محادثات لهذا الـ Page ID', 'info');
+            }
+        } catch (err) {
+            console.error('[PageSearch] Error:', err);
+            container.innerHTML = '<div class="empty-state" style="padding:20px;text-align:center;"><i class="fas fa-exclamation-triangle"></i><p>حدث خطأ في البحث. تأكد من صحة الـ ID.</p></div>';
+            this.showToast('حدث خطأ في البحث', 'error');
+        }
+    }
+
+    // Search by Sender ID
+    async searchBySenderId() {
+        const pageId = document.getElementById('inboxPageSelect')?.value;
+        const senderId = document.getElementById('senderIdSearch')?.value?.trim();
+
+        if (!pageId) {
+            this.showToast('اختر صفحة أولاً', 'error');
+            return;
+        }
+
+        if (!senderId) {
+            this.showToast('أدخل Sender ID للبحث', 'error');
+            return;
+        }
+
+        this.showToast('جاري البحث...', 'success');
+
+        const result = await window.fbIntegration.searchBySenderId(pageId, senderId);
+
+        if (result.found) {
+            const conv = result.conversation;
+
+            // Update chat header
+            document.getElementById('chatHeader').style.display = 'block';
+            document.getElementById('chatWith').innerHTML = `
+                            <i class="fas fa-user"></i> ${conv.participantName}
+                        <small style="display:block;color:var(--text-secondary);font-size:12px;">ID: ${conv.participantId}</small>
+                        `;
+
+            // Render messages
+            const messagesContainer = document.getElementById('chatMessages');
+            if (conv.messages && conv.messages.length > 0) {
+                messagesContainer.innerHTML = conv.messages.map(m => `
+                            <div class="chat-message ${m.isFromPage ? 'sent' : 'received'}" style="margin-bottom:12px;display:flex;justify-content:${m.isFromPage ? 'flex-end' : 'flex-start'};">
+                                <div class="${m.isFromPage ? 'page-bubble' : 'customer-bubble'}">
+                                    <div style="font-size:13px;">${m.text || ''}</div>
+                                    <small style="font-size:10px;opacity:0.7;">${new Date(m.time).toLocaleString('ar')}</small>
+                                </div>
+                    </div>
+                            `).join('');
+            } else {
+                messagesContainer.innerHTML = '<div class="empty-state"><p>لا توجد رسائل</p></div>';
+            }
+
+            // Show chat input
+            document.getElementById('chatInput').style.display = 'block';
+
+            // Scroll to bottom - multiple attempts to handle image loading
+            messagesContainer.scrollTop = messagesContainer.scrollHeight;
+            setTimeout(() => { if (messagesContainer) messagesContainer.scrollTop = messagesContainer.scrollHeight; }, 100);
+            setTimeout(() => { if (messagesContainer) messagesContainer.scrollTop = messagesContainer.scrollHeight; }, 300);
+            setTimeout(() => { if (messagesContainer) messagesContainer.scrollTop = messagesContainer.scrollHeight; }, 600);
+
+            // Store conversation data
+            this.currentConversation = {
+                pageId,
+                conversationId: conv.id,
+                participantName: conv.participantName,
+                participantId: conv.participantId
+            };
+
+            this.showToast(`تم العثور على محادثة مع ${conv.participantName} `, 'success');
+        } else {
+            this.showToast('لم يتم العثور على محادثة بهذا الـ Sender ID', 'error');
+        }
+    }
+
+    // ============= COMPETITORS =============
+
+    competitors = []; // Session-only, no persistence
+
+    async analyzeCompetitor() {
+        const input = document.getElementById('competitorUrlInput');
+        const url = input.value.trim();
+        if (!url) {
+            this.showToast('يرجى إدخال رابط الصفحة', 'error');
+            return;
+        }
+
+        // Show loading
+        document.getElementById('competitorLoading').style.display = 'block';
+        this.showToast('جاري تحليل الصفحة...', 'success');
+
+        try {
+            const response = await fetch(`${this.API_URL} /api/competitors / analyze`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ url })
+            });
+
+            const data = await response.json();
+
+            if (data.error) {
+                this.showToast(data.error, 'error');
+                document.getElementById('competitorLoading').style.display = 'none';
+                return;
+            }
+
+            // Add to session (no persistence)
+            if (!this.competitors.find(c => c.url === data.url)) {
+                this.competitors.push(data);
+            } else {
+                // Update existing
+                const idx = this.competitors.findIndex(c => c.url === data.url);
+                this.competitors[idx] = data;
+            }
+
+            input.value = '';
+            this.renderCompetitors();
+            this.updateComparisonCharts();
+            this.updateSWOT();
+            this.showToast(`تم تحليل ${data.name || 'الصفحة'} بنجاح!`, 'success');
+
+        } catch (err) {
+            console.error('Analyze competitor error:', err);
+            this.showToast('خطأ في التحليل', 'error');
+        }
+
+        document.getElementById('competitorLoading').style.display = 'none';
+    }
+
+    // Keeping old method for backward compatibility
+    async addCompetitor() {
+        // Redirect to new method
+        const oldInput = document.getElementById('competitorInput');
+        const newInput = document.getElementById('competitorUrlInput');
+        if (oldInput && newInput) {
+            newInput.value = oldInput.value.includes('facebook.com') ? oldInput.value : `https://www.facebook.com/${oldInput.value}`;
+        }
+        await this.analyzeCompetitor();
+    }
+
+    renderCompetitors() {
+        const container = document.getElementById('competitorsList');
+        if (!container) return;
+
+        if (this.competitors.length === 0) {
+            container.innerHTML = `
+                <div class="empty-state" style="grid-column:1/-1;padding:60px;text-align:center;background:var(--bg-card);border-radius:16px;border:1px solid var(--border-color);">
+                    <i class="fas fa-chart-line" style="font-size:64px;color:var(--text-secondary);opacity:0.3;"></i>
+                    <h3 style="margin-top:20px;color:var(--text-secondary);">لم تضف أي منافسين بعد</h3>
+                    <p style="color:var(--text-secondary);opacity:0.7;margin-top:8px;">أدخل رابط صفحة فيسبوك في الأعلى لبدء التحليل</p>
+                </div>`;
+            document.getElementById('comparisonSection').style.display = 'none';
+            document.getElementById('swotSection').style.display = 'none';
+            return;
+        }
+
+        container.innerHTML = this.competitors.map((c, index) => `
+            <div class="competitor-card" style="background:var(--bg-card);border-radius:16px;overflow:hidden;border:1px solid var(--border-color);position:relative;">
+                <!-- Header with gradient -->
+                <div style="background:linear-gradient(135deg, #0EA5E9 0%, #2563EB 100%);padding:20px;color:white;">
+                    <button onclick="app.removeCompetitor(${index})" style="position:absolute;top:12px;left:12px;background:rgba(255,255,255,0.2);border:none;width:28px;height:28px;border-radius:50%;color:white;cursor:pointer;font-size:12px;" title="حذف">
+                        <i class="fas fa-times"></i>
+                    </button>
+                    <div style="display:flex;align-items:center;gap:15px;">
+                        <img src="${c.picture || 'https://placehold.co/60'}" style="width:60px;height:60px;border-radius:50%;border:3px solid rgba(255,255,255,0.3);" onerror="this.src='https://placehold.co/60'">
+                        <div>
+                            <h3 style="margin:0;font-size:18px;">${c.name || 'صفحة'}</h3>
+                            <small style="opacity:0.8;">${c.category || 'صفحة فيسبوك'}</small>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- Stats Grid -->
+                <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:1px;background:var(--border-color);">
+                    <div style="background:var(--bg-card);padding:16px;text-align:center;">
+                        <div style="font-size:22px;font-weight:700;color:var(--primary);">${this.formatNumber(c.followers || 0)}</div>
+                        <small style="color:var(--text-secondary);font-size:11px;">متابع</small>
+                    </div>
+                    <div style="background:var(--bg-card);padding:16px;text-align:center;">
+                        <div style="font-size:22px;font-weight:700;color:var(--success);">${this.formatNumber(c.likes || 0)}</div>
+                        <small style="color:var(--text-secondary);font-size:11px;">معجب</small>
+                    </div>
+                    <div style="background:var(--bg-card);padding:16px;text-align:center;">
+                        <div style="font-size:22px;font-weight:700;color:var(--warning);">${c.metrics?.engagementRate || 0}%</div>
+                        <small style="color:var(--text-secondary);font-size:11px;">تفاعل</small>
+                    </div>
+                </div>
+                
+                <!-- Metrics -->
+                <div style="padding:16px;">
+                    <div style="display:flex;justify-content:space-between;margin-bottom:12px;">
+                        <span style="color:var(--text-secondary);font-size:13px;"><i class="fas fa-edit"></i> معدل النشر</span>
+                        <span style="font-weight:600;">${c.metrics?.postsPerWeek || 0} منشور/أسبوع</span>
+                    </div>
+                    <div style="display:flex;justify-content:space-between;margin-bottom:12px;">
+                        <span style="color:var(--text-secondary);font-size:13px;"><i class="fas fa-heart"></i> متوسط اللايكات</span>
+                        <span style="font-weight:600;">${this.formatNumber(c.metrics?.avgLikes || 0)}</span>
+                    </div>
+                    <div style="display:flex;justify-content:space-between;">
+                        <span style="color:var(--text-secondary);font-size:13px;"><i class="fas fa-comment"></i> متوسط التعليقات</span>
+                        <span style="font-weight:600;">${this.formatNumber(c.metrics?.avgComments || 0)}</span>
+                    </div>
+                </div>
+                
+                <!-- Recent Posts -->
+                ${c.posts && c.posts.length > 0 ? `
+                <div style="padding:16px;border-top:1px solid var(--border-color);">
+                    <h4 style="margin-bottom:12px;font-size:14px;color:var(--text-secondary);"><i class="fas fa-newspaper"></i> آخر المنشورات</h4>
+                    <div style="max-height:150px;overflow-y:auto;">
+                        ${c.posts.slice(0, 3).map(post => `
+                            <div style="background:var(--glass);padding:12px;border-radius:8px;margin-bottom:8px;font-size:13px;">
+                                <p style="margin:0 0 8px 0;color:var(--text-primary);overflow:hidden;text-overflow:ellipsis;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;">${post.text || 'منشور'}</p>
+                                <div style="display:flex;gap:12px;color:var(--text-secondary);font-size:11px;">
+                                    <span><i class="fas fa-heart"></i> ${post.likes || 0}</span>
+                                    <span><i class="fas fa-comment"></i> ${post.comments || 0}</span>
+                                    <span><i class="fas fa-share"></i> ${post.shares || 0}</span>
+                                </div>
+                            </div>
+                        `).join('')}
+                    </div>
+                </div>
+                ` : ''}
+                
+                <!-- Footer -->
+                <div style="padding:12px 16px;background:var(--glass);font-size:11px;color:var(--text-secondary);display:flex;justify-content:space-between;">
+                    <span><i class="fas fa-clock"></i> ${c.scrapedAt ? new Date(c.scrapedAt).toLocaleDateString('ar-EG') : 'غير محدد'}</span>
+                    <a href="${c.url}" target="_blank" style="color:var(--primary);text-decoration:none;"><i class="fas fa-external-link-alt"></i> فتح الصفحة</a>
+                </div>
+            </div>
+        `).join('');
+
+        // Show charts, SWOT, recommendations and benchmarks if we have competitors
+        if (this.competitors.length > 0) {
+            this.updateComparisonCharts();
+            this.updateSWOT();
+            this.updateAITopPost();
+            this.updateAIEngagement();
+            this.updateRecommendations();
+            this.updateBenchmarks();
+        }
+    }
+
+    updateComparisonCharts() {
+        if (this.competitors.length === 0) {
+            document.getElementById('comparisonSection').style.display = 'none';
+            return;
+        }
+
+        document.getElementById('comparisonSection').style.display = 'block';
+
+        // Simple bar chart for followers
+        const maxFollowers = Math.max(...this.competitors.map(c => c.followers || 0));
+        const followersHtml = this.competitors.map(c => {
+            const pct = maxFollowers > 0 ? ((c.followers || 0) / maxFollowers) * 100 : 0;
+            return `
+                <div style="margin-bottom:12px;">
+                    <div style="display:flex;justify-content:space-between;margin-bottom:4px;">
+                        <span style="font-size:13px;">${c.name || 'منافس'}</span>
+                        <span style="font-weight:600;">${this.formatNumber(c.followers || 0)}</span>
+                    </div>
+                    <div style="background:var(--border-color);border-radius:4px;height:8px;overflow:hidden;">
+                        <div style="background:linear-gradient(90deg, #0EA5E9, #2563EB);width:${pct}%;height:100%;border-radius:4px;transition:width 0.5s;"></div>
+                    </div>
+                </div>
+            `;
+        }).join('');
+        document.getElementById('followersChart').innerHTML = followersHtml;
+
+        // Simple bar chart for engagement
+        const maxEngagement = Math.max(...this.competitors.map(c => c.metrics?.engagementRate || 0));
+        const engagementHtml = this.competitors.map(c => {
+            const pct = maxEngagement > 0 ? ((c.metrics?.engagementRate || 0) / maxEngagement) * 100 : 0;
+            return `
+                <div style="margin-bottom:12px;">
+                    <div style="display:flex;justify-content:space-between;margin-bottom:4px;">
+                        <span style="font-size:13px;">${c.name || 'منافس'}</span>
+                        <span style="font-weight:600;">${c.metrics?.engagementRate || 0}%</span>
+                    </div>
+                    <div style="background:var(--border-color);border-radius:4px;height:8px;overflow:hidden;">
+                        <div style="background:linear-gradient(90deg, #4caf50, #8bc34a);width:${pct}%;height:100%;border-radius:4px;transition:width 0.5s;"></div>
+                    </div>
+                </div>
+            `;
+        }).join('');
+        document.getElementById('engagementChart').innerHTML = engagementHtml;
+    }
+
+    updateSWOT() {
+        if (this.competitors.length === 0) {
+            document.getElementById('swotSection').style.display = 'none';
+            return;
+        }
+
+        document.getElementById('swotSection').style.display = 'block';
+
+        // Collect SWOT from all competitors' analysis data
+        const strengths = [];
+        const weaknesses = [];
+        const opportunities = [];
+        const threats = [];
+
+        this.competitors.forEach(comp => {
+            const analysis = comp.analysis;
+            const name = comp.name || 'منافس';
+            const engagement = comp.metrics?.engagementRate || 0;
+            const postsPerWeek = comp.metrics?.postsPerWeek || 0;
+            const followers = comp.followers || 0;
+
+            if (analysis && analysis.strengths && analysis.strengths.length > 0) {
+                // Use smart SWOT from server analysis
+                analysis.strengths.forEach(s => strengths.push(`${s.icon} ${s.text}`));
+                if (analysis.weaknesses) {
+                    analysis.weaknesses.forEach(w => weaknesses.push(`${w.icon} ${w.text}`));
+                }
+                if (analysis.opportunities) {
+                    analysis.opportunities.forEach(o => opportunities.push(`${o.icon} ${o.text}`));
+                }
+            } else {
+                // Fallback: generate SWOT from metrics directly
+                // Strengths
+                if (followers > 1000) strengths.push(`👥 ${name}: ${this.formatNumber(followers)} متابع`);
+                if (engagement > 0) strengths.push(`📊 ${name}: معدل تفاعل ${engagement}%`);
+                if (postsPerWeek > 0) strengths.push(`📝 ${name}: ${postsPerWeek} منشور/أسبوع`);
+
+                // Weaknesses based on benchmarks
+                if (engagement < 1) weaknesses.push(`📉 تفاعل أقل من المتوسط (${engagement}%)`);
+                if (postsPerWeek < 3) weaknesses.push(`🐌 نشر قليل - أقل من 3 منشورات/أسبوع`);
+                if (followers < 5000) weaknesses.push(`👤 قاعدة متابعين صغيرة`);
+
+                // Opportunities for YOU
+                opportunities.push(`🎯 تفوق بمحتوى أفضل وتفاعل أعلى`);
+                if (engagement < 2) opportunities.push(`🚀 فرصة للتميز بتفاعل أقوى`);
+                if (postsPerWeek < 5) opportunities.push(`📅 انشر أكثر للوصول لجمهور أكبر`);
+            }
+        });
+
+        // Ensure at least one item in each category
+        if (strengths.length === 0) strengths.push('📊 تم تحليل البيانات المتاحة');
+        if (weaknesses.length === 0) weaknesses.push('🔍 لم يتم اكتشاف نقاط ضعف واضحة');
+        if (opportunities.length === 0) opportunities.push('💡 ركز على التميز في المحتوى');
+        if (threats.length === 0) threats.push('⚡ راقب نشاط المنافس باستمرار');
+
+        // Render SWOT sections
+        document.getElementById('swotStrengths').innerHTML = strengths.length > 0
+            ? strengths.map(s => `<li>${s}</li>`).join('')
+            : '<li>📊 جاري التحليل...</li>';
+        document.getElementById('swotWeaknesses').innerHTML = weaknesses.length > 0
+            ? weaknesses.map(w => `<li>${w}</li>`).join('')
+            : '<li>🔍 لم يتم اكتشاف نقاط ضعف</li>';
+        document.getElementById('swotOpportunities').innerHTML = opportunities.length > 0
+            ? opportunities.map(o => `<li>${o}</li>`).join('')
+            : '<li>💡 ركز على التميز</li>';
+        document.getElementById('swotThreats').innerHTML = threats.length > 0
+            ? threats.map(t => `<li>${t}</li>`).join('')
+            : '<li>⚡ ابق متيقظاً للمنافسة</li>';
+    }
+
+    // AI Top Post Analysis
+    updateAITopPost() {
+        const section = document.getElementById('topPostSection');
+        const badge = document.getElementById('aiBadge');
+        if (!section) return;
+
+        // Check if any competitor has AI top post analysis
+        const compWithAI = this.competitors.find(c => c.analysis?.topPostsAI);
+
+        if (!compWithAI || !compWithAI.analysis.topPostsAI) {
+            section.style.display = 'none';
+            if (badge) badge.style.display = 'none';
+            return;
+        }
+
+        section.style.display = 'block';
+        if (badge) badge.style.display = 'block';
+
+        const topPostsAI = compWithAI.analysis.topPostsAI;
+
+        // Show top post content
+        if (topPostsAI.topPost) {
+            document.getElementById('topPostText').innerHTML = `"${topPostsAI.topPost.text || 'بدون نص'}"`;
+            document.getElementById('topPostStats').innerHTML = `
+                <span>❤️ ${topPostsAI.topPost.likes || 0} لايك</span>
+                <span>💬 ${topPostsAI.topPost.comments || 0} تعليق</span>
+                <span>🔄 ${topPostsAI.topPost.shares || 0} مشاركة</span>
+            `;
+        }
+
+        // Show AI analysis
+        if (topPostsAI.analysis) {
+            document.getElementById('topPostAIText').textContent = topPostsAI.analysis;
+        }
+    }
+
+    // AI Engagement Analysis
+    updateAIEngagement() {
+        const section = document.getElementById('engagementSection');
+        if (!section) return;
+
+        // Check if any competitor has AI engagement analysis
+        const compWithAI = this.competitors.find(c => c.analysis?.engagementAI);
+
+        if (!compWithAI || !compWithAI.analysis.engagementAI) {
+            section.style.display = 'none';
+            return;
+        }
+
+        section.style.display = 'block';
+
+        const engagementAI = compWithAI.analysis.engagementAI;
+
+        // Show engagement rate
+        document.getElementById('engagementRate').textContent = `${engagementAI.rate || 0}%`;
+        document.getElementById('engagementLabel').innerHTML = `<span style="color:${engagementAI.ratingColor || '#888'}">${engagementAI.rating || 'غير محدد'}</span>`;
+
+        // Show AI analysis
+        if (engagementAI.analysis) {
+            document.getElementById('engagementAIText').textContent = engagementAI.analysis;
+        }
+    }
+
+    updateRecommendations() {
+        const container = document.getElementById('recommendationsList');
+        const section = document.getElementById('recommendationsSection');
+        if (!container || !section) return;
+
+        if (this.competitors.length === 0) {
+            section.style.display = 'none';
+            return;
+        }
+
+        section.style.display = 'block';
+
+        // Collect recommendations from all competitors
+        const allRecommendations = [];
+        this.competitors.forEach(comp => {
+            if (comp.analysis?.recommendations) {
+                allRecommendations.push(...comp.analysis.recommendations);
+            }
+        });
+
+        if (allRecommendations.length === 0) {
+            container.innerHTML = '<p style="color:var(--text-secondary);text-align:center;">جاري تحليل التوصيات...</p>';
+            return;
+        }
+
+        // Remove duplicates and limit to top 4
+        const uniqueRecs = allRecommendations.slice(0, 4);
+
+        container.innerHTML = uniqueRecs.map(rec => {
+            const priorityColors = { high: '#ef4444', medium: '#f59e0b', low: '#22c55e' };
+            const priorityLabels = { high: 'مهم', medium: 'متوسط', low: 'اختياري' };
+            return `
+                <div style="background:linear-gradient(135deg, rgba(102,126,234,0.1), rgba(118,75,162,0.05));padding:20px;border-radius:12px;border:1px solid rgba(102,126,234,0.3);">
+                    <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px;">
+                        <span style="font-size:24px;">${rec.icon}</span>
+                        <div style="flex:1;">
+                            <h4 style="margin:0;color:var(--text-primary);">${rec.title}</h4>
+                            <span style="font-size:11px;padding:2px 8px;border-radius:4px;background:${priorityColors[rec.priority]};color:white;">${priorityLabels[rec.priority]}</span>
+                        </div>
+                    </div>
+                    <p style="margin:0 0 12px 0;color:var(--text-secondary);font-size:13px;">${rec.description}</p>
+                    <ul style="margin:0;padding-right:20px;font-size:13px;color:var(--text-primary);">
+                        ${rec.actions.map(a => `<li style="margin-bottom:4px;">${a}</li>`).join('')}
+                    </ul>
+                </div>
+            `;
+        }).join('');
+    }
+
+    updateBenchmarks() {
+        const container = document.getElementById('benchmarksList');
+        const section = document.getElementById('benchmarksSection');
+        if (!container || !section) return;
+
+        if (this.competitors.length === 0) {
+            section.style.display = 'none';
+            return;
+        }
+
+        section.style.display = 'block';
+
+        // Get benchmarks from first competitor (they're similar)
+        const firstAnalysis = this.competitors[0]?.analysis;
+        if (!firstAnalysis?.benchmarks) {
+            container.innerHTML = '<p style="color:var(--text-secondary);text-align:center;">جاري تحميل المعايير...</p>';
+            return;
+        }
+
+        const benchmarks = firstAnalysis.benchmarks;
+        const items = [
+            {
+                label: 'معدل التفاعل',
+                value: benchmarks.engagementRate?.value || 0,
+                unit: '%',
+                rating: benchmarks.engagementRate?.rating,
+                avg: 2.5
+            },
+            {
+                label: 'النشر الأسبوعي',
+                value: benchmarks.postsPerWeek?.value || 0,
+                unit: ' منشور',
+                rating: benchmarks.postsPerWeek?.rating,
+                avg: 4
+            }
+        ];
+
+        container.innerHTML = items.map(item => {
+            const ratingColor = item.rating?.color || '#888';
+            const ratingLabel = item.rating?.label || 'غير محدد';
+            const percentage = Math.min((item.value / (item.avg * 2)) * 100, 100);
+
+            return `
+                <div style="background:var(--glass);padding:20px;border-radius:12px;">
+                    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+                        <span style="font-weight:600;">${item.label}</span>
+                        <span style="color:${ratingColor};font-weight:700;">${item.value}${item.unit}</span>
+                    </div>
+                    <div style="background:var(--border-color);height:8px;border-radius:4px;overflow:hidden;margin-bottom:8px;">
+                        <div style="background:${ratingColor};height:100%;width:${percentage}%;transition:width 0.5s;"></div>
+                    </div>
+                    <div style="display:flex;justify-content:space-between;font-size:12px;color:var(--text-secondary);">
+                        <span>${ratingLabel}</span>
+                        <span>متوسط السوق: ${item.avg}${item.unit}</span>
+                    </div>
+                </div>
+            `;
+        }).join('');
+    }
+
+    removeCompetitor(index) {
+        this.competitors.splice(index, 1);
+        // Session only - no localStorage update needed
+        this.renderCompetitors();
+        this.updateComparisonCharts();
+        this.updateSWOT();
+        this.updateRecommendations();
+        this.updateBenchmarks();
+        this.showToast('تم حذف المنافس', 'success');
+    }
+
+    // ============= BROADCAST FUNCTIONS =============
+
+    // Spintax Parser - converts {a|b|c} to random choice
+    parseSpintax(text) {
+        // Keep processing until no more spintax patterns
+        let result = text;
+        let maxIterations = 100; // Prevent infinite loops
+        let iteration = 0;
+
+        while (result.includes('{') && result.includes('}') && iteration < maxIterations) {
+            result = result.replace(/\{([^{}]+)\}/g, (match, options) => {
+                const choices = options.split('|');
+                return choices[Math.floor(Math.random() * choices.length)];
+            });
+            iteration++;
+        }
+
+        return result;
+    }
+
+    // Preview spintax in real-time
+    previewSpintax() {
+        const textarea = document.getElementById('broadcastMessage');
+        const preview = document.getElementById('spintaxPreview');
+        if (!textarea || !preview) return;
+
+        const message = textarea.value;
+        if (!message.trim()) {
+            preview.textContent = 'اكتب رسالتك لترى المعاينة...';
+            return;
+        }
+
+        // Parse and display
+        const parsed = this.parseSpintax(message);
+        preview.textContent = parsed;
+    }
+
+    // Insert spintax at cursor position
+    insertSpintax(spintax) {
+        const textarea = document.getElementById('broadcastMessage');
+        if (!textarea) return;
+
+        const start = textarea.selectionStart;
+        const end = textarea.selectionEnd;
+        const text = textarea.value;
+
+        textarea.value = text.substring(0, start) + spintax + text.substring(end);
+        textarea.focus();
+        textarea.selectionStart = textarea.selectionEnd = start + spintax.length;
+
+        // Update preview
+        this.previewSpintax();
+    }
+
+    // AI-powered Spintax Generator
+    async generateAISpintax() {
+        const textarea = document.getElementById('broadcastMessage');
+        if (!textarea) return;
+
+        const originalMessage = textarea.value.trim();
+        if (!originalMessage) {
+            this.showToast('اكتب رسالة أولاً ثم اضغط توليد AI', 'error');
+            return;
+        }
+
+        // Show loading state
+        const btn = document.querySelector('button[onclick="app.generateAISpintax()"]');
+        if (!btn) return;
+
+        const originalBtnText = btn.innerHTML;
+        btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> جاري التوليد...';
+        btn.disabled = true;
+
+        try {
+            const response = await fetch('/api/spintax/generate', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ message: originalMessage })
+            });
+
+            const data = await response.json();
+
+            if (data.spintax) {
+                textarea.value = data.spintax;
+                this.previewSpintax();
+                // No toast notification - silent success
+            } else {
+                this.showToast(data.error || 'فشل التوليد', 'error');
+            }
+        } catch (err) {
+            console.error('AI Spintax error:', err);
+            this.showToast('خطأ في الاتصال', 'error');
+        } finally {
+            // Always re-enable button
+            if (btn) {
+                btn.innerHTML = originalBtnText;
+                btn.disabled = false;
+            }
+        }
+    }
+
+    populateBroadcastPageSelect() {
+        const select = document.getElementById('broadcastPageSelect');
+        if (!select) return;
+
+        select.innerHTML = '<option value="">-- اختر صفحة --</option>' +
+            this.fbPages.map(p => `<option value="${p.id}">${p.name}</option>`).join('');
+    }
+
+    // Pagination state
+    broadcastNextCursor = null;
+
+    async loadBroadcastRecipients(loadMore = false) {
+        const pageId = document.getElementById('broadcastPageSelect')?.value;
+        if (!pageId) {
+            document.getElementById('broadcastStats').style.display = 'none';
+            return;
+        }
+
+        if (!loadMore) {
+            this.broadcastRecipients = [];
+            this.broadcastNextCursor = null;
+            this.showToast('⏳ جاري تحميل جميع العملاء... قد يستغرق بعض الوقت', 'success');
+        }
+
+        // Fetch ALL customers automatically (fetchAll=true)
+        const data = await window.fbIntegration.getBroadcastRecipients(pageId, 100, null, true);
+
+        // Set all recipients
+        this.broadcastRecipients = data.recipients || [];
+        this.broadcastRecipientsOriginal = [...this.broadcastRecipients];
+        this.broadcastRecipientsFiltered = [...this.broadcastRecipients];
+
+        // Count eligible from loaded recipients
+        const eligibleLoaded = this.broadcastRecipients.filter(r => r.isEligible).length;
+        const totalLoaded = this.broadcastRecipients.length;
+
+        // Update display with actual counts
+        document.getElementById('totalRecipients').innerHTML = `${totalLoaded} <small style="color:var(--text-secondary);">عميل</small>`;
+        document.getElementById('eligibleRecipients').innerHTML = `${eligibleLoaded} <small style="color:var(--success);">✓ مؤهل للإرسال</small>`;
+        document.getElementById('broadcastStats').style.display = 'block';
+
+        // Update totalAvailable for limit input
+        const totalAvailableSpan = document.getElementById('totalAvailable');
+        if (totalAvailableSpan) totalAvailableSpan.textContent = totalLoaded;
+
+        // Reset limit input
+        const limitInput = document.getElementById('recipientLimit');
+        if (limitInput) {
+            limitInput.value = '';
+            limitInput.max = totalLoaded;
+        }
+
+        // Hide Load More button since we fetched everything
+        let loadMoreBtn = document.getElementById('loadMoreRecipientsBtn');
+        if (loadMoreBtn) {
+            loadMoreBtn.style.display = 'none';
+        }
+
+        // Update recipient count max
+        const countInput = document.getElementById('recipientCount');
+        if (countInput) countInput.max = totalLoaded;
+
+        this.showToast(`✅ تم تحميل ${totalLoaded} عميل (${eligibleLoaded} مؤهل)`, 'success');
+    }
+
+    // ============= MESSAGE TEMPLATES =============
+
+    // Get saved templates from localStorage
+    getMessageTemplates() {
+        try {
+            return JSON.parse(localStorage.getItem('broadcast_templates') || '[]');
+        } catch {
+            return [];
+        }
+    }
+
+    // Save a new template
+    saveMessageTemplate() {
+        const nameInput = document.getElementById('templateName');
+        const messageInput = document.getElementById('broadcastMessage');
+
+        const name = nameInput?.value?.trim();
+        const message = messageInput?.value?.trim();
+
+        if (!name) {
+            this.showToast('أدخل اسم للقالب', 'error');
+            return;
+        }
+        if (!message) {
+            this.showToast('اكتب رسالة أولاً', 'error');
+            return;
+        }
+
+        const templates = this.getMessageTemplates();
+
+        // Check if name exists
+        const existingIndex = templates.findIndex(t => t.name === name);
+        if (existingIndex >= 0) {
+            if (!confirm('قالب بهذا الاسم موجود. هل تريد استبداله؟')) return;
+            templates[existingIndex] = { name, message, createdAt: new Date().toISOString() };
+        } else {
+            templates.push({ name, message, createdAt: new Date().toISOString() });
+        }
+
+        localStorage.setItem('broadcast_templates', JSON.stringify(templates));
+        nameInput.value = '';
+        this.renderTemplatesList();
+        this.showToast('✅ تم حفظ القالب', 'success');
+    }
+
+    // Load template into message box
+    loadMessageTemplate(index) {
+        const templates = this.getMessageTemplates();
+        if (templates[index]) {
+            document.getElementById('broadcastMessage').value = templates[index].message;
+            this.previewSpintax();
+            this.showToast(`تم تحميل قالب: ${templates[index].name}`, 'success');
+        }
+    }
+
+    // Delete a template
+    deleteMessageTemplate(index) {
+        if (!confirm('هل تريد حذف هذا القالب؟')) return;
+
+        const templates = this.getMessageTemplates();
+        templates.splice(index, 1);
+        localStorage.setItem('broadcast_templates', JSON.stringify(templates));
+        this.renderTemplatesList();
+        this.showToast('تم حذف القالب', 'success');
+    }
+
+    // Render templates dropdown/list
+    renderTemplatesList() {
+        const container = document.getElementById('templatesContainer');
+        if (!container) return;
+
+        const templates = this.getMessageTemplates();
+
+        if (templates.length === 0) {
+            container.innerHTML = `
+                <div style="text-align:center;padding:16px;color:var(--text-secondary);">
+                    <i class="fas fa-file-alt" style="font-size:24px;margin-bottom:8px;"></i>
+                    <p style="margin:0;">لا توجد قوالب محفوظة</p>
+                </div>`;
+            return;
+        }
+
+        container.innerHTML = templates.map((t, i) => `
+            <div style="display:flex;align-items:center;gap:8px;padding:8px 12px;background:var(--glass);border-radius:8px;margin-bottom:8px;">
+                <i class="fas fa-file-alt" style="color:var(--primary);"></i>
+                <span style="flex:1;font-weight:500;">${t.name}</span>
+                <button onclick="app.loadMessageTemplate(${i})" title="تحميل" 
+                    style="padding:6px 10px;background:var(--primary);border:none;border-radius:6px;color:white;cursor:pointer;">
+                    <i class="fas fa-download"></i>
+                </button>
+                <button onclick="app.deleteMessageTemplate(${i})" title="حذف"
+                    style="padding:6px 10px;background:var(--danger);border:none;border-radius:6px;color:white;cursor:pointer;">
+                    <i class="fas fa-trash"></i>
+                </button>
+            </div>
+        `).join('');
+    }
+
+    // ============= CUSTOMER FILTERING =============
+
+    // Filter recipients based on criteria
+    filterBroadcastRecipients(filterType) {
+        if (!this.broadcastRecipients || this.broadcastRecipients.length === 0) {
+            this.showToast('قم بتحميل العملاء أولاً', 'error');
+            return;
+        }
+
+        const allRecipients = this.broadcastRecipientsOriginal || this.broadcastRecipients;
+
+        // Save original if not saved
+        if (!this.broadcastRecipientsOriginal) {
+            this.broadcastRecipientsOriginal = [...this.broadcastRecipients];
+        }
+
+        let filtered = [];
+
+        switch (filterType) {
+            case 'all':
+                filtered = [...allRecipients];
+                break;
+            case 'eligible':
+                filtered = allRecipients.filter(r => r.isEligible);
+                break;
+            case 'last24h':
+                filtered = allRecipients.filter(r => r.daysAgo <= 1);
+                break;
+            case 'last7d':
+                filtered = allRecipients.filter(r => r.daysAgo <= 7);
+                break;
+            case 'last30d':
+                filtered = allRecipients.filter(r => r.daysAgo <= 30);
+                break;
+            case 'old':
+                filtered = allRecipients.filter(r => r.daysAgo > 7);
+                break;
+            default:
+                filtered = [...allRecipients];
+        }
+
+        // Store filtered (before limit) for limit functionality
+        this.broadcastRecipientsFiltered = filtered;
+        this.broadcastRecipients = filtered;
+
+        const eligibleCount = filtered.filter(r => r.isEligible).length;
+        document.getElementById('totalRecipients').innerHTML = `${filtered.length} <small style="color:var(--text-secondary);">عميل</small>`;
+        document.getElementById('eligibleRecipients').innerHTML = `${eligibleCount} <small style="color:var(--success);">✓ مؤهل</small>`;
+
+        // Update totalAvailable for limit input
+        const totalAvailableSpan = document.getElementById('totalAvailable');
+        if (totalAvailableSpan) totalAvailableSpan.textContent = filtered.length;
+
+        // Reset limit input
+        const limitInput = document.getElementById('recipientLimit');
+        if (limitInput) {
+            limitInput.value = '';
+            limitInput.max = filtered.length;
+        }
+
+        const countInput = document.getElementById('recipientCount');
+        if (countInput) countInput.max = filtered.length;
+
+        this.showToast(`تم فلترة ${filtered.length} عميل`, 'success');
+    }
+
+    // Apply recipient limit
+    applyRecipientLimit() {
+        const limitInput = document.getElementById('recipientLimit');
+        const limit = parseInt(limitInput?.value) || 0;
+
+        // Use filtered list as base (before any limit was applied)
+        const baseList = this.broadcastRecipientsFiltered || this.broadcastRecipientsOriginal || this.broadcastRecipients;
+
+        if (limit > 0 && limit < baseList.length) {
+            // Apply limit
+            this.broadcastRecipients = baseList.slice(0, limit);
+            document.getElementById('totalRecipients').innerHTML = `${limit} <small style="color:var(--text-secondary);">من ${baseList.length}</small>`;
+        } else {
+            // No limit - use all filtered
+            this.broadcastRecipients = [...baseList];
+            document.getElementById('totalRecipients').innerHTML = `${baseList.length} <small style="color:var(--text-secondary);">عميل</small>`;
+        }
+
+        const eligibleCount = this.broadcastRecipients.filter(r => r.isEligible).length;
+        document.getElementById('eligibleRecipients').innerHTML = `${eligibleCount} <small style="color:var(--success);">✓ مؤهل</small>`;
+    }
+
+    // Reset filter to show all
+    resetBroadcastFilter() {
+        if (this.broadcastRecipientsOriginal) {
+            this.broadcastRecipients = [...this.broadcastRecipientsOriginal];
+            const eligibleCount = this.broadcastRecipients.filter(r => r.isEligible).length;
+            document.getElementById('totalRecipients').innerHTML = `${this.broadcastRecipients.length} <small style="color:var(--text-secondary);">عميل</small>`;
+            document.getElementById('eligibleRecipients').innerHTML = `${eligibleCount} <small style="color:var(--success);">✓ مؤهل</small>`;
+            this.showToast('تم إعادة ضبط الفلتر', 'success');
+        }
+    }
+
+    // ============= RETRY FAILED RECIPIENTS =============
+
+    // Store failed list for retry
+    lastFailedList = [];
+
+    // Retry sending to failed recipients
+    async retryFailedRecipients() {
+        if (!this.lastFailedList || this.lastFailedList.length === 0) {
+            this.showToast('لا يوجد فاشلين لإعادة المحاولة', 'error');
+            return;
+        }
+
+        const messageTemplate = document.getElementById('broadcastMessage')?.value;
+        const pageId = document.getElementById('broadcastPageSelect')?.value;
+        const messageTag = document.getElementById('messageTagSelect')?.value || 'HUMAN_AGENT';
+        const delay = parseInt(document.getElementById('broadcastDelay')?.value || 3000);
+
+        if (!messageTemplate) {
+            this.showToast('اكتب رسالة أولاً', 'error');
+            return;
+        }
+
+        const failedToRetry = [...this.lastFailedList];
+        const total = failedToRetry.length;
+        let sent = 0;
+        let failed = 0;
+        const newFailedList = [];
+
+        const resultsDiv = document.getElementById('broadcastResults');
+        resultsDiv.style.display = 'block';
+
+        this.showToast(`🔄 جاري إعادة المحاولة لـ ${total} عميل...`, 'success');
+
+        for (const recipient of failedToRetry) {
+            const uniqueMessage = this.parseSpintax(messageTemplate);
+
+            const result = await window.fbIntegration.sendBroadcastOne(
+                pageId,
+                recipient.id,
+                recipient.name,
+                uniqueMessage,
+                null,
+                messageTag
+            );
+
+            if (result.success) {
+                sent++;
+            } else {
+                failed++;
+                newFailedList.push({ ...recipient, error: result.error });
+            }
+
+            // Update progress
+            const percent = Math.round(((sent + failed) / total) * 100);
+            resultsDiv.innerHTML = `
+                <div style="background:var(--bg-card);border:1px solid var(--border-color);border-radius:12px;padding:24px;">
+                    <h4 style="margin:0 0 16px;text-align:center;">🔄 إعادة المحاولة</h4>
+                    <div style="background:var(--glass);border-radius:8px;height:20px;overflow:hidden;margin-bottom:16px;">
+                        <div style="background:linear-gradient(90deg,var(--warning),var(--success));height:100%;width:${percent}%;transition:width 0.3s;"></div>
+                    </div>
+                    <div style="display:flex;justify-content:center;gap:32px;text-align:center;">
+                        <div><span style="font-size:24px;font-weight:700;color:var(--success);">${sent}</span><br><small>نجح</small></div>
+                        <div><span style="font-size:24px;font-weight:700;color:var(--danger);">${failed}</span><br><small>فشل</small></div>
+                    </div>
+                </div>`;
+
+            if (sent + failed < total) {
+                await new Promise(resolve => setTimeout(resolve, delay));
+            }
+        }
+
+        // Update failed list
+        this.lastFailedList = newFailedList;
+
+        // Final result
+        resultsDiv.innerHTML = `
+            <div style="background:var(--bg-card);border:1px solid var(--border-color);border-radius:12px;padding:24px;text-align:center;">
+                <i class="fas fa-redo" style="font-size:48px;color:var(--warning);margin-bottom:12px;"></i>
+                <h3 style="margin:0 0 16px;">اكتملت إعادة المحاولة!</h3>
+                <div style="display:flex;justify-content:center;gap:32px;margin-bottom:16px;">
+                    <div>
+                        <span style="font-size:32px;font-weight:700;color:var(--success);">${sent}</span>
+                        <br><small>نجح</small>
+                    </div>
+                    <div>
+                        <span style="font-size:32px;font-weight:700;color:var(--danger);">${failed}</span>
+                        <br><small>فشل</small>
+                    </div>
+                </div>
+                ${newFailedList.length > 0 ? `
+                    <button onclick="app.retryFailedRecipients()" class="btn btn-warning" style="margin-top:12px;">
+                        <i class="fas fa-redo"></i> إعادة المحاولة مرة أخرى (${newFailedList.length})
+                    </button>
+                ` : '<p style="color:var(--success);">✅ تم إرسال كل الرسائل بنجاح!</p>'}
+            </div>`;
+
+        this.showToast(`✅ إعادة المحاولة: ${sent} نجح، ${failed} فشل`, 'success');
+    }
+
+    handleBroadcastMedia(event) {
+        const files = Array.from(event.target.files);
+        if (!files.length) return;
+
+        // Initialize array if needed
+        if (!this.broadcastMediaFiles) this.broadcastMediaFiles = [];
+
+        // Add new files (max 5)
+        for (const file of files) {
+            if (this.broadcastMediaFiles.length >= 5) {
+                this.showToast('الحد الأقصى 5 ملفات', 'error');
+                break;
+            }
+            this.broadcastMediaFiles.push({
+                file: file,
+                type: file.type.startsWith('video') ? 'video' : 'image',
+                url: URL.createObjectURL(file)
+            });
+        }
+
+        this.renderBroadcastMediaPreviews();
+    }
+
+    renderBroadcastMediaPreviews() {
+        const preview = document.getElementById('broadcastMediaPreview');
+        const count = document.getElementById('broadcastMediaCount');
+
+        if (!this.broadcastMediaFiles || this.broadcastMediaFiles.length === 0) {
+            preview.innerHTML = '';
+            count.innerHTML = '';
+            return;
+        }
+
+        let html = '';
+        this.broadcastMediaFiles.forEach((media, index) => {
+            if (media.type === 'video') {
+                html += `<div style="position:relative;display:inline-block;">
+                    <video src="${media.url}" style="width:80px;height:80px;object-fit:cover;border-radius:8px;"></video>
+                    <button onclick="app.removeMediaFile(${index})" style="position:absolute;top:-5px;right:-5px;width:20px;height:20px;border-radius:50%;background:var(--danger);border:none;color:white;cursor:pointer;font-size:10px;"><i class="fas fa-times"></i></button>
+                </div>`;
+            } else {
+                html += `<div style="position:relative;display:inline-block;">
+                    <img src="${media.url}" style="width:80px;height:80px;object-fit:cover;border-radius:8px;">
+                    <button onclick="app.removeMediaFile(${index})" style="position:absolute;top:-5px;right:-5px;width:20px;height:20px;border-radius:50%;background:var(--danger);border:none;color:white;cursor:pointer;font-size:10px;"><i class="fas fa-times"></i></button>
+                </div>`;
+            }
+        });
+
+        preview.innerHTML = html;
+        count.innerHTML = `📎 ${this.broadcastMediaFiles.length}/5 ملفات`;
+    }
+
+    removeMediaFile(index) {
+        if (!this.broadcastMediaFiles) return;
+        // Only revoke blob URLs, not remote URLs
+        if (!this.broadcastMediaFiles[index].isRemote) {
+            URL.revokeObjectURL(this.broadcastMediaFiles[index].url);
+        }
+        this.broadcastMediaFiles.splice(index, 1);
+        this.renderBroadcastMediaPreviews();
+    }
+
+    removeBroadcastMedia() {
+        if (this.broadcastMediaFiles) {
+            this.broadcastMediaFiles.forEach(m => URL.revokeObjectURL(m.url));
+        }
+        this.broadcastMediaFiles = [];
+        document.getElementById('broadcastMedia').value = '';
+        this.renderBroadcastMediaPreviews();
+    }
+
+    // Campaign control state
+    broadcastPaused = false;
+    broadcastCancelled = false;
+
+    pauseBroadcast() {
+        this.broadcastPaused = !this.broadcastPaused;
+        const btn = document.getElementById('pauseBtn');
+        if (btn) {
+            btn.innerHTML = this.broadcastPaused
+                ? '<i class="fas fa-play"></i> استئناف'
+                : '<i class="fas fa-pause"></i> إيقاف مؤقت';
+            btn.style.background = this.broadcastPaused ? 'var(--success)' : 'var(--warning)';
+        }
+        this.showToast(this.broadcastPaused ? 'تم الإيقاف المؤقت ⏸️' : 'تم الاستئناف ▶️', 'success');
+    }
+
+    cancelBroadcast() {
+        if (confirm('هل أنت متأكد من إلغاء الحملة؟')) {
+            this.broadcastCancelled = true;
+            this.showToast('تم إلغاء الحملة ❌', 'error');
+        }
+    }
+
+    updateRecipientSelection() {
+        // Just for UI feedback if needed
+    }
+
+
+    async sendBroadcast() {
+        const pageId = document.getElementById('broadcastPageSelect')?.value;
+        const messageTemplate = document.getElementById('broadcastMessage')?.value;
+        const messageTag = 'CONFIRMED_EVENT_UPDATE'; // Always use this tag
+        const delay = parseInt(document.getElementById('broadcastDelay')?.value || 3000);
+
+        if (!pageId) {
+            this.showToast('الرجاء اختيار صفحة', 'error');
+            return;
+        }
+
+        if (!messageTemplate) {
+            this.showToast('الرجاء كتابة رسالة', 'error');
+            return;
+        }
+
+        // Always send to all filtered recipients
+        const recipients = this.broadcastRecipients || [];
+
+        if (recipients.length === 0) {
+            this.showToast('لا يوجد مستلمين', 'error');
+            return;
+        }
+
+        const total = recipients.length;
+        let sent = 0;
+        let failed = 0;
+        const failedList = [];
+
+        // Show progress UI
+        const resultsDiv = document.getElementById('broadcastResults');
+        resultsDiv.style.display = 'block';
+
+        const updateProgress = (currentMessage = '') => {
+            const remaining = total - sent - failed;
+            const percent = Math.round(((sent + failed) / total) * 100);
+            const pauseText = this.broadcastPaused ? '<i class="fas fa-play"></i> استئناف' : '<i class="fas fa-pause"></i> إيقاف مؤقت';
+            const pauseBg = this.broadcastPaused ? 'var(--success)' : 'var(--warning)';
+
+            resultsDiv.innerHTML = `
+                <div style="background:var(--bg-card);border:1px solid var(--border-color);border-radius:12px;padding:24px;">
+                    <div style="display:flex;align-items:center;justify-content:center;gap:12px;margin-bottom:16px;">
+                        <i class="fas ${this.broadcastPaused ? 'fa-pause-circle' : 'fa-spinner fa-spin'}" style="font-size:24px;color:var(--primary);"></i>
+                        <span style="font-size:18px;font-weight:600;">${this.broadcastPaused ? '⏸️ الحملة متوقفة مؤقتاً' : 'جاري الإرسال...'}</span>
+                    </div>
+                    <div style="background:var(--glass);border-radius:8px;height:20px;overflow:hidden;margin-bottom:16px;">
+                        <div style="background:linear-gradient(90deg,var(--primary),var(--success));height:100%;width:${percent}%;transition:width 0.3s;"></div>
+                    </div>
+                    <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:16px;text-align:center;">
+                        <div>
+                            <div style="font-size:24px;font-weight:700;color:var(--text-primary);">${sent + failed}/${total}</div>
+                            <small style="color:var(--text-secondary);">الإجمالي</small>
+                        </div>
+                        <div>
+                            <div style="font-size:24px;font-weight:700;color:var(--success);">${sent}</div>
+                            <small style="color:var(--text-secondary);">تم الإرسال</small>
+                        </div>
+                        <div>
+                            <div style="font-size:24px;font-weight:700;color:var(--danger);">${failed}</div>
+                            <small style="color:var(--text-secondary);">فشل</small>
+                        </div>
+                        <div>
+                            <div style="font-size:24px;font-weight:700;color:var(--warning);">${remaining}</div>
+                            <small style="color:var(--text-secondary);">المتبقي</small>
+                        </div>
+                    </div>
+                    <!-- Control Buttons -->
+                    <div style="display:flex;justify-content:center;gap:12px;margin-top:16px;">
+                        <button id="pauseBtn" onclick="app.pauseBroadcast()" style="padding:10px 20px;border-radius:8px;background:${pauseBg};border:none;color:white;cursor:pointer;font-weight:600;">
+                            ${pauseText}
+                        </button>
+                        <button onclick="app.cancelBroadcast()" style="padding:10px 20px;border-radius:8px;background:var(--danger);border:none;color:white;cursor:pointer;font-weight:600;">
+                            <i class="fas fa-times"></i> إلغاء الحملة
+                        </button>
+                    </div>
+                    ${currentMessage ? `
+                    <div style="margin-top:16px;padding:12px;background:var(--glass);border-radius:8px;font-size:12px;color:var(--text-secondary);">
+                        <strong>آخر رسالة:</strong> ${currentMessage.substring(0, 100)}...
+                    </div>` : ''}
+                </div>`;
+        };
+
+        updateProgress();
+
+        // Reset control state
+        this.broadcastPaused = false;
+        this.broadcastCancelled = false;
+
+        // Get first media file for now (we'll send all later)
+        const mediaFiles = this.broadcastMediaFiles || [];
+
+        // Send messages one by one with pause/cancel support
+        for (const recipient of recipients) {
+            // Check if cancelled
+            if (this.broadcastCancelled) {
+                this.showToast('تم إلغاء الحملة', 'error');
+                break;
+            }
+
+            // Wait while paused
+            while (this.broadcastPaused && !this.broadcastCancelled) {
+                await new Promise(resolve => setTimeout(resolve, 500));
+            }
+
+            if (this.broadcastCancelled) break;
+
+            // Generate unique message using Spintax
+            const uniqueMessage = this.parseSpintax(messageTemplate);
+
+            // Send each media file separately, then the message
+            let sendSuccess = true;
+
+            // Send all media files first
+            for (const media of mediaFiles) {
+                const mediaResult = await window.fbIntegration.sendBroadcastOne(
+                    pageId,
+                    recipient.id,
+                    recipient.name,
+                    null, // No message with media
+                    media.file,
+                    messageTag
+                );
+                if (!mediaResult.success) {
+                    sendSuccess = false;
+                    failedList.push({ name: recipient.name, error: mediaResult.error });
+                    break;
+                }
+            }
+
+            // Send the text message
+            if (sendSuccess) {
+                const result = await window.fbIntegration.sendBroadcastOne(
+                    pageId,
+                    recipient.id,
+                    recipient.name,
+                    uniqueMessage,
+                    null, // No media with text
+                    messageTag
+                );
+
+                if (result.success) {
+                    sent++;
+                } else {
+                    failed++;
+                    failedList.push({ name: recipient.name, error: result.error });
+                }
+            } else {
+                failed++;
+            }
+
+            updateProgress(uniqueMessage);
+
+            // Wait between messages (configurable delay)
+            if (sent + failed < total && !this.broadcastCancelled) {
+                await new Promise(resolve => setTimeout(resolve, delay));
+            }
+        }
+
+        // Final results
+        // Save failed list for retry functionality
+        this.lastFailedList = failedList.map(f => ({
+            id: f.id || recipients.find(r => r.name === f.name)?.id,
+            name: f.name,
+            error: f.error
+        })).filter(f => f.id);
+
+        resultsDiv.innerHTML = `
+            <div style="background:var(--bg-card);border:1px solid var(--border-color);border-radius:12px;padding:24px;text-align:center;">
+                <i class="fas fa-check-circle" style="font-size:48px;color:var(--success);margin-bottom:12px;"></i>
+                <h3 style="margin:0 0 16px;">اكتمل الإرسال!</h3>
+                <div style="display:flex;justify-content:center;gap:32px;margin-bottom:16px;">
+                    <div>
+                        <span style="font-size:32px;font-weight:700;color:var(--success);">${sent}</span>
+                        <br><small>نجح</small>
+                    </div>
+                    <div>
+                        <span style="font-size:32px;font-weight:700;color:var(--danger);">${failed}</span>
+                        <br><small>فشل</small>
+                    </div>
+                </div>
+                ${failedList.length > 0 ? `
+                    <div style="margin-top:16px;">
+                        <button onclick="app.retryFailedRecipients()" class="btn btn-warning" style="margin-bottom:12px;">
+                            <i class="fas fa-redo"></i> إعادة المحاولة للفاشلين (${failedList.length})
+                        </button>
+                        <details style="text-align:right;background:var(--glass);padding:12px;border-radius:8px;">
+                            <summary style="cursor:pointer;color:var(--danger);">عرض الفاشلين (${failedList.length})</summary>
+                            <ul style="margin:8px 0;padding-right:20px;font-size:12px;color:var(--text-secondary);">
+                                ${failedList.map(f => `<li>${f.name}: ${f.error}</li>`).join('')}
+                            </ul>
+                        </details>
+                    </div>
+                ` : ''}
+            </div>`;
+
+        this.showToast(`تم إرسال ${sent} رسالة`, 'success');
+
+        // Don't clear form so user can retry with same message
+        // document.getElementById('broadcastMessage').value = '';
+        this.removeBroadcastMedia();
+    }
+
+    // ============= BACKEND CAMPAIGN FUNCTIONS =============
+
+    // Start backend campaign (alternative to frontend loop)
+    async startBackendCampaign() {
+        // Get the send button and disable it immediately to prevent double-clicking
+        const sendBtn = document.getElementById('campaignSendBtn');
+        if (sendBtn) {
+            if (sendBtn.disabled) {
+                this.showToast('الحملة قيد الإرسال بالفعل، يرجى الانتظار...', 'warning');
+                return;
+            }
+            sendBtn.disabled = true;
+            sendBtn.innerHTML = `
+                <i class="fas fa-spinner fa-spin" style="font-size:20px;"></i>
+                <span>جاري الإرسال...</span>
+            `;
+        }
+
+        const pageId = document.getElementById('broadcastPageSelect')?.value;
+        const messageTemplate = document.getElementById('broadcastMessage')?.value;
+        const messageTag = 'CONFIRMED_EVENT_UPDATE'; // Always use this tag
+        const delayValue = document.getElementById('broadcastDelay')?.value || '3000';
+        const delay = delayValue === 'ai' ? 'ai' : parseInt(delayValue);
+
+        if (!pageId || !messageTemplate) {
+            this.showToast('الرجاء اختيار صفحة وكتابة رسالة', 'error');
+            this.resetCampaignButton();
+            return;
+        }
+
+        // Always send to all filtered recipients
+        const recipients = this.broadcastRecipients || [];
+
+        if (recipients.length === 0) {
+            this.showToast('لا يوجد مستلمين', 'error');
+            this.resetCampaignButton();
+            return;
+        }
+
+        const pageSelect = document.getElementById('broadcastPageSelect');
+        const pageName = pageSelect.options[pageSelect.selectedIndex]?.text || '';
+
+        const resultsDiv = document.getElementById('broadcastResults');
+        resultsDiv.style.display = 'block';
+        resultsDiv.innerHTML = `
+            <div style="background:var(--bg-card);border:1px solid var(--border-color);border-radius:12px;padding:24px;text-align:center;">
+                <i class="fas fa-spinner fa-spin" style="font-size:48px;color:var(--primary);margin-bottom:12px;"></i>
+                <h3>جاري بدء الحملة في الخلفية...</h3>
+            </div>`;
+
+        const result = await window.fbIntegration.startCampaign({
+            pageId, pageName, messageTemplate, messageTag, delay, recipients,
+            mediaFiles: this.broadcastMediaFiles || []
+        });
+
+        if (!result.success) {
+            resultsDiv.innerHTML = `
+                <div style="background:var(--bg-card);border:1px solid var(--danger);border-radius:12px;padding:24px;text-align:center;">
+                    <i class="fas fa-exclamation-circle" style="font-size:48px;color:var(--danger);margin-bottom:12px;"></i>
+                    <h3>فشل بدء الحملة</h3>
+                    <p style="color:var(--text-secondary);">${result.error}</p>
+                </div>`;
+            this.resetCampaignButton();
+            return;
+        }
+
+        this.currentCampaignId = result.campaignId;
+        this.showToast('تم بدء الحملة في الخلفية! 🚀', 'success');
+        this.pollCampaignStatus(result.campaignId);
+    }
+
+    // Set broadcast speed from custom dropdown
+    setBroadcastSpeed(value, element) {
+        // Update hidden input value
+        document.getElementById('broadcastDelay').value = value;
+
+        // Update visual selection state
+        const options = document.querySelectorAll('.custom-option');
+        options.forEach(opt => opt.classList.remove('selected'));
+        element.classList.add('selected');
+
+        // Update trigger content with selected option's icon and main text
+        const trigger = document.querySelector('.custom-select-trigger');
+        const iconHtml = element.querySelector('.custom-option-icon').outerHTML;
+        const titleText = element.querySelector('div > div:first-child').textContent;
+        const subText = element.querySelector('div > div:last-child').textContent;
+
+        // Simplified view for trigger (icon + title + subtext)
+        trigger.innerHTML = `
+            <div style="display:flex;align-items:center;gap:10px;">
+                ${iconHtml}
+                <div style="display:flex;flex-direction:column;align-items:flex-start;line-height:1.2;">
+                    <span style="font-weight:600;">${titleText}</span>
+                    <span style="font-size:10px;opacity:0.6;">${subText}</span>
+                </div>
+            </div>
+            <i class="fas fa-chevron-down" style="font-size:12px;opacity:0.5;"></i>
+        `;
+
+        // Close dropdown
+        const optionsContainer = document.querySelector('.custom-options');
+        optionsContainer.classList.remove('open');
+    }
+
+    // Reset campaign button to original state
+    resetCampaignButton() {
+        const sendBtn = document.getElementById('campaignSendBtn');
+        if (sendBtn) {
+            sendBtn.disabled = false;
+            sendBtn.innerHTML = `
+                <i class="fas fa-rocket" style="font-size:20px;"></i>
+                <span>إرسال الحملة</span>
+                <i class="fas fa-paper-plane" style="font-size:16px;"></i>
+            `;
+        }
+    }
+
+    async pollCampaignStatus(campaignId) {
+        const resultsDiv = document.getElementById('broadcastResults');
+        console.log('[Campaign Poll] Starting for campaignId:', campaignId);
+
+        // Clear any existing poll interval
+        if (this.campaignPollInterval) {
+            clearTimeout(this.campaignPollInterval);
+            this.campaignPollInterval = null;
+        }
+
+        // Initialize last known values to prevent UI regression (flicker)
+        if (!this.lastCampaignValues || this.lastCampaignValues.campaignId !== campaignId) {
+            this.lastCampaignValues = {
+                campaignId: campaignId,
+                sentCount: 0,
+                failedCount: 0,
+                lastUpdate: 0
+            };
+        }
+
+        // Use existing socket from initSocketIO or create if not exists
+        if (!this.socket && typeof io !== 'undefined') {
+            this.socket = io();
+            console.log('[Socket.IO] Late initialization for campaign');
+        }
+
+        // Join campaign room for real-time updates
+        if (this.socket) {
+            this.socket.emit('join-campaign', campaignId);
+            console.log('[Socket.IO] Joined campaign room:', campaignId);
+        }
+
+        // Prevent overlapping poll calls
+        let isPolling = false;
+
+        const updateUI = async () => {
+            // Prevent overlapping calls
+            if (isPolling) {
+                console.log('[Campaign Poll] Skipped - already polling');
+                return;
+            }
+            isPolling = true;
+            console.log('[Campaign Poll] Fetching status...');
+
+            try {
+                const status = await window.fbIntegration.getCampaignStatus(campaignId);
+                console.log('[Campaign Poll] Status received:', status);
+
+                if (status.error) {
+                    console.error('[Campaign Poll] Error:', status.error);
+                    isPolling = false;
+                    this.resetCampaignButton();
+                    return;
+                }
+
+                let { totalRecipients: total, sentCount: sent, failedCount: failed, progress, status: campaignStatus, lastMessage, failedList } = status;
+
+                // Anti-flicker: Use max of poll value and last known Socket.IO value
+                // This prevents showing regression when poll returns stale data
+                if (this.lastCampaignValues && this.lastCampaignValues.campaignId === String(campaignId)) {
+                    if (sent < this.lastCampaignValues.sentCount) {
+                        console.log(`[Campaign Poll] Skipping regression: poll sent=${sent}, known=${this.lastCampaignValues.sentCount}`);
+                        sent = this.lastCampaignValues.sentCount;
+                    }
+                    if (failed < this.lastCampaignValues.failedCount) {
+                        console.log(`[Campaign Poll] Skipping regression: poll failed=${failed}, known=${this.lastCampaignValues.failedCount}`);
+                        failed = this.lastCampaignValues.failedCount;
+                    }
+                    // Recalculate progress with corrected values
+                    progress = Math.round((sent + failed) / total * 100);
+                }
+
+                console.log(`[Campaign Poll] Progress: ${sent}/${total} (${progress}%) - Status: ${campaignStatus}`);
+                const remaining = total - sent - failed;
+                const isPaused = campaignStatus === 'paused';
+
+                // Fallback completion detection: if all messages sent/failed but status stuck on 'running'
+                if (remaining <= 0 && campaignStatus === 'running' && sent + failed >= total) {
+                    console.log('[Campaign Poll] Fallback: Campaign appears complete, forcing completion UI');
+                    campaignStatus = 'completed';
+                }
+
+                if (campaignStatus === 'running' || campaignStatus === 'paused') {
+                    resultsDiv.innerHTML = `
+                        <div style="background:var(--bg-card);border:1px solid var(--border-color);border-radius:12px;padding:24px;">
+                            <div style="display:flex;align-items:center;justify-content:center;gap:12px;margin-bottom:16px;">
+                                <i class="fas ${isPaused ? 'fa-pause-circle' : 'fa-spinner fa-spin'}" style="font-size:24px;color:var(--primary);"></i>
+                                <span style="font-size:18px;font-weight:600;">${isPaused ? '⏸️ الحملة متوقفة مؤقتاً' : '🚀 جاري الإرسال في الخلفية...'}</span>
+                            </div>
+                            <div style="background:var(--glass);border-radius:8px;height:20px;overflow:hidden;margin-bottom:16px;">
+                                <div style="background:linear-gradient(90deg,var(--primary),var(--success));height:100%;width:${progress}%;transition:width 0.3s;"></div>
+                            </div>
+                            <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:16px;text-align:center;">
+                                <div><div style="font-size:24px;font-weight:700;">${sent + failed}/${total}</div><small>الإجمالي</small></div>
+                                <div><div style="font-size:24px;font-weight:700;color:var(--success);">${sent}</div><small>تم الإرسال</small></div>
+                                <div><div style="font-size:24px;font-weight:700;color:var(--danger);">${failed}</div><small>فشل</small></div>
+                                <div><div style="font-size:24px;font-weight:700;color:var(--warning);">${remaining}</div><small>المتبقي</small></div>
+                            </div>
+                            <div style="display:flex;justify-content:center;gap:12px;margin-top:16px;">
+                                <button onclick="app.toggleCampaignPause('${campaignId}')" style="padding:10px 20px;border-radius:8px;background:${isPaused ? 'var(--success)' : 'var(--warning)'};border:none;color:white;cursor:pointer;font-weight:600;">
+                                    ${isPaused ? '<i class="fas fa-play"></i> استئناف' : '<i class="fas fa-pause"></i> إيقاف مؤقت'}
+                                </button>
+                                <button onclick="app.cancelBackendCampaign('${campaignId}')" style="padding:10px 20px;border-radius:8px;background:var(--danger);border:none;color:white;cursor:pointer;font-weight:600;">
+                                    <i class="fas fa-times"></i> إلغاء
+                                </button>
+                            </div>
+                            <p style="margin-top:12px;font-size:12px;color:var(--text-secondary);text-align:center;">💡 يمكنك إغلاق الصفحة والحملة ستستمر</p>
+                        </div>`;
+
+                    // Schedule next poll using setTimeout (not setInterval) - now just a fallback
+                    isPolling = false;
+                    this.campaignPollInterval = setTimeout(updateUI, 10000); // 10s fallback, Socket.IO handles real-time
+                } else {
+                    // Campaign completed or cancelled - stop polling
+                    const isCompleted = campaignStatus === 'completed';
+                    resultsDiv.innerHTML = `
+                        <div style="background:var(--bg-card);border:1px solid var(--border-color);border-radius:12px;padding:24px;text-align:center;">
+                            <i class="fas ${isCompleted ? 'fa-check-circle' : 'fa-times-circle'}" style="font-size:48px;color:${isCompleted ? 'var(--success)' : 'var(--warning)'};margin-bottom:12px;"></i>
+                            <h3>${isCompleted ? 'اكتمل الإرسال!' : 'تم إلغاء الحملة'}</h3>
+                            <div style="display:flex;justify-content:center;gap:32px;margin:16px 0;">
+                                <div><span style="font-size:32px;font-weight:700;color:var(--success);">${sent}</span><br><small>نجح</small></div>
+                                <div><span style="font-size:32px;font-weight:700;color:var(--danger);">${failed}</span><br><small>فشل</small></div>
+                            </div>
+                        </div>`;
+                    this.showToast(`تم إرسال ${sent} رسالة`, 'success');
+                    // Reset the send button so user can send another campaign
+                    this.resetCampaignButton();
+                    isPolling = false;
+                }
+            } catch (err) {
+                console.error('Poll campaign status error:', err);
+                isPolling = false;
+                // Retry after error
+                this.campaignPollInterval = setTimeout(updateUI, 3000);
+            }
+        };
+
+        // Start polling immediately (don't await - let it run async)
+        updateUI();
+    }
+
+    // Handle real-time campaign updates from Socket.IO
+    handleRealtimeCampaignUpdate(data) {
+        const resultsDiv = document.getElementById('broadcastResults');
+        if (!resultsDiv) return;
+
+        console.log('[Socket.IO] Updating UI with:', data);
+
+        let { sentCount: sent, failedCount: failed, totalRecipients: total, status: campaignStatus, progress, campaignId } = data;
+
+        // Anti-flicker: ensure values never go backwards
+        if (this.lastCampaignValues && this.lastCampaignValues.campaignId === String(campaignId)) {
+            sent = Math.max(sent, this.lastCampaignValues.sentCount);
+            failed = Math.max(failed, this.lastCampaignValues.failedCount);
+            progress = Math.round((sent + failed) / total * 100);
+        }
+
+        const remaining = total - sent - failed;
+        const isPaused = campaignStatus === 'paused';
+
+        // Fallback completion detection: if all messages sent/failed but status stuck on 'running'
+        if (remaining <= 0 && campaignStatus === 'running' && sent + failed >= total) {
+            console.log('[Socket.IO] Fallback: Campaign appears complete, forcing completion UI');
+            campaignStatus = 'completed';
+        }
+
+        if (campaignStatus === 'running' || campaignStatus === 'paused') {
+            resultsDiv.innerHTML = `
+                <div style="background:var(--bg-card);border:1px solid var(--border-color);border-radius:12px;padding:24px;">
+                    <div style="display:flex;align-items:center;justify-content:center;gap:12px;margin-bottom:16px;">
+                        <i class="fas ${isPaused ? 'fa-pause-circle' : 'fa-spinner fa-spin'}" style="font-size:24px;color:var(--primary);"></i>
+                        <span style="font-size:18px;font-weight:600;">${isPaused ? '⏸️ الحملة متوقفة مؤقتاً' : '🚀 جاري الإرسال في الخلفية...'}</span>
+                    </div>
+                    <div style="background:var(--glass);border-radius:8px;height:20px;overflow:hidden;margin-bottom:16px;">
+                        <div style="background:linear-gradient(90deg,var(--primary),var(--success));height:100%;width:${progress}%;transition:width 0.3s;"></div>
+                    </div>
+                    <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:16px;text-align:center;">
+                        <div><div style="font-size:24px;font-weight:700;">${sent + failed}/${total}</div><small>الإجمالي</small></div>
+                        <div><div style="font-size:24px;font-weight:700;color:var(--success);">${sent}</div><small>تم الإرسال</small></div>
+                        <div><div style="font-size:24px;font-weight:700;color:var(--danger);">${failed}</div><small>فشل</small></div>
+                        <div><div style="font-size:24px;font-weight:700;color:var(--warning);">${remaining}</div><small>المتبقي</small></div>
+                    </div>
+                    <div style="display:flex;justify-content:center;gap:12px;margin-top:16px;">
+                        <button onclick="app.toggleCampaignPause('${campaignId}')" style="padding:10px 20px;border-radius:8px;background:${isPaused ? 'var(--success)' : 'var(--warning)'};border:none;color:white;cursor:pointer;font-weight:600;">
+                            ${isPaused ? '<i class="fas fa-play"></i> استئناف' : '<i class="fas fa-pause"></i> إيقاف مؤقت'}
+                        </button>
+                        <button onclick="app.cancelBackendCampaign('${campaignId}')" style="padding:10px 20px;border-radius:8px;background:var(--danger);border:none;color:white;cursor:pointer;font-weight:600;">
+                            <i class="fas fa-times"></i> إلغاء
+                        </button>
+                    </div>
+                    <p style="margin-top:12px;font-size:12px;color:var(--text-secondary);text-align:center;">💡 يمكنك إغلاق الصفحة والحملة ستستمر</p>
+                </div>`;
+        } else {
+            // Campaign completed or cancelled
+            const isCompleted = campaignStatus === 'completed';
+            resultsDiv.innerHTML = `
+                <div style="background:var(--bg-card);border:1px solid var(--border-color);border-radius:12px;padding:24px;text-align:center;">
+                    <i class="fas ${isCompleted ? 'fa-check-circle' : 'fa-times-circle'}" style="font-size:48px;color:${isCompleted ? 'var(--success)' : 'var(--warning)'};margin-bottom:12px;"></i>
+                    <h3>${isCompleted ? 'اكتمل الإرسال!' : 'تم إلغاء الحملة'}</h3>
+                    <div style="display:flex;justify-content:center;gap:32px;margin:16px 0;">
+                        <div><span style="font-size:32px;font-weight:700;color:var(--success);">${sent}</span><br><small>نجح</small></div>
+                        <div><span style="font-size:32px;font-weight:700;color:var(--danger);">${failed}</span><br><small>فشل</small></div>
+                    </div>
+                </div>`;
+            this.showToast(`تم إرسال ${sent} رسالة`, 'success');
+            this.resetCampaignButton();
+
+            // Clear poll interval since campaign is done
+            if (this.campaignPollInterval) {
+                clearTimeout(this.campaignPollInterval);
+                this.campaignPollInterval = null;
+            }
+        }
+    }
+
+    async toggleCampaignPause(campaignId) {
+        const resultsDiv = document.getElementById('broadcastResults');
+
+        // Show loading state immediately
+        const pauseBtn = resultsDiv?.querySelector('button[onclick*="toggleCampaignPause"]');
+        if (pauseBtn) {
+            pauseBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> جاري...';
+            pauseBtn.disabled = true;
+        }
+
+        try {
+            const status = await window.fbIntegration.getCampaignStatus(campaignId);
+            const wasPaused = status.status === 'paused';
+
+            if (wasPaused) {
+                await window.fbIntegration.resumeCampaign(campaignId);
+                this.showToast('تم استئناف الحملة ▶️', 'success');
+            } else {
+                await window.fbIntegration.pauseCampaign(campaignId);
+                this.showToast('تم إيقاف الحملة مؤقتاً ⏸️', 'success');
+            }
+
+            // Update UI optimistically with the expected new status
+            const newStatusValue = wasPaused ? 'running' : 'paused';
+
+            this.handleRealtimeCampaignUpdate({
+                campaignId: String(campaignId),
+                sentCount: status.sentCount,
+                failedCount: status.failedCount,
+                totalRecipients: status.totalRecipients,
+                status: newStatusValue,
+                progress: status.progress
+            });
+
+            // Socket.IO will send the real update from server if different
+
+        } catch (err) {
+            console.error('[Campaign] Toggle pause error:', err);
+            this.showToast('حدث خطأ', 'error');
+        }
+    }
+
+    async cancelBackendCampaign(campaignId) {
+        if (confirm('هل أنت متأكد من إلغاء الحملة؟')) {
+            await window.fbIntegration.cancelCampaign(campaignId);
+            this.showToast('تم إلغاء الحملة ❌', 'error');
+        }
+    }
+
+    async checkActiveCampaigns() {
+        try {
+            const data = await window.fbIntegration.getActiveCampaigns();
+            console.log('[Campaign] Checking active campaigns:', data);
+
+            if (data.campaigns?.length > 0) {
+                const campaign = data.campaigns[0];
+                this.currentCampaignId = campaign.id;
+
+                // Wait a bit for DOM to be ready
+                await new Promise(resolve => setTimeout(resolve, 100));
+
+                const resultsDiv = document.getElementById('broadcastResults');
+                const sendBtn = document.getElementById('campaignSendBtn');
+
+                // Disable the send button since there's an active campaign
+                if (sendBtn) {
+                    sendBtn.disabled = true;
+                    sendBtn.innerHTML = `
+                        <i class="fas fa-spinner fa-spin" style="font-size:20px;"></i>
+                        <span>حملة قيد التنفيذ...</span>
+                    `;
+                    console.log('[Campaign] Disabled send button - active campaign found');
+                }
+
+                if (resultsDiv) {
+                    resultsDiv.style.display = 'block';
+                    this.pollCampaignStatus(campaign.id);
+
+                    // Show notification that campaign was restored
+                    this.showToast(`📢 تم استعادة حملة ${campaign.status === 'paused' ? 'متوقفة' : 'جارية'} (${campaign.sentCount}/${campaign.totalRecipients})`, 'success');
+                } else {
+                    console.warn('[Campaign] broadcastResults div not found');
+                }
+            } else {
+                // No active campaigns - make sure button is enabled
+                this.resetCampaignButton();
+            }
+        } catch (err) {
+            console.error('[Campaign] Error checking active campaigns:', err);
+        }
+    }
+
+    // ============= BROWSER AUTOMATION FUNCTIONS =============
+
+    switchBroadcastMode(mode) {
+        this.broadcastMode = mode;
+        const automationPanel = document.getElementById('automationPanel');
+        const warning = document.getElementById('broadcastWarning');
+
+        if (mode === 'automation') {
+            automationPanel.style.display = 'block';
+            warning.innerHTML = `
+                <h4 style="color:#2563EB;margin-bottom:8px;"><i class="fas fa-robot"></i> وضع Browser Automation</h4>
+                <p style="font-size:14px;color:var(--text-secondary);">هذا الوضع يستخدم متصفح حقيقي لإرسال الرسائل. <strong style="color:var(--danger);">تحذير:</strong> قد يخالف شروط فيسبوك.</p>
+            `;
+            warning.style.background = 'linear-gradient(135deg,rgba(156,39,176,0.1),rgba(103,58,183,0.1))';
+            warning.style.borderColor = 'rgba(156,39,176,0.3)';
+        } else {
+            automationPanel.style.display = 'none';
+            warning.innerHTML = `
+                <h4 style="color:#ff9800;margin-bottom:8px;"><i class="fas fa-exclamation-triangle"></i> تنبيه: وضع API</h4>
+                <p style="font-size:14px;color:var(--text-secondary);">فيسبوك يسمح بإرسال رسائل فقط للعملاء اللي تواصلوا معاك خلال آخر <strong style="color:var(--primary);">7 أيام</strong>. العملاء خارج هذه الفترة لن يستلموا الرسالة.</p>
+            `;
+            warning.style.background = 'linear-gradient(135deg,rgba(255,152,0,0.1),rgba(255,87,34,0.1))';
+            warning.style.borderColor = 'rgba(255,152,0,0.3)';
+        }
+    }
+
+    async initBrowserAutomation() {
+        this.showToast('جاري تشغيل المتصفح في الخلفية...', 'success');
+        document.getElementById('automationStatusText').textContent = 'جاري التشغيل...';
+        document.getElementById('automationStatusText').style.color = 'var(--warning)';
+
+        const result = await window.fbIntegration.initAutomation(true); // true = headless (background)
+
+        if (result.success) {
+            if (result.isLoggedIn) {
+                this.showToast('✅ Browser Automation جاهز', 'success');
+                document.getElementById('automationStatusText').textContent = '✅ جاهز للإرسال (في الخلفية)';
+                document.getElementById('automationStatusText').style.color = 'var(--success)';
+                document.getElementById('firstTimeLoginBtn').style.display = 'none';
+                this.automationReady = true;
+            } else {
+                this.showToast('⚠️ تحتاج تسجيل دخول أول مرة', 'warning');
+                document.getElementById('automationStatusText').textContent = '⚠️ سجل دخول أول مرة ثم جرب مرة أخرى';
+                document.getElementById('automationStatusText').style.color = 'var(--warning)';
+            }
+        } else {
+            this.showToast('فشل تشغيل المتصفح', 'error');
+            document.getElementById('automationStatusText').textContent = '❌ فشل التشغيل';
+            document.getElementById('automationStatusText').style.color = 'var(--danger)';
+        }
+    }
+
+    // First-time login with visible browser
+    async firstTimeLogin() {
+        this.showToast('جاري فتح المتصفح لتسجيل الدخول...', 'success');
+        document.getElementById('automationStatusText').textContent = 'جاري فتح المتصفح...';
+        document.getElementById('automationStatusText').style.color = 'var(--warning)';
+
+        // Open visible browser (headless = false)
+        const result = await window.fbIntegration.initAutomation(false);
+
+        if (result.success) {
+            if (result.isLoggedIn) {
+                // Already logged in from saved cookies!
+                this.showToast('✅ أنت مسجل دخول بالفعل!', 'success');
+                document.getElementById('automationStatusText').textContent = '✅ مسجل دخول - يمكنك استخدام الوضع التلقائي';
+                document.getElementById('automationStatusText').style.color = 'var(--success)';
+                document.getElementById('firstTimeLoginBtn').style.display = 'none';
+                this.automationReady = true;
+
+                // Close the visible browser
+                await window.fbIntegration.closeAutomation();
+            } else {
+                // Need to log in - browser is open and visible
+                this.showToast('📱 سجل دخول في المتصفح الظاهر ثم اضغط الزر أدناه', 'success');
+                document.getElementById('automationStatusText').innerHTML = `
+                    <div style="text-align:center;">
+                        <p style="margin-bottom:12px;">🔐 سجل دخول يدوياً في نافذة المتصفح الظاهرة</p>
+                        <button onclick="app.confirmFirstTimeLogin()" class="btn btn-success" style="padding:12px 24px;">
+                            <i class="fas fa-check"></i> تم تسجيل الدخول
+                        </button>
+                    </div>
+                `;
+            }
+        } else {
+            this.showToast('فشل فتح المتصفح', 'error');
+            document.getElementById('automationStatusText').textContent = '❌ فشل فتح المتصفح';
+            document.getElementById('automationStatusText').style.color = 'var(--danger)';
+        }
+    }
+
+    // Confirm first-time login completed
+    async confirmFirstTimeLogin() {
+        this.showToast('جاري حفظ الجلسة...', 'success');
+
+        // Check for token and load initial state cookies
+        const status = await window.fbIntegration.checkAutomationStatus();
+
+        if (status.isLoggedIn) {
+            this.showToast('✅ تم حفظ الجلسة! يمكنك الآن استخدام الإرسال التلقائي', 'success');
+            document.getElementById('automationStatusText').textContent = '✅ تم الحفظ - استخدم الزر الأخضر للإرسال';
+            document.getElementById('automationStatusText').style.color = 'var(--success)';
+            document.getElementById('firstTimeLoginBtn').style.display = 'none';
+            this.automationReady = true;
+
+            // Close the visible browser
+            await window.fbIntegration.closeAutomation();
+        } else {
+            this.showToast('❌ لسه مش مسجل دخول، حاول تاني', 'error');
+            document.getElementById('automationStatusText').textContent = '❌ لم يتم تسجيل الدخول بعد';
+            document.getElementById('automationStatusText').style.color = 'var(--danger)';
+        }
+    }
+
+    async loginBrowserAutomation() {
+        const email = document.getElementById('fbEmail').value;
+        const password = document.getElementById('fbPassword').value;
+
+        if (!email || !password) {
+            this.showToast('أدخل الإيميل وكلمة المرور', 'error');
+            return;
+        }
+
+        this.showToast('جاري تسجيل الدخول...', 'success');
+
+        const result = await window.fbIntegration.loginAutomation(email, password);
+
+        if (result.success) {
+            this.showToast('تم تسجيل الدخول بنجاح', 'success');
+            document.getElementById('automationStatusText').textContent = '✅ متصل ومُسجل الدخول';
+            document.getElementById('automationStatusText').style.color = 'var(--success)';
+            document.getElementById('automationLoginForm').style.display = 'none';
+            this.automationReady = true;
+        } else {
+            this.showToast('فشل تسجيل الدخول', 'error');
+        }
+    }
+
+    // Navigation override to load data
+    navigateToPage(page) {
+        if (page === 'inbox') {
+            this.populateInboxPageSelect();
+            if (this.fbPages.length > 0) this.loadConversations();
+        } else if (page === 'competitors') {
+            this.renderCompetitors();
+        } else if (page === 'broadcast') {
+            this.populateBroadcastPageSelect();
+            this.renderTemplatesList(); // Load saved templates
+            // Check for active campaigns and display them
+            this.checkActiveCampaigns();
+        } else if (page === 'instagram') {
+            this.checkIgLoginStatus();
+        } else if (page === 'whatsapp') {
+            // WhatsApp disabled - this.checkWhatsAppStatus();
+        } else if (page === 'telegram') {
+            this.checkTelegramStatus();
+        } else if (page === 'team') {
+            this.loadTeamMembers();
+        } else if (page === 'ecommerce') {
+            this.initEcommerceAI();
+        }
+    }
+
+    // ============= INSTAGRAM DIRECT LOGIN METHODS =============
+
+    // Check Instagram login status on page load
+    async checkIgLoginStatus() {
+        const userData = JSON.parse(localStorage.getItem('octobot_user') || '{}');
+        const userId = userData.id;
+        if (!userId) return;
+
+        try {
+            const response = await fetch(`${this.API_URL}/api/ig/${userId}/status`);
+            const data = await response.json();
+
+            if (data.loggedIn && data.account) {
+                this.showIgInbox(data.account);
+            }
+        } catch (err) {
+            console.error('Instagram status check error:', err);
+        }
+    }
+
+    // Show inbox section with account info
+    showIgInbox(account) {
+        const loginSection = document.getElementById('igLoginSection');
+        const inboxSection = document.getElementById('igInboxSection');
+        const accountInfo = document.getElementById('igAccountInfo');
+
+        if (loginSection) loginSection.style.display = 'none';
+        if (inboxSection) inboxSection.style.display = 'block';
+
+        if (accountInfo && account) {
+            // Store account info for later use
+            this.igAccount = account;
+
+            // Use proxy for profile picture to bypass CORS
+            const profilePicProxy = account.profilePic ?
+                `${this.API_URL}/api/image-proxy?url=${btoa(account.profilePic)}` : null;
+
+            accountInfo.innerHTML = `
+                <div style="width:45px;height:45px;border-radius:50%;background:linear-gradient(45deg, #E1306C, #833AB4);display:flex;align-items:center;justify-content:center;overflow:hidden;">
+                    ${profilePicProxy ?
+                    `<img src="${profilePicProxy}" style="width:100%;height:100%;object-fit:cover;" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'"><i class="fab fa-instagram" style="color:white;font-size:20px;display:none;"></i>` :
+                    `<i class="fab fa-instagram" style="color:white;font-size:20px;"></i>`
+                }
+                </div>
+                <div>
+                    <div style="font-weight:600;color:var(--text-primary);">@${account.username}</div>
+                    <small style="color:var(--text-secondary);">${account.fullName || ''}</small>
+                </div>
+            `;
+        }
+
+        this.loadIgInbox();
+
+        // Start inbox polling for new conversations
+        this.startIgInboxPolling();
+    }
+
+    // Login to Instagram with username/password
+    async loginInstagramDirect(event) {
+        event.preventDefault();
+
+        const username = document.getElementById('igUsername').value.trim();
+        const password = document.getElementById('igPassword').value;
+        const loginBtn = document.getElementById('igLoginBtn');
+        const errorDiv = document.getElementById('igLoginError');
+
+        if (!username || !password) return;
+
+        const userData = JSON.parse(localStorage.getItem('octobot_user') || '{}');
+        const userId = userData.id;
+        if (!userId) return;
+
+        loginBtn.disabled = true;
+        loginBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> جاري تسجيل الدخول...';
+        if (errorDiv) errorDiv.style.display = 'none';
+
+        try {
+            const response = await fetch(`${this.API_URL}/api/ig/${userId}/login`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ username, password })
+            });
+            const data = await response.json();
+
+            if (data.success) {
+                this.showToast('تم تسجيل الدخول بنجاح!', 'success');
+                const statusRes = await fetch(`${this.API_URL}/api/ig/${userId}/status`);
+                const statusData = await statusRes.json();
+                if (statusData.account) {
+                    this.showIgInbox(statusData.account);
+                }
+            } else if (data.needsCode) {
+                // Show verification code input
+                this.showIgVerificationForm(userId, data.message || 'مطلوب كود تحقق');
+            } else {
+                if (errorDiv) {
+                    errorDiv.style.display = 'block';
+                    errorDiv.innerHTML = `<p style="color:#ff6b6b;background:rgba(255,107,107,0.1);padding:10px;border-radius:8px;">${data.error || data.message || 'فشل تسجيل الدخول'}</p>`;
+                }
+            }
+        } catch (err) {
+            if (errorDiv) {
+                errorDiv.style.display = 'block';
+                errorDiv.innerHTML = '<p style="color:#ff6b6b;">خطأ في الاتصال</p>';
+            }
+        } finally {
+            loginBtn.disabled = false;
+            loginBtn.innerHTML = '<i class="fas fa-sign-in-alt"></i> تسجيل الدخول';
+        }
+    }
+
+    // Show Instagram verification code form
+    showIgVerificationForm(userId, message) {
+        const loginSection = document.getElementById('igLoginSection');
+        if (!loginSection) return;
+
+        loginSection.innerHTML = `
+            <div class="login-card" style="background:linear-gradient(135deg, #E1306C 0%, #833AB4 50%, #405DE6 100%);padding:40px;border-radius:20px;color:white;max-width:450px;margin:40px auto;">
+                <div style="text-align:center;margin-bottom:30px;">
+                    <i class="fas fa-shield-alt" style="font-size:64px;margin-bottom:15px;"></i>
+                    <h2 style="font-size:24px;margin-bottom:10px;">التحقق من الهوية</h2>
+                    <p style="opacity:0.9;">${message}</p>
+                </div>
+                <form id="igVerifyForm" onsubmit="app.submitIgVerificationCode(event, '${userId}')">
+                    <div style="margin-bottom:15px;">
+                        <input type="text" id="igVerifyCode" placeholder="أدخل كود التحقق" required
+                            style="width:100%;padding:14px 16px;border-radius:12px;border:none;font-size:18px;background:rgba(255,255,255,0.95);color:#333;text-align:center;letter-spacing:3px;" 
+                            autocomplete="one-time-code" maxlength="6">
+                    </div>
+                    <button type="submit" id="igVerifyBtn" style="width:100%;padding:14px;border-radius:12px;border:none;background:rgba(0,0,0,0.2);color:white;font-size:16px;font-weight:600;cursor:pointer;margin-bottom:10px;">
+                        <i class="fas fa-check-circle"></i> تأكيد الكود
+                    </button>
+                    <button type="button" onclick="app.resendIgCode('${userId}')" style="width:100%;padding:12px;border-radius:12px;border:1px solid rgba(255,255,255,0.3);background:transparent;color:white;font-size:14px;cursor:pointer;">
+                        <i class="fas fa-redo"></i> إعادة إرسال الكود
+                    </button>
+                </form>
+                <div id="igVerifyError" style="margin-top:15px;text-align:center;display:none;"></div>
+                <div style="text-align:center;margin-top:20px;">
+                    <button onclick="location.reload()" style="background:none;border:none;color:rgba(255,255,255,0.7);cursor:pointer;font-size:13px;">
+                        <i class="fas fa-arrow-right"></i> العودة لتسجيل الدخول
+                    </button>
+                </div>
+            </div>
+        `;
+    }
+
+    // Submit Instagram verification code
+    async submitIgVerificationCode(event, userId) {
+        event.preventDefault();
+
+        const code = document.getElementById('igVerifyCode').value.trim();
+        const verifyBtn = document.getElementById('igVerifyBtn');
+        const errorDiv = document.getElementById('igVerifyError');
+
+        if (!code) return;
+
+        verifyBtn.disabled = true;
+        verifyBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> جاري التحقق...';
+        if (errorDiv) errorDiv.style.display = 'none';
+
+        try {
+            const response = await fetch(`${this.API_URL}/api/ig/${userId}/verify`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ code })
+            });
+            const data = await response.json();
+
+            if (data.success) {
+                this.showToast('تم التحقق بنجاح!', 'success');
+                // Get account info and show inbox
+                const statusRes = await fetch(`${this.API_URL}/api/ig/${userId}/status`);
+                const statusData = await statusRes.json();
+                if (statusData.account) {
+                    this.showIgInbox(statusData.account);
+                } else {
+                    location.reload();
+                }
+            } else {
+                if (errorDiv) {
+                    errorDiv.style.display = 'block';
+                    errorDiv.innerHTML = `<p style="color:#ff6b6b;background:rgba(255,107,107,0.1);padding:10px;border-radius:8px;">${data.error || 'الكود غير صحيح'}</p>`;
+                }
+            }
+        } catch (err) {
+            if (errorDiv) {
+                errorDiv.style.display = 'block';
+                errorDiv.innerHTML = '<p style="color:#ff6b6b;">خطأ في الاتصال</p>';
+            }
+        } finally {
+            verifyBtn.disabled = false;
+            verifyBtn.innerHTML = '<i class="fas fa-check-circle"></i> تأكيد الكود';
+        }
+    }
+
+    // Resend Instagram verification code
+    async resendIgCode(userId) {
+        try {
+            const response = await fetch(`${this.API_URL}/api/ig/${userId}/resend-code`, {
+                method: 'POST'
+            });
+            const data = await response.json();
+
+            if (data.success) {
+                this.showToast('تم إرسال كود جديد!', 'success');
+            } else {
+                this.showToast(data.error || 'فشل إرسال الكود', 'error');
+            }
+        } catch (err) {
+            this.showToast('خطأ في الاتصال', 'error');
+        }
+    }
+
+    // Load Instagram inbox
+    async loadIgInbox() {
+        const inbox = document.getElementById('igInbox');
+        if (!inbox) return;
+
+        // Use getIgUserId() for shared access (employees use admin's session)
+        const userId = this.getIgUserId();
+        if (!userId) return;
+
+        // Only show loading spinner if we don't have existing conversations
+        if (!this.igConversations || this.igConversations.length === 0) {
+            inbox.innerHTML = '<div class="loading-spinner" style="padding:40px;"><div class="spinner"></div></div>';
+        }
+
+        try {
+            const response = await fetch(`${this.API_URL}/api/ig/${userId}/inbox?limit=50`);
+            const data = await response.json();
+
+            if (!data.conversations || data.conversations.length === 0) {
+                // Only show "no conversations" if we don't have existing ones
+                if (!this.igConversations || this.igConversations.length === 0) {
+                    inbox.innerHTML = '<p style="text-align:center;color:var(--text-secondary);padding:40px;">لا توجد محادثات</p>';
+                }
+                return;
+            }
+
+            this.igConversations = data.conversations;
+            this.renderIgConversations(data.conversations);
+
+            // Start polling for new conversations (real-time inbox updates)
+            this.startIgInboxPolling();
+        } catch (err) {
+            console.error('Instagram inbox error:', err);
+            // Only show error if we don't have existing conversations - preserve existing data
+            if (!this.igConversations || this.igConversations.length === 0) {
+                inbox.innerHTML = '<p style="color:var(--error);text-align:center;padding:40px;">فشل في تحميل المحادثات</p>';
+            }
+        }
+    }
+
+    // Render Instagram conversations with profile pictures
+    renderIgConversations(conversations, newIds = []) {
+        const inbox = document.getElementById('igInbox');
+        if (!inbox) return;
+
+        const newIdsSet = new Set(newIds);
+
+        inbox.innerHTML = conversations.map(c => {
+            const isNew = newIdsSet.has(c.id);
+            const isActive = this.currentIgThread === c.id;
+
+            // Get user profile picture (use proxy to bypass CORS)
+            const user = c.users?.[0];
+            const profilePicProxy = user?.profilePic ?
+                `${this.API_URL}/api/image-proxy?url=${btoa(user.profilePic)}` : null;
+            const username = user?.username || c.title;
+
+            // Last message preview (trim if too long)
+            const lastMsg = c.lastMessage ? (c.lastMessage.length > 30 ? c.lastMessage.substring(0, 30) + '...' : c.lastMessage) : '';
+
+            return `
+            <div class="conversation-item" data-id="${c.id}" 
+                 style="padding:12px 15px;border-bottom:1px solid var(--border-color);cursor:pointer;display:flex;justify-content:space-between;align-items:center;transition:all 0.2s ease;${isNew ? 'background:rgba(225,48,108,0.15);' : ''}${isActive ? 'background:rgba(225,48,108,0.1);border-right:3px solid #E1306C;' : ''}" 
+                 onmouseover="this.style.background='rgba(225,48,108,0.08)'" 
+                 onmouseout="this.style.background='${isActive ? 'rgba(225,48,108,0.1)' : (isNew ? 'rgba(225,48,108,0.1)' : 'transparent')}'"
+                 onclick="app.openIgThread('${c.id}', '${c.title}')">
+                <div style="display:flex;align-items:center;gap:12px;flex:1;min-width:0;">
+                    <div style="width:48px;height:48px;border-radius:50%;background:linear-gradient(45deg, #E1306C, #833AB4);display:flex;align-items:center;justify-content:center;overflow:hidden;flex-shrink:0;">
+                        ${profilePicProxy ?
+                    `<img src="${profilePicProxy}" style="width:100%;height:100%;object-fit:cover;" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'"><i class="fab fa-instagram" style="color:white;font-size:20px;display:none;"></i>` :
+                    `<i class="fab fa-instagram" style="color:white;font-size:20px;"></i>`
+                }
+                    </div>
+                    <div style="flex:1;min-width:0;">
+                        <div style="font-weight:600;color:var(--text-primary);margin-bottom:2px;">${username}</div>
+                        <small style="color:var(--text-secondary);display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${lastMsg}</small>
+                    </div>
+                </div>
+                ${c.unreadCount > 0 ? `<span style="background:#E1306C;color:white;padding:4px 10px;border-radius:12px;font-size:12px;font-weight:600;flex-shrink:0;margin-right:8px;">${c.unreadCount}</span>` : ''}
+            </div>
+        `}).join('');
+
+        // Fade out highlight after 3 seconds
+        if (newIds.length > 0) {
+            setTimeout(() => {
+                newIds.forEach(id => {
+                    const el = inbox.querySelector(`[data-id="${id}"]`);
+                    if (el && this.currentIgThread !== id) {
+                        el.style.background = 'transparent';
+                    }
+                });
+            }, 3000);
+        }
+    }
+
+    // Filter conversations by search
+    filterIgConversations(event) {
+        const query = event.target.value.toLowerCase().trim();
+        if (!this.igConversations) return;
+
+        if (!query) {
+            this.renderIgConversations(this.igConversations);
+            return;
+        }
+
+        const filtered = this.igConversations.filter(c =>
+            c.title?.toLowerCase().includes(query) ||
+            c.users?.some(u => u.username?.toLowerCase().includes(query))
+        );
+
+        this.renderIgConversations(filtered);
+    }
+
+    // Open Instagram thread and load messages
+    async openIgThread(threadId, title) {
+        // Store current thread info
+        this.currentIgThread = threadId;
+        this.currentIgThreadTitle = title;
+        this.igMessagesCursor = null;
+        this.igMessagesData = [];
+
+        // Show chat view, hide inbox
+        const inbox = document.getElementById('igInbox');
+        const chatView = document.getElementById('igChatView');
+        const chatTitle = document.getElementById('igChatTitle');
+        const searchBox = document.querySelector('#igInboxSection > div:nth-child(2)');
+
+        if (inbox) inbox.style.display = 'none';
+        if (searchBox) searchBox.style.display = 'none';
+        if (chatView) chatView.style.display = 'block';
+        if (chatTitle) chatTitle.textContent = title;
+
+        // Load messages
+        await this.loadIgMessages(false);
+
+        // Start real-time polling
+        this.startIgPolling();
+    }
+
+    // Load messages with pagination (isPolling = true means silent update)
+    async loadIgMessages(isFirstLoad = true) {
+        const messagesContainer = document.getElementById('igMessages');
+        const loadMoreContainer = document.getElementById('igLoadMoreContainer');
+        const statusEl = document.getElementById('igChatStatus');
+
+        if (!messagesContainer) return;
+
+        // Use getIgUserId() for shared access (employees use admin's session)
+        const userId = this.getIgUserId();
+        if (!userId || !this.currentIgThread) return;
+
+        // Only show loading on first load, not during polling
+        if (isFirstLoad) {
+            messagesContainer.innerHTML = '<div class="loading-spinner" style="padding:40px;"><div class="spinner"></div></div>';
+        }
+
+        try {
+            let url = `${this.API_URL}/api/ig/${userId}/thread/${this.currentIgThread}?limit=100`;
+
+            const response = await fetch(url);
+            const data = await response.json();
+
+            // Store thread users for profile pictures
+            if (data.users && data.users.length > 0) {
+                this.igThreadUsers = data.users;
+            }
+
+            if (!data.messages || data.messages.length === 0) {
+                if (isFirstLoad) {
+                    messagesContainer.innerHTML = '<p style="text-align:center;color:var(--text-secondary);padding:40px;">لا توجد رسائل</p>';
+                }
+                if (loadMoreContainer) loadMoreContainer.style.display = 'none';
+                return;
+            }
+
+            // Messages are already sorted from server (oldest first)
+            const serverMessages = data.messages;
+
+            // Check if we have actual changes before re-rendering
+            const currentIds = new Set((this.igMessagesData || []).filter(m => !String(m.id).startsWith('temp_')).map(m => m.id));
+            const serverIds = new Set(serverMessages.map(m => m.id));
+
+            // Detect if there are new messages, removed messages, or different count
+            const hasNewMessages = serverMessages.some(m => !currentIds.has(m.id));
+            const hasRemovedMessages = [...currentIds].some(id => !serverIds.has(id));
+            const countChanged = serverMessages.length !== currentIds.size;
+            const hasChanges = hasNewMessages || hasRemovedMessages || countChanged || isFirstLoad;
+
+            if (!hasChanges) {
+                // No changes, skip re-render to prevent flashing
+                return;
+            }
+
+            console.log(`[IG Load] Received ${serverMessages.length} messages (changes: ${hasChanges})`);
+
+            // Initialize local sent messages store if not exists (persists page messages)
+            if (!this.localSentMessages) {
+                this.localSentMessages = {};
+            }
+            const threadKey = this.currentIgThread;
+            if (!this.localSentMessages[threadKey]) {
+                this.localSentMessages[threadKey] = [];
+            }
+
+            // Get temp messages (optimistic UI messages)
+            const tempMessages = (this.igMessagesData || [])
+                .filter(m => String(m.id).startsWith('temp_'));
+
+            // Check which temp messages have arrived on server
+            const now = Date.now();
+            const stillPending = tempMessages.filter(temp => {
+                const existsOnServer = serverMessages.some(srv =>
+                    srv.text === temp.text && srv.isFromMe
+                );
+                if (existsOnServer) return false; // Remove, it's on server now
+
+                // Keep for up to 60 seconds
+                const tempTime = Number(temp.timestamp) / 1000;
+                const ageSeconds = (now - tempTime) / 1000;
+                return ageSeconds < 60;
+            });
+
+            // Merge: server messages + pending temp messages
+            // Server messages are the source of truth, temp messages show optimistic UI
+            this.igMessagesData = [...serverMessages, ...stillPending];
+
+            // Note: Notifications are handled by inbox polling, not here
+            // When user is IN the chat, they can see messages directly
+
+            console.log(`[IG Load] Total: ${this.igMessagesData.length}, Pending: ${stillPending.length}`);
+
+            // Store current scroll position
+            const wasAtBottom = messagesContainer.scrollHeight - messagesContainer.scrollTop <= messagesContainer.clientHeight + 100;
+
+            // Render
+            this.renderIgMessages();
+
+            // Restore scroll: keep at bottom if was at bottom, or maintain position
+            if (isFirstLoad || wasAtBottom) {
+                messagesContainer.scrollTop = messagesContainer.scrollHeight;
+            }
+
+            // Show Load More if there are more messages
+            if (loadMoreContainer) {
+                loadMoreContainer.style.display = serverMessages.length >= 100 ? 'block' : 'none';
+            }
+
+
+            // Update status
+            if (statusEl) {
+                statusEl.textContent = `${this.igMessagesData.length} رسالة`;
+            }
+
+            // Scroll to bottom only on first load
+            if (isFirstLoad) {
+                messagesContainer.scrollTop = messagesContainer.scrollHeight;
+            }
+
+        } catch (err) {
+            console.error('Error loading messages:', err);
+            if (isFirstLoad) {
+                messagesContainer.innerHTML = '<p style="color:var(--error);text-align:center;padding:40px;">فشل في تحميل الرسائل</p>';
+            }
+        }
+    }
+
+    // Render messages
+    renderIgMessages() {
+        const messagesContainer = document.getElementById('igMessages');
+        if (!messagesContainer || !this.igMessagesData) return;
+
+        // Sort all messages by timestamp (oldest first) to ensure correct order
+        // Instagram uses microsecond timestamps that can be very large numbers
+        const messages = [...this.igMessagesData].sort((a, b) => {
+            const timeA = BigInt(a.timestamp || 0);
+            const timeB = BigInt(b.timestamp || 0);
+            if (timeA < timeB) return -1;
+            if (timeA > timeB) return 1;
+            return 0;
+        });
+
+        // Debug: log message counts
+        console.log(`[IG Render] Total: ${messages.length}, Page: ${messages.filter(m => m.isFromMe).length}, Customer: ${messages.filter(m => !m.isFromMe).length}`);
+
+        // Wrap in LTR container to ensure correct message alignment (page=right, customer=left)
+        // Individual text content will be RTL for Arabic
+        const messagesHtml = messages.map((msg, idx) => {
+            const isMe = msg.isFromMe; // true = page/business, false = customer
+            // Instagram timestamp is in microseconds - divide by 1000 to get milliseconds
+            const time = new Date(Number(msg.timestamp) / 1000).toLocaleTimeString('ar-EG', { hour: '2-digit', minute: '2-digit' });
+            const status = msg.status || 'sent';
+            // pending = clock, sent = one check, read = double check (blue)
+            const statusIcon = status === 'pending' ? '🕐' : (status === 'read' ? '✓✓' : '✓');
+            const statusColor = status === 'read' ? '#4FC3F7' : (status === 'pending' ? 'rgba(255,255,255,0.4)' : 'rgba(255,255,255,0.7)');
+
+            // Customer profile picture
+            const customerPic = msg.user?.profilePic || null;
+            const customerName = msg.user?.username || '';
+
+            // Build media content HTML
+            let mediaHtml = '';
+            if (msg.mediaUrl) {
+                if (msg.mediaType === 'image') {
+                    mediaHtml = `<img src="${msg.mediaUrl}" style="max-width:100%;max-height:300px;border-radius:12px;margin-bottom:8px;cursor:pointer;" onclick="window.open('${msg.mediaUrl}', '_blank')" onerror="this.style.display='none'">`;
+                } else if (msg.mediaType === 'video' || msg.mediaType === 'reel') {
+                    mediaHtml = `<video src="${msg.mediaUrl}" controls style="max-width:100%;max-height:300px;border-radius:12px;margin-bottom:8px;" poster="${msg.mediaThumbnail || ''}"></video>`;
+                } else if (msg.mediaType === 'voice') {
+                    const durationText = msg.duration ? `${Math.round(msg.duration / 1000)}s` : '';
+                    mediaHtml = `
+                        <div style="display:flex;align-items:center;gap:10px;background:rgba(0,0,0,0.1);padding:10px;border-radius:20px;margin-bottom:8px;">
+                            <i class="fas fa-microphone" style="color:#E1306C;"></i>
+                            <audio src="${msg.mediaUrl}" controls style="height:32px;flex:1;"></audio>
+                            <span style="font-size:11px;opacity:0.7;">${durationText}</span>
+                        </div>`;
+                } else if (msg.mediaType === 'gif') {
+                    mediaHtml = `<img src="${msg.mediaUrl}" style="max-width:200px;border-radius:12px;margin-bottom:8px;">`;
+                }
+            }
+
+            // Text content or type indicator (with RTL for Arabic text)
+            const textContent = msg.text ? `<div style="word-wrap:break-word;direction:rtl;text-align:right;">${msg.text}</div>` :
+                (msg.mediaUrl ? '' : `<i style="opacity:0.7;">[${msg.type}]</i>`);
+
+            // Customer messages: LEFT with profile pic, glass color
+            // Page messages: RIGHT, Instagram gradient with status
+            if (isMe) {
+                return `
+                    <div style="display:flex;justify-content:flex-end;margin-bottom:10px;gap:8px;">
+                        <div style="max-width:70%;padding:12px 16px;border-radius:18px 18px 4px 18px;background:linear-gradient(135deg, #E1306C, #833AB4);color:white;box-shadow:0 2px 8px rgba(0,0,0,0.1);">
+                            ${mediaHtml}
+                            ${textContent}
+                            <div style="font-size:11px;opacity:0.7;margin-top:4px;display:flex;justify-content:flex-end;align-items:center;gap:4px;">
+                                <span>${time}</span>
+                                <span style="color:${statusColor};">${statusIcon}</span>
+                            </div>
+                        </div>
+                    </div>
+                `;
+            } else {
+                return `
+                    <div style="display:flex;justify-content:flex-start;margin-bottom:10px;gap:8px;align-items:flex-end;">
+                        <div style="width:32px;height:32px;border-radius:50%;background:linear-gradient(45deg, #E1306C, #833AB4);display:flex;align-items:center;justify-content:center;overflow:hidden;flex-shrink:0;">
+                            ${customerPic ? `<img src="${customerPic}" style="width:100%;height:100%;object-fit:cover;" onerror="this.style.display='none';this.nextElementSibling.style.display='block'"><i class="fab fa-instagram" style="color:white;font-size:16px;display:none;"></i>` : `<i class="fab fa-instagram" style="color:white;font-size:16px;"></i>`}
+                        </div>
+                        <div style="max-width:70%;padding:12px 16px;border-radius:18px 18px 18px 4px;background:var(--glass);color:var(--text-primary);box-shadow:0 2px 8px rgba(0,0,0,0.1);">
+                            ${customerName ? `<div style="font-size:11px;color:var(--primary);margin-bottom:4px;font-weight:600;">@${customerName}</div>` : ''}
+                            ${mediaHtml}
+                            ${textContent}
+                            <div style="font-size:11px;opacity:0.7;margin-top:4px;">${time}</div>
+                        </div>
+                    </div>
+                `;
+            }
+        }).join('');
+
+        // Apply LTR direction wrapper to ensure page messages appear on right, customer on left
+        // This fixes RTL page layout affecting message alignment
+        messagesContainer.innerHTML = `<div style="direction:ltr;text-align:left;">${messagesHtml}</div>`;
+    }
+
+    // Add new messages to UI smoothly (for real-time updates)
+    addNewMessagesToUI(newMessages) {
+        const messagesContainer = document.getElementById('igMessages');
+        if (!messagesContainer) return;
+
+        // Sort new messages by timestamp using BigInt for large numbers
+        const sortedNew = [...newMessages].sort((a, b) => {
+            const timeA = BigInt(a.timestamp || 0);
+            const timeB = BigInt(b.timestamp || 0);
+            if (timeA < timeB) return -1;
+            if (timeA > timeB) return 1;
+            return 0;
+        });
+
+        // Create and append new message elements
+        sortedNew.forEach(msg => {
+            const isMe = msg.isFromMe; // true = page, false = customer
+            const time = new Date(Number(msg.timestamp) / 1000).toLocaleTimeString('ar-EG', { hour: '2-digit', minute: '2-digit' });
+
+            const msgDiv = document.createElement('div');
+            // Customer: left, Page: right
+            msgDiv.style.cssText = `display:flex;justify-content:${isMe ? 'flex-end' : 'flex-start'};margin-bottom:10px;opacity:0;transform:translateY(20px);transition:all 0.3s ease;`;
+            msgDiv.innerHTML = `
+                <div style="max-width:70%;padding:12px 16px;border-radius:${isMe ? '18px 18px 4px 18px' : '18px 18px 18px 4px'};background:${isMe ? 'linear-gradient(135deg, #E1306C, #833AB4)' : 'var(--glass)'};color:${isMe ? 'white' : 'var(--text-primary)'};box-shadow:0 2px 8px rgba(0,0,0,0.1);">
+                    <div style="word-wrap:break-word;">${msg.text || `<i style="opacity:0.7;">[${msg.type}]</i>`}</div>
+                    <div style="font-size:11px;opacity:0.7;margin-top:4px;text-align:${isMe ? 'right' : 'left'};">${time}</div>
+                </div>
+            `;
+
+            messagesContainer.appendChild(msgDiv);
+
+            // Animate in
+            setTimeout(() => {
+                msgDiv.style.opacity = '1';
+                msgDiv.style.transform = 'translateY(0)';
+            }, 50);
+        });
+
+        // Scroll to bottom smoothly
+        messagesContainer.scrollTo({
+            top: messagesContainer.scrollHeight,
+            behavior: 'smooth'
+        });
+    }
+
+    // Load more older messages
+    async loadMoreIgMessages() {
+        // For now, the API returns all messages, but we can extend this later
+        this.showToast('جاري تحميل المزيد...', 'info');
+    }
+
+    // Send message
+    async sendIgMessage(event) {
+        event.preventDefault();
+
+        const input = document.getElementById('igMessageInput');
+        if (!input) return;
+
+        const message = input.value.trim();
+        if (!message) return;
+
+        // Use getIgUserId() for shared access (employees use admin's session)
+        const userId = this.getIgUserId();
+        if (!userId || !this.currentIgThread) return;
+
+        // Clear input immediately
+        input.value = '';
+
+        // Get the latest message timestamp and add a bit to ensure our message appears after
+        // Instagram timestamps are in microseconds (~1765xxx for Dec 2025)
+        let tempTimestamp;
+        if (this.igMessagesData && this.igMessagesData.length > 0) {
+            // Get max timestamp from existing messages
+            const maxTs = Math.max(...this.igMessagesData.map(m => Number(m.timestamp) || 0));
+            tempTimestamp = String(maxTs + 1000000); // Add 1 second in microseconds
+        } else {
+            // Fallback: use current time in microseconds
+            tempTimestamp = String(Date.now() * 1000);
+        }
+
+        // Add message to UI optimistically
+        const tempMsg = {
+            id: 'temp_' + Date.now(),
+            text: message,
+            isFromMe: true,
+            timestamp: tempTimestamp,
+            type: 'text',
+            status: 'pending'
+        };
+        this.igMessagesData.push(tempMsg);
+        this.renderIgMessages();
+
+        // Scroll to bottom immediately after sending
+        const messagesContainer = document.getElementById('igMessages');
+        if (messagesContainer) {
+            messagesContainer.scrollTop = messagesContainer.scrollHeight;
+        }
+
+        try {
+            const response = await fetch(`${this.API_URL}/api/ig/${userId}/send`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    threadId: this.currentIgThread,
+                    message: message
+                })
+            });
+
+            const data = await response.json();
+
+            if (data.success) {
+                // Don't show toast - status shows on message
+                console.log('[IG] Message sent successfully');
+                // Track activity for performance dashboard
+                this.trackTeamActivity('message_sent', 'instagram', this.currentIgThread, message.length);
+            } else {
+                this.showToast(data.error || 'فشل الإرسال', 'error');
+            }
+        } catch (err) {
+            console.error('Send message error:', err);
+            this.showToast('فشل في إرسال الرسالة', 'error');
+        }
+    }
+
+    // Send media (photo or video)
+    async sendIgMedia(event) {
+        const file = event.target.files?.[0];
+        if (!file) return;
+
+        // Use getIgUserId() for shared access (employees use admin's session)
+        const userId = this.getIgUserId();
+        if (!userId || !this.currentIgThread) return;
+
+        // Show loading
+        this.showToast('جاري إرسال الملف...', 'info');
+
+        // Determine if photo or video
+        const isVideo = file.type.startsWith('video/');
+        const endpoint = isVideo ? 'send-video' : 'send-photo';
+        const fieldName = isVideo ? 'video' : 'photo';
+
+        try {
+            const formData = new FormData();
+            formData.append(fieldName, file);
+            formData.append('threadId', this.currentIgThread);
+
+            const uploadUrl = `${this.API_URL}/api/ig/${userId}/${endpoint}`;
+            console.log('[IG Media] Uploading to:', uploadUrl);
+
+            const response = await fetch(uploadUrl, {
+                method: 'POST',
+                body: formData
+            });
+
+            const data = await response.json();
+
+            if (data.success) {
+                this.showToast('تم إرسال الملف بنجاح!', 'success');
+                // Refresh messages to show the sent media
+                await this.loadIgMessages(false);
+            } else {
+                this.showToast(data.error || 'فشل إرسال الملف', 'error');
+            }
+        } catch (err) {
+            console.error('Send media error:', err);
+            this.showToast('فشل في إرسال الملف', 'error');
+        }
+
+        // Clear file input
+        event.target.value = '';
+    }
+
+    // Refresh messages manually
+    async refreshIgMessages() {
+        await this.loadIgMessages(false);
+        this.showToast('تم التحديث', 'success');
+    }
+
+    // Close chat and go back to inbox
+    closeIgChat() {
+        // Stop message polling
+        this.stopIgPolling();
+
+        // Clear current thread
+        this.currentIgThread = null;
+        this.igMessagesData = [];
+
+        // Show inbox, hide chat
+        const inbox = document.getElementById('igInbox');
+        const chatView = document.getElementById('igChatView');
+        const searchBox = document.querySelector('#igInboxSection > div:nth-child(2)');
+
+        if (inbox) inbox.style.display = 'block';
+        if (searchBox) searchBox.style.display = 'block';
+        if (chatView) chatView.style.display = 'none';
+
+        // Re-render conversations from stored data or reload if empty
+        if (this.igConversations && this.igConversations.length > 0) {
+            console.log('[IG] Re-rendering', this.igConversations.length, 'conversations');
+            this.renderIgConversations(this.igConversations);
+        } else {
+            console.log('[IG] No stored conversations, reloading from API');
+            this.loadIgInbox();
+        }
+
+        // Restart inbox polling for new conversations
+        this.startIgInboxPolling();
+    }
+
+    // Start real-time polling
+    startIgPolling() {
+        this.stopIgPolling(); // Clear any existing polling
+
+        this.igPollingInterval = setInterval(async () => {
+            if (this.currentIgThread) {
+                await this.loadIgMessages(false);
+            }
+        }, 1000); // Poll every 1 second for near-instant updates
+    }
+
+
+    // Stop polling
+    stopIgPolling() {
+        if (this.igPollingInterval) {
+            clearInterval(this.igPollingInterval);
+            this.igPollingInterval = null;
+        }
+    }
+
+    // Start inbox polling for new conversations
+    startIgInboxPolling() {
+        this.stopIgInboxPolling();
+
+        this.igInboxPollingInterval = setInterval(async () => {
+            // Always poll to update unread counts and new conversations
+            await this.checkForNewConversations();
+        }, 2000); // Poll every 2 seconds for fast updates
+    }
+
+    // Stop inbox polling
+    stopIgInboxPolling() {
+        if (this.igInboxPollingInterval) {
+            clearInterval(this.igInboxPollingInterval);
+            this.igInboxPollingInterval = null;
+        }
+    }
+
+    // Check for new conversations and messages
+    async checkForNewConversations() {
+        // Use getIgUserId() for shared access (employees use admin's session)
+        const userId = this.getIgUserId();
+        if (!userId) return;
+
+        try {
+            const response = await fetch(`${this.API_URL}/api/ig/${userId}/inbox?limit=50`);
+            const data = await response.json();
+
+            if (!data.conversations) return;
+
+            const oldConversations = this.igConversations || [];
+            const oldMap = new Map(oldConversations.map(c => [c.id, c]));
+
+            // Check for new messages in conversations (by comparing lastMessage)
+            let hasNewMessage = false;
+            let newMessageConv = null;
+
+            for (const conv of data.conversations) {
+                const old = oldMap.get(conv.id);
+                // New conversation or new message (different lastMessage)
+                if (!old || (old.lastMessage !== conv.lastMessage && conv.unreadCount > 0)) {
+                    // Only notify if NOT currently viewing this chat
+                    if (this.currentIgThread !== conv.id) {
+                        hasNewMessage = true;
+                        newMessageConv = conv;
+                        break;
+                    }
+                }
+            }
+
+            // Play notification if new message and not in that chat
+            if (hasNewMessage && newMessageConv) {
+                this.playNotificationSound();
+                const preview = newMessageConv.lastMessage?.substring(0, 30) || 'رسالة جديدة';
+                this.showToast(`💬 ${newMessageConv.title}: ${preview}`, 'info');
+            }
+
+            // Always update stored conversations and re-render
+            this.igConversations = data.conversations;
+            this.renderIgConversations(data.conversations);
+
+        } catch (err) {
+            // Silent fail for polling
+        }
+    }
+
+    // Logout from Instagram
+    async logoutInstagramDirect() {
+        const userData = JSON.parse(localStorage.getItem('octobot_user') || '{}');
+        const userId = userData.id;
+        if (!userId) return;
+
+        try {
+            await fetch(`${this.API_URL}/api/ig/${userId}/logout`, { method: 'POST' });
+
+            // Stop all polling
+            this.stopIgPolling();
+            this.stopIgInboxPolling();
+
+            const loginSection = document.getElementById('igLoginSection');
+            const inboxSection = document.getElementById('igInboxSection');
+
+            if (loginSection) loginSection.style.display = 'block';
+            if (inboxSection) inboxSection.style.display = 'none';
+
+            const usernameInput = document.getElementById('igUsername');
+            const passwordInput = document.getElementById('igPassword');
+            if (usernameInput) usernameInput.value = '';
+            if (passwordInput) passwordInput.value = '';
+
+            this.showToast('تم تسجيل الخروج', 'info');
+        } catch (err) {
+            console.error('Instagram logout error:', err);
+        }
+    }
+
+    // Old methods kept for backward compatibility
+    async checkInstagramConnection() {
+        const connectSection = document.getElementById('instagramConnectSection');
+        const connectedSection = document.getElementById('instagramConnectedSection');
+        const pageSelector = document.getElementById('instagramPageSelector');
+        const statusDiv = document.getElementById('instagramStatus');
+        const inbox = document.getElementById('instagramInbox');
+
+        if (!connectSection || !connectedSection) return;
+
+        // Check if Facebook is connected and has pages
+        if (!window.fbIntegration?.isConnected() || this.fbPages.length === 0) {
+            connectSection.style.display = 'block';
+            connectedSection.style.display = 'none';
+            return;
+        }
+
+        // Use Facebook user ID from fbIntegration
+        const fbUserId = window.fbIntegration?.userId;
+        if (!fbUserId) {
+            connectSection.style.display = 'block';
+            connectedSection.style.display = 'none';
+            return;
+        }
+
+        // Show connected section
+        connectSection.style.display = 'none';
+        connectedSection.style.display = 'block';
+
+        // Populate page selector dropdown
+        if (pageSelector && pageSelector.options.length <= 1) {
+            this.fbPages.forEach(page => {
+                const option = document.createElement('option');
+                option.value = page.id;
+                option.textContent = page.name;
+                pageSelector.appendChild(option);
+            });
+        }
+
+        // Clear status and inbox initially
+        if (statusDiv) statusDiv.innerHTML = '<p style="color:var(--text-secondary);text-align:center;padding:20px;"><i class="fas fa-hand-pointer"></i> اختر صفحة من القائمة أعلاه لعرض رسائل Instagram</p>';
+        if (inbox) inbox.innerHTML = '';
+    }
+
+    // Handle page selection change
+    async onInstagramPageChange() {
+        const pageSelector = document.getElementById('instagramPageSelector');
+        const statusDiv = document.getElementById('instagramStatus');
+        const inbox = document.getElementById('instagramInbox');
+
+        if (!pageSelector) return;
+
+        const pageId = pageSelector.value;
+        if (!pageId) {
+            if (statusDiv) statusDiv.innerHTML = '<p style="color:var(--text-secondary);text-align:center;padding:20px;"><i class="fas fa-hand-pointer"></i> اختر صفحة من القائمة أعلاه لعرض رسائل Instagram</p>';
+            if (inbox) inbox.innerHTML = '';
+            return;
+        }
+
+        const fbUserId = window.fbIntegration?.userId;
+        if (!fbUserId) return;
+
+        if (statusDiv) {
+            statusDiv.innerHTML = '<div class="loading-spinner"><div class="spinner"></div></div>';
+        }
+
+        try {
+            const response = await fetch(`${this.API_URL}/api/instagram/${fbUserId}/${pageId}/account`);
+            const data = await response.json();
+
+            if (data.connected && statusDiv) {
+                statusDiv.innerHTML = `
+                    <div style="background:rgba(16,185,129,0.1);border:1px solid #10b981;border-radius:12px;padding:16px;display:flex;align-items:center;gap:16px;">
+                        <img src="${data.account.profilePicture || ''}" style="width:56px;height:56px;border-radius:50%;border:2px solid #E1306C;" onerror="this.style.display='none'">
+                        <div>
+                            <h3 style="color:#10b981;margin:0;">@${data.account.username}</h3>
+                            <p style="color:var(--text-secondary);margin:5px 0 0 0;">${this.formatNumber(data.account.followers)} متابع</p>
+                        </div>
+                    </div>`;
+                this.loadInstagramConversations(pageId);
+            } else if (statusDiv) {
+                const pageName = this.fbPages.find(p => p.id === pageId)?.name || 'هذه الصفحة';
+                statusDiv.innerHTML = `
+                    <div style="background:rgba(245,158,11,0.1);border:1px solid #f59e0b;border-radius:12px;padding:20px;text-align:center;">
+                        <i class="fab fa-instagram" style="font-size:48px;color:#f59e0b;margin-bottom:15px;"></i>
+                        <h3 style="color:#f59e0b;margin-bottom:10px;">لا يوجد حساب Instagram مرتبط</h3>
+                        <p style="color:var(--text-secondary);margin-bottom:15px;">صفحة "${pageName}" ليس لديها حساب Instagram Business مرتبط.</p>
+                        <p style="color:var(--text-secondary);font-size:13px;">لربط Instagram: إعدادات الصفحة ← Instagram ← ربط حساب</p>
+                    </div>`;
+                if (inbox) inbox.innerHTML = '';
+            }
+        } catch (err) {
+            if (statusDiv) {
+                statusDiv.innerHTML = '<p style="color:var(--error);text-align:center;">❌ فشل في جلب معلومات Instagram</p>';
+            }
+        }
+    }
+
+    async loadInstagramConversations(pageId, append = false) {
+        const inbox = document.getElementById('instagramInbox');
+        const searchBox = document.getElementById('instagramSearchBox');
+        if (!inbox) return;
+
+        // Store current pageId for pagination
+        this.currentInstagramPageId = pageId;
+
+        // Show search box
+        if (searchBox) searchBox.style.display = 'block';
+
+        if (!append) {
+            inbox.innerHTML = '<div class="loading-spinner"><div class="spinner"></div></div>';
+            this.instagramConversationsCursor = null;
+        }
+
+        const fbUserId = window.fbIntegration?.userId;
+        if (!fbUserId) return;
+
+        try {
+            let url = `${this.API_URL}/api/instagram/${fbUserId}/${pageId}/conversations?limit=100`;
+            if (this.instagramConversationsCursor) {
+                url += `&after=${this.instagramConversationsCursor}`;
+            }
+
+            const response = await fetch(url);
+            const data = await response.json();
+
+            if (!data.conversations || data.conversations.length === 0) {
+                if (!append) {
+                    inbox.innerHTML = '<p style="text-align:center;color:var(--text-secondary);padding:20px;">لا توجد محادثات</p>';
+                }
+                return;
+            }
+
+            // Store cursor for next page
+            this.instagramConversationsCursor = data.nextCursor;
+
+            const conversationsHtml = data.conversations.map(c => `
+                <div class="conversation-item" style="padding:12px;border-bottom:1px solid var(--border-color);cursor:pointer;display:flex;justify-content:space-between;align-items:center;" onclick="app.loadInstagramMessages('${pageId}', '${c.id}', '${c.participant}')">
+                    <div style="display:flex;align-items:center;gap:10px;">
+                        <i class="fab fa-instagram" style="color:#E1306C;font-size:24px;"></i>
+                        <div>
+                            <div style="font-weight:600;">${c.participant}</div>
+                            <small style="color:var(--text-secondary);">${c.lastMessage ? c.lastMessage.substring(0, 40) + '...' : ''}</small>
+                        </div>
+                    </div>
+                    <div style="text-align:left;">
+                        <small style="color:var(--text-secondary);">${new Date(c.updatedTime).toLocaleDateString('ar-EG')}</small>
+                        <div style="font-size:10px;color:var(--text-secondary);direction:ltr;">ID: ${c.participantId ? c.participantId.substring(0, 10) + '...' : 'N/A'}</div>
+                    </div>
+                </div>
+            `).join('');
+
+            // Load More button
+            const loadMoreHtml = data.hasMore ? `
+                <div style="padding:20px;text-align:center;">
+                    <button onclick="app.loadMoreInstagramConversations()" class="btn btn-secondary" id="instagramLoadMoreBtn" style="padding:12px 30px;">
+                        <i class="fas fa-arrow-down"></i> تحميل المزيد
+                    </button>
+                </div>
+            ` : '';
+
+            if (append) {
+                // Remove old Load More button and append new conversations
+                const oldBtn = document.getElementById('instagramLoadMoreBtn')?.parentElement;
+                if (oldBtn) oldBtn.remove();
+                inbox.innerHTML += conversationsHtml + loadMoreHtml;
+            } else {
+                inbox.innerHTML = conversationsHtml + loadMoreHtml;
+            }
+
+        } catch (err) {
+            console.error('Instagram conversations error:', err);
+            if (!append) {
+                inbox.innerHTML = '<p style="color:var(--error);text-align:center;padding:20px;">فشل في تحميل المحادثات</p>';
+            }
+        }
+    }
+
+    async loadMoreInstagramConversations() {
+        if (this.currentInstagramPageId) {
+            await this.loadInstagramConversations(this.currentInstagramPageId, true);
+        }
+    }
+
+    // Search Instagram conversations
+    async searchInstagramConversations() {
+        const searchInput = document.getElementById('instagramSearchInput');
+        const inbox = document.getElementById('instagramInbox');
+        const pageId = this.currentInstagramPageId;
+
+        if (!searchInput || !inbox || !pageId) return;
+
+        const query = searchInput.value.trim();
+        if (query.length < 2) {
+            this.showToast('أدخل على الأقل حرفين للبحث', 'warning');
+            return;
+        }
+
+        const fbUserId = window.fbIntegration?.userId;
+        if (!fbUserId) return;
+
+        inbox.innerHTML = '<div class="loading-spinner"><div class="spinner"></div></div>';
+
+        try {
+            const response = await fetch(`${this.API_URL}/api/instagram/${fbUserId}/${pageId}/search?query=${encodeURIComponent(query)}`);
+            const data = await response.json();
+
+            if (!data.conversations || data.conversations.length === 0) {
+                inbox.innerHTML = `<p style="text-align:center;color:var(--text-secondary);padding:20px;">لم يتم العثور على نتائج لـ "${query}"</p>`;
+                return;
+            }
+
+            inbox.innerHTML = data.conversations.map(c => `
+                <div class="conversation-item" style="padding:12px;border-bottom:1px solid var(--border-color);cursor:pointer;display:flex;justify-content:space-between;align-items:center;" onclick="app.loadInstagramMessages('${pageId}', '${c.id}', '${c.participant}')">
+                    <div style="display:flex;align-items:center;gap:10px;">
+                        <i class="fab fa-instagram" style="color:#E1306C;font-size:24px;"></i>
+                        <div>
+                            <div style="font-weight:600;">${c.participant}</div>
+                            <small style="color:var(--text-secondary);">${c.lastMessage ? c.lastMessage.substring(0, 40) + '...' : ''}</small>
+                        </div>
+                    </div>
+                    <div style="text-align:left;">
+                        <small style="color:var(--text-secondary);">${new Date(c.updatedTime).toLocaleDateString('ar-EG')}</small>
+                        <div style="font-size:10px;color:var(--text-secondary);direction:ltr;">ID: ${c.participantId || 'N/A'}</div>
+                    </div>
+                </div>
+            `).join('');
+
+        } catch (err) {
+            console.error('Instagram search error:', err);
+            inbox.innerHTML = '<p style="color:var(--error);text-align:center;padding:20px;">فشل في البحث</p>';
+        }
+    }
+
+    // Clear Instagram search
+    clearInstagramSearch() {
+        const searchInput = document.getElementById('instagramSearchInput');
+        if (searchInput) searchInput.value = '';
+
+        if (this.currentInstagramPageId) {
+            this.loadInstagramConversations(this.currentInstagramPageId);
+        }
+    }
+
+    // Handle Enter key in search
+    onInstagramSearchKeyup(event) {
+        if (event.key === 'Enter') {
+            this.searchInstagramConversations();
+        }
+    }
+
+    // ============= WHATSAPP METHODS =============
+    async initWhatsApp() {
+        const userData = JSON.parse(localStorage.getItem('octobot_user') || '{}');
+        const userId = userData.id;
+        if (!userId) return;
+
+        const statusDiv = document.getElementById('whatsappStatus');
+        const qrDiv = document.getElementById('whatsappQrCode');
+        const btn = document.getElementById('whatsappConnectBtn');
+
+        btn.disabled = true;
+        btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> جاري الاتصال...';
+        statusDiv.innerHTML = '';
+
+        try {
+            await fetch(`${this.API_URL}/api/whatsapp/${userId}/init`, { method: 'POST' });
+            this.pollWhatsAppStatus(userId);
+        } catch (err) {
+            statusDiv.innerHTML = '<p style="color:var(--error);">فشل في بدء الاتصال</p>';
+            btn.disabled = false;
+            btn.innerHTML = '<i class="fab fa-whatsapp"></i> ربط واتساب';
+        }
+    }
+
+    async pollWhatsAppStatus(userId) {
+        const statusDiv = document.getElementById('whatsappStatus');
+        const qrDiv = document.getElementById('whatsappQrCode');
+        const qrSection = document.getElementById('whatsappQrSection');
+        const inboxSection = document.getElementById('whatsappInbox');
+        const btn = document.getElementById('whatsappConnectBtn');
+
+        const check = async () => {
+            try {
+                const response = await fetch(`${this.API_URL}/api/whatsapp/${userId}/status`);
+                const data = await response.json();
+
+                if (data.status === 'connected') {
+                    qrSection.style.display = 'none';
+                    inboxSection.style.display = 'block';
+                    this.loadWhatsAppChats(userId);
+                    return; // Stop polling
+                } else if (data.qrCode) {
+                    qrDiv.innerHTML = `<img src="${data.qrCode}" style="max-width:256px;border-radius:8px;">`;
+                    statusDiv.innerHTML = '<p style="color:var(--warning);">📱 امسح الكود بواتساب</p>';
+                } else if (data.status === 'initializing') {
+                    statusDiv.innerHTML = '<p>⏳ جاري التهيئة...</p>';
+                }
+
+                setTimeout(check, 2000);
+            } catch (err) {
+                statusDiv.innerHTML = '<p style="color:var(--error);">خطأ في التحقق</p>';
+            }
+        };
+
+        check();
+    }
+
+    async checkWhatsAppStatus() {
+        const userData = JSON.parse(localStorage.getItem('octobot_user') || '{}');
+        const userId = userData.id;
+        if (!userId) return;
+
+        const statusDiv = document.getElementById('whatsappStatus');
+        const qrSection = document.getElementById('whatsappQrSection');
+        const inboxSection = document.getElementById('whatsappInbox');
+        const btn = document.getElementById('whatsappConnectBtn');
+
+        // Show loading state while checking
+        statusDiv.innerHTML = '<p>⏳ جاري التحقق من حالة الاتصال...</p>';
+
+        // Clear any cached data to ensure fresh messages from WhatsApp
+        this.waCachedChats = null;
+        this.waMessagesData = [];
+
+        try {
+            const response = await fetch(`${this.API_URL}/api/whatsapp/${userId}/status`);
+            const data = await response.json();
+
+            if (data.status === 'connected') {
+                // Already connected - show inbox immediately
+                qrSection.style.display = 'none';
+                inboxSection.style.display = 'block';
+                this.loadWhatsAppChats(userId);
+            } else {
+                // Not connected - try to auto-initialize (LocalAuth will restore session if exists)
+                statusDiv.innerHTML = '<p>🔄 جاري إعادة الاتصال...</p>';
+                btn.disabled = true;
+
+                try {
+                    await fetch(`${this.API_URL}/api/whatsapp/${userId}/init`, { method: 'POST' });
+                    // Poll for status (will auto-connect if LocalAuth session exists)
+                    this.pollWhatsAppStatus(userId);
+                } catch (initErr) {
+                    statusDiv.innerHTML = '<p style="color:var(--text-secondary);">اضغط على زر الاتصال لربط واتساب</p>';
+                    btn.disabled = false;
+                    btn.innerHTML = '<i class="fab fa-whatsapp"></i> ربط واتساب';
+                }
+            }
+        } catch (err) {
+            console.log('WhatsApp status check failed, trying to init...');
+            // Try to initialize anyway
+            try {
+                await fetch(`${this.API_URL}/api/whatsapp/${userId}/init`, { method: 'POST' });
+                this.pollWhatsAppStatus(userId);
+            } catch (initErr) {
+                statusDiv.innerHTML = '<p style="color:var(--text-secondary);">اضغط على زر الاتصال لربط واتساب</p>';
+            }
+        }
+    }
+
+    async loadWhatsAppChats(userId, showLoading = true) {
+        const inbox = document.getElementById('whatsappInbox');
+
+        // Only show loading spinner if no cached data and showLoading is true
+        if (showLoading && !this.waCachedChats) {
+            inbox.innerHTML = `
+                <div style="padding:16px;border-bottom:1px solid var(--border-color);display:flex;justify-content:space-between;align-items:center;">
+                    <h3><i class="fab fa-whatsapp" style="color:#25D366;"></i> المحادثات</h3>
+                    <button onclick="app.logoutWhatsApp('${userId}')" class="btn btn-secondary" style="font-size:12px;padding:8px 12px;">
+                        <i class="fas fa-sign-out-alt"></i> قطع الاتصال
+                    </button>
+                </div>
+                <div id="whatsappChatsList"><div class="loading-spinner"><div class="spinner"></div></div></div>`;
+        } else if (!document.getElementById('whatsappChatsList')) {
+            // Container doesn't exist, create it (but use cached data immediately)
+            inbox.innerHTML = `
+                <div style="padding:16px;border-bottom:1px solid var(--border-color);display:flex;justify-content:space-between;align-items:center;">
+                    <h3><i class="fab fa-whatsapp" style="color:#25D366;"></i> المحادثات</h3>
+                    <button onclick="app.logoutWhatsApp('${userId}')" class="btn btn-secondary" style="font-size:12px;padding:8px 12px;">
+                        <i class="fas fa-sign-out-alt"></i> قطع الاتصال
+                    </button>
+                </div>
+                <div id="whatsappChatsList"></div>`;
+
+            // Show cached data immediately while fetching fresh data
+            if (this.waCachedChats && this.waCachedChats.length > 0) {
+                this.renderWaChatsList(this.waCachedChats);
+            }
+        }
+
+        try {
+            const response = await fetch(`${this.API_URL}/api/whatsapp/${userId}/chats`);
+            const data = await response.json();
+
+            const list = document.getElementById('whatsappChatsList');
+            if (!list) return;
+
+            if (!data.chats || data.chats.length === 0) {
+                list.innerHTML = '<p style="text-align:center;padding:20px;color:var(--text-secondary);">لا توجد محادثات</p>';
+                return;
+            }
+
+            // Store userId and cache chats for later use
+            this.waInboxUserId = userId;
+            this.waCachedChats = data.chats;
+
+            // Render the chats list
+            this.renderWaChatsList(data.chats);
+
+            // Start SSE for real-time inbox updates (only if not already running)
+            if (!this.waInboxEventSource) {
+                this.startWaInboxSSE(userId);
+            }
+        } catch (err) {
+            const list = document.getElementById('whatsappChatsList');
+            if (list && !this.waCachedChats) {
+                list.innerHTML = '<p style="color:var(--error);padding:20px;">فشل تحميل المحادثات</p>';
+            }
+        }
+    }
+
+    // Render WhatsApp chats list
+    renderWaChatsList(chats) {
+        const list = document.getElementById('whatsappChatsList');
+        if (!list) return;
+
+        list.innerHTML = chats.slice(0, 50).map(c => {
+            const chatName = (c.name || c.id || 'محادثة').replace(/'/g, "\\'");
+
+            // Profile picture placeholder with data attribute for lazy loading
+            const avatarHtml = `<div class="wa-avatar" data-chat-id="${c.id}" style="width:45px;height:45px;border-radius:50%;background:linear-gradient(135deg,#25D366,#128C7E);display:flex;align-items:center;justify-content:center;color:white;font-size:18px;font-weight:600;overflow:hidden;">
+                       ${c.isGroup ? '<i class="fas fa-users"></i>' : (c.name ? c.name.charAt(0).toUpperCase() : '?')}
+                   </div>`;
+
+            return `
+            <div class="conversation-item" data-chat-id="${c.id}" style="padding:12px;border-bottom:1px solid var(--border-color);cursor:pointer;transition:background 0.2s;" 
+                 onclick="app.openWhatsAppChat('${c.id}', '${chatName}')"
+                 onmouseover="this.style.background='rgba(37,211,102,0.1)'"
+                 onmouseout="this.style.background='transparent'">
+                <div style="display:flex;align-items:center;gap:10px;">
+                    ${avatarHtml}
+                    <div style="flex:1;min-width:0;">
+                        <div style="font-weight:600;display:flex;align-items:center;gap:6px;">
+                            ${c.name || 'غير معروف'}
+                            ${c.isGroup ? '<i class="fas fa-users" style="font-size:10px;color:var(--text-secondary);"></i>' : ''}
+                        </div>
+                        <small style="color:var(--text-secondary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:200px;display:block;">${c.lastMessage || ''}</small>
+                    </div>
+                    <div style="display:flex;flex-direction:column;align-items:flex-end;gap:4px;">
+                        ${c.timestamp ? `<small style="color:var(--text-secondary);font-size:11px;">${this.formatWaTime(c.timestamp)}</small>` : ''}
+                        ${c.unreadCount > 0 ? `<span class="wa-unread-badge" style="background:#25D366;color:white;padding:2px 8px;border-radius:12px;font-size:12px;min-width:20px;text-align:center;">${c.unreadCount}</span>` : ''}
+                    </div>
+                </div>
+            </div>
+        `;
+        }).join('');
+
+        // Lazy load profile pictures in background
+        this.loadChatProfilePictures(chats.slice(0, 50));
+    }
+
+    // Lazy load profile pictures for chat list
+    async loadChatProfilePictures(chats) {
+        const userData = JSON.parse(localStorage.getItem('octobot_user') || '{}');
+        const userId = userData.id;
+        if (!userId) return;
+
+        // Load profile pictures one by one to not overload
+        for (const chat of chats) {
+            try {
+                const response = await fetch(`${this.API_URL}/api/whatsapp/${userId}/profile-pic/${encodeURIComponent(chat.id)}`);
+                const data = await response.json();
+
+                if (data.profilePicUrl) {
+                    const avatarEl = document.querySelector(`.wa-avatar[data-chat-id="${chat.id}"]`);
+                    if (avatarEl) {
+                        const fallback = chat.isGroup ? '👥' : (chat.name ? chat.name.charAt(0).toUpperCase() : '?');
+                        avatarEl.innerHTML = `<img src="${data.profilePicUrl}" style="width:100%;height:100%;object-fit:cover;" onerror="this.outerHTML='${fallback}'">`;
+                    }
+                }
+            } catch (e) {
+                // Ignore errors for profile pics
+            }
+        }
+    }
+
+    async logoutWhatsApp(userId) {
+        if (!confirm('هل تريد قطع اتصال واتساب؟')) return;
+
+        this.stopWaSSE();
+        this.stopWaInboxSSE();
+        this.stopWaPolling();
+        this.stopWaInboxPolling();
+
+        await fetch(`${this.API_URL}/api/whatsapp/${userId}/logout`, { method: 'POST' });
+        document.getElementById('whatsappQrSection').style.display = 'block';
+        document.getElementById('whatsappInbox').style.display = 'none';
+        document.getElementById('whatsappQrCode').innerHTML = '';
+        document.getElementById('whatsappStatus').innerHTML = '';
+        document.getElementById('whatsappConnectBtn').disabled = false;
+        document.getElementById('whatsappConnectBtn').innerHTML = '<i class="fab fa-whatsapp"></i> ربط واتساب';
+    }
+
+    // Format WhatsApp timestamp
+    formatWaTime(timestamp) {
+        if (!timestamp) return '';
+        const date = new Date(timestamp * 1000);
+        const now = new Date();
+        const isToday = date.toDateString() === now.toDateString();
+
+        if (isToday) {
+            return date.toLocaleTimeString('ar-EG', { hour: '2-digit', minute: '2-digit' });
+        }
+        return date.toLocaleDateString('ar-EG', { day: 'numeric', month: 'short' });
+    }
+
+    // Open a WhatsApp chat
+    async openWhatsAppChat(chatId, chatName) {
+        // Stop inbox SSE when entering a chat
+        this.stopWaInboxSSE();
+
+        this.currentWaChat = chatId;
+        this.currentWaChatName = chatName;
+        this.waMessagesData = [];
+
+        const inbox = document.getElementById('whatsappInbox');
+        const userData = JSON.parse(localStorage.getItem('octobot_user') || '{}');
+        const userId = userData.id;
+
+        // Show loading first
+        inbox.innerHTML = '<div class="loading-spinner"><div class="spinner"></div></div>';
+
+        // Fetch contact info (profile pic, phone number)
+        let contactInfo = { name: chatName, phoneNumber: chatId.replace('@c.us', ''), profilePicUrl: null };
+        try {
+            const infoRes = await fetch(`${this.API_URL}/api/whatsapp/${userId}/chat-info/${encodeURIComponent(chatId)}`);
+            const infoData = await infoRes.json();
+            if (!infoData.error) {
+                contactInfo = infoData;
+            }
+        } catch (e) {
+            console.log('Could not fetch contact info');
+        }
+
+        // Format phone number for display
+        const displayPhone = contactInfo.phoneNumber ? `+${contactInfo.phoneNumber}` : '';
+
+        // Show chat view with contact info
+        inbox.innerHTML = `
+            <div id="waChatView" style="display:flex;flex-direction:column;height:100%;max-height:calc(100vh - 100px);">
+                <!-- Chat Header -->
+                <div style="padding:12px 16px;background:linear-gradient(135deg,#25D366,#128C7E);display:flex;align-items:center;gap:12px;">
+                    <button onclick="app.closeWhatsAppChat()" style="background:rgba(255,255,255,0.2);border:none;color:white;width:36px;height:36px;border-radius:50%;cursor:pointer;display:flex;align-items:center;justify-content:center;">
+                        <i class="fas fa-arrow-right"></i>
+                    </button>
+                    ${contactInfo.profilePicUrl
+                ? `<img src="${contactInfo.profilePicUrl}" style="width:45px;height:45px;border-radius:50%;border:2px solid rgba(255,255,255,0.3);object-fit:cover;" onerror="this.style.display='none';this.nextElementSibling.style.display='flex';">
+                           <div style="width:45px;height:45px;border-radius:50%;background:rgba(255,255,255,0.2);display:none;align-items:center;justify-content:center;color:white;font-weight:600;font-size:18px;">${(contactInfo.name || '?').charAt(0).toUpperCase()}</div>`
+                : `<div style="width:45px;height:45px;border-radius:50%;background:rgba(255,255,255,0.2);display:flex;align-items:center;justify-content:center;color:white;font-weight:600;font-size:18px;">${(contactInfo.name || '?').charAt(0).toUpperCase()}</div>`
+            }
+                    <div style="flex:1;color:white;">
+                        <div style="font-weight:600;font-size:15px;">${contactInfo.name || 'محادثة'}</div>
+                        <small style="opacity:0.9;font-size:12px;direction:ltr;display:block;">${displayPhone}</small>
+                    </div>
+                    <button onclick="app.refreshWaMessages()" style="background:rgba(255,255,255,0.2);border:none;color:white;width:36px;height:36px;border-radius:50%;cursor:pointer;">
+                        <i class="fas fa-sync-alt"></i>
+                    </button>
+                </div>
+                
+                <!-- Messages Container with WhatsApp-style doodle background -->
+                <div id="waMessages" style="flex:1;overflow-y:auto;padding:16px;background-color:#ECE5DD;background-image:url('data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 200 200%22%3E%3Cdefs%3E%3Cstyle%3E.d%7Bfill:%23d4cbc2;opacity:0.4%7D%3C/style%3E%3C/defs%3E%3Cpath class=%22d%22 d=%22M20,20 L25,15 L30,20 L25,25 Z%22/%3E%3Ccircle class=%22d%22 cx=%2250%22 cy=%2230%22 r=%224%22/%3E%3Cpath class=%22d%22 d=%22M80,15 Q85,25 90,15%22 fill=%22none%22 stroke=%22%23d4cbc2%22 stroke-width=%222%22 opacity=%220.4%22/%3E%3Crect class=%22d%22 x=%22110%22 y=%2218%22 width=%228%22 height=%228%22 rx=%221%22/%3E%3Cpath class=%22d%22 d=%22M150,20 L155,28 L145,28 Z%22/%3E%3Ccircle class=%22d%22 cx=%22180%22 cy=%2225%22 r=%223%22/%3E%3Cpath class=%22d%22 d=%22M15,60 L20,55 L25,60%22 fill=%22none%22 stroke=%22%23d4cbc2%22 stroke-width=%222%22 opacity=%220.4%22/%3E%3Crect class=%22d%22 x=%2245%22 y=%2255%22 width=%2210%22 height=%226%22 rx=%221%22/%3E%3Cpath class=%22d%22 d=%22M85,50 Q90,60 95,50%22 fill=%22none%22 stroke=%22%23d4cbc2%22 stroke-width=%222%22 opacity=%220.4%22/%3E%3Ccircle class=%22d%22 cx=%22120%22 cy=%2260%22 r=%225%22/%3E%3Cpath class=%22d%22 d=%22M150,55 L158,55 L154,63 Z%22/%3E%3Crect class=%22d%22 x=%22175%22 y=%2252%22 width=%227%22 height=%2210%22 rx=%221%22/%3E%3Cpath class=%22d%22 d=%22M25,95 L30,90 L35,95 L30,100 Z%22/%3E%3Ccircle class=%22d%22 cx=%2260%22 cy=%2295%22 r=%224%22/%3E%3Cpath class=%22d%22 d=%22M90,88 L95,95 L85,95 Z%22/%3E%3Crect class=%22d%22 x=%22115%22 y=%2290%22 width=%229%22 height=%229%22 rx=%222%22/%3E%3Cpath class=%22d%22 d=%22M145,90 Q150,100 155,90%22 fill=%22none%22 stroke=%22%23d4cbc2%22 stroke-width=%222%22 opacity=%220.4%22/%3E%3Ccircle class=%22d%22 cx=%22180%22 cy=%2292%22 r=%223%22/%3E%3Crect class=%22d%22 x=%2218%22 y=%22125%22 width=%228%22 height=%228%22 rx=%221%22/%3E%3Cpath class=%22d%22 d=%22M50,125 L55,133 L45,133 Z%22/%3E%3Ccircle class=%22d%22 cx=%2285%22 cy=%22130%22 r=%224%22/%3E%3Cpath class=%22d%22 d=%22M115,125 L120,120 L125,125%22 fill=%22none%22 stroke=%22%23d4cbc2%22 stroke-width=%222%22 opacity=%220.4%22/%3E%3Crect class=%22d%22 x=%22148%22 y=%22122%22 width=%2210%22 height=%227%22 rx=%221%22/%3E%3Cpath class=%22d%22 d=%22M180,125 L185,130 L180,135 L175,130 Z%22/%3E%3Cpath class=%22d%22 d=%22M20,165 Q25,175 30,165%22 fill=%22none%22 stroke=%22%23d4cbc2%22 stroke-width=%222%22 opacity=%220.4%22/%3E%3Ccircle class=%22d%22 cx=%2255%22 cy=%22170%22 r=%224%22/%3E%3Crect class=%22d%22 x=%2282%22 y=%22165%22 width=%228%22 height=%228%22 rx=%221%22/%3E%3Cpath class=%22d%22 d=%22M120,162 L125,170 L115,170 Z%22/%3E%3Ccircle class=%22d%22 cx=%22150%22 cy=%22168%22 r=%223%22/%3E%3Cpath class=%22d%22 d=%22M178,165 L183,160 L188,165%22 fill=%22none%22 stroke=%22%23d4cbc2%22 stroke-width=%222%22 opacity=%220.4%22/%3E%3C/svg%3E');background-size:200px;">
+                    <div class="loading-spinner"><div class="spinner"></div></div>
+                </div>
+                
+                <!-- Message Input -->
+                <form onsubmit="app.sendWhatsAppMessage(event)" style="padding:12px;background:var(--bg-card);border-top:1px solid var(--border-color);display:flex;gap:8px;">
+                    <input type="text" id="waMessageInput" placeholder="اكتب رسالة..." 
+                           style="flex:1;padding:12px 16px;border:1px solid var(--border-color);border-radius:24px;background:var(--bg-main);color:var(--text-primary);font-size:14px;outline:none;"
+                           autocomplete="off">
+                    <button type="submit" style="width:44px;height:44px;border-radius:50%;background:#25D366;border:none;color:white;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:transform 0.2s;">
+                        <i class="fas fa-paper-plane"></i>
+                    </button>
+                </form>
+            </div>
+        `;
+
+        // Load messages
+        await this.loadWhatsAppMessages(true);
+
+        // Setup scroll listener for loading older messages
+        this.setupWaMessagesScroll();
+
+        // Start SSE for real-time message updates (no scroll jumping)
+        this.startWaSSE();
+    }
+
+    // Load WhatsApp messages
+    async loadWhatsAppMessages(showLoading = false, loadOlder = false) {
+        const userData = JSON.parse(localStorage.getItem('octobot_user') || '{}');
+        const userId = userData.id;
+        if (!userId || !this.currentWaChat) return;
+
+        const container = document.getElementById('waMessages');
+        if (!container) return;
+
+        // Initialize pagination state if not exists
+        if (!this.waMessagesPagination) {
+            this.waMessagesPagination = {
+                offset: 0,
+                hasMore: true,
+                loading: false
+            };
+        }
+
+        // Prevent duplicate loading
+        if (this.waMessagesPagination.loading) return;
+
+        // Save scroll position BEFORE any changes
+        const previousScrollTop = container.scrollTop;
+        const previousScrollHeight = container.scrollHeight;
+
+        // Check if user is at the very bottom (within 50px)
+        const isAtBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 50;
+
+        if (showLoading && !loadOlder) {
+            container.innerHTML = '<div class="loading-spinner"><div class="spinner"></div></div>';
+            this.waMessagesPagination = { offset: 0, hasMore: true, loading: false };
+            this.waMessagesData = [];
+        }
+
+        // Show loading indicator at top when loading older messages
+        if (loadOlder && this.waMessagesPagination.hasMore) {
+            this.waMessagesPagination.loading = true;
+            const loadingIndicator = document.createElement('div');
+            loadingIndicator.id = 'waLoadingOlder';
+            loadingIndicator.innerHTML = '<div style="text-align:center;padding:10px;"><div class="spinner" style="width:24px;height:24px;margin:0 auto;"></div><small style="color:#888;">جاري تحميل الرسائل القديمة...</small></div>';
+            container.insertBefore(loadingIndicator, container.firstChild);
+        }
+
+        try {
+            // Load only 50 messages with offset for pagination
+            const offset = loadOlder ? this.waMessagesData.length : 0;
+            const response = await fetch(`${this.API_URL}/api/whatsapp/${userId}/messages/${encodeURIComponent(this.currentWaChat)}?limit=50&offset=${offset}`);
+            const data = await response.json();
+
+            // Remove loading indicator
+            const loadingEl = document.getElementById('waLoadingOlder');
+            if (loadingEl) loadingEl.remove();
+
+            if (data.messages) {
+                if (loadOlder) {
+                    // Prepend older messages
+                    const newMessages = data.messages.filter(m => !this.waMessagesData.find(existing => existing.id === m.id));
+                    this.waMessagesData = [...newMessages, ...this.waMessagesData];
+                    this.waMessagesPagination.hasMore = newMessages.length >= 50;
+                } else {
+                    this.waMessagesData = data.messages;
+                    this.waMessagesPagination.hasMore = data.messages.length >= 50;
+                }
+
+                this.renderWhatsAppMessages();
+
+                // Handle scroll position
+                if (showLoading) {
+                    // First load - always scroll to bottom
+                    container.scrollTop = container.scrollHeight;
+                } else if (loadOlder) {
+                    // Loading older messages - maintain relative position
+                    const newScrollHeight = container.scrollHeight;
+                    container.scrollTop = newScrollHeight - previousScrollHeight + previousScrollTop;
+                } else if (isAtBottom) {
+                    // Polling update - only scroll to bottom if user was already at bottom
+                    container.scrollTop = container.scrollHeight;
+                }
+                // Otherwise: do nothing - preserve user's scroll position
+            }
+        } catch (err) {
+            console.error('Error loading WA messages:', err);
+            const loadingEl = document.getElementById('waLoadingOlder');
+            if (loadingEl) loadingEl.remove();
+
+            if (showLoading) {
+                container.innerHTML = '<p style="text-align:center;color:var(--error);padding:20px;">فشل تحميل الرسائل</p>';
+            }
+        } finally {
+            this.waMessagesPagination.loading = false;
+        }
+    }
+
+    // Setup scroll listener for infinite scroll (older messages)
+    setupWaMessagesScroll() {
+        const container = document.getElementById('waMessages');
+        if (!container || container.dataset.scrollSetup) return;
+
+        container.dataset.scrollSetup = 'true';
+        container.addEventListener('scroll', () => {
+            // When scrolled to top, load older messages
+            if (container.scrollTop < 100 && this.waMessagesPagination?.hasMore && !this.waMessagesPagination?.loading) {
+                this.loadWhatsAppMessages(false, true);
+            }
+        });
+    }
+
+
+    // Render WhatsApp messages
+    renderWhatsAppMessages() {
+        const container = document.getElementById('waMessages');
+        if (!container) return;
+
+        if (!this.waMessagesData || this.waMessagesData.length === 0) {
+            container.innerHTML = '<p style="text-align:center;color:var(--text-secondary);padding:40px;">لا توجد رسائل بعد<br><small>ابدأ المحادثة الآن!</small></p>';
+            return;
+        }
+
+        // Use messages in the order received from server (which is the correct WhatsApp order)
+        // DO NOT sort by timestamp - the server already provides the correct order
+        const messagesToRender = this.waMessagesData;
+
+        // Debug log
+        console.log('[WA Render] Messages count:', messagesToRender.length);
+        if (messagesToRender.length > 0) {
+            console.log('[WA Render] First msg:', messagesToRender[0].body?.substring(0, 20), 'fromMe:', messagesToRender[0].fromMe);
+            console.log('[WA Render] Last msg:', messagesToRender[messagesToRender.length - 1].body?.substring(0, 20), 'fromMe:', messagesToRender[messagesToRender.length - 1].fromMe);
+        }
+
+        const messagesHtml = messagesToRender.map(msg => {
+            const isMe = msg.fromMe;
+            const time = this.formatWaTime(msg.timestamp);
+
+            // Handle different message types
+            let content = '';
+            if (msg.type === 'image' || msg.hasMedia) {
+                content = `<div style="margin-bottom:4px;"><i class="fas fa-image"></i> صورة</div>${msg.body || ''}`;
+            } else if (msg.type === 'video') {
+                content = `<div style="margin-bottom:4px;"><i class="fas fa-video"></i> فيديو</div>${msg.body || ''}`;
+            } else if (msg.type === 'audio' || msg.type === 'ptt') {
+                content = `<div><i class="fas fa-microphone"></i> رسالة صوتية</div>`;
+            } else if (msg.type === 'document') {
+                content = `<div><i class="fas fa-file"></i> مستند</div>`;
+            } else if (msg.type === 'sticker') {
+                content = `<div style="font-size:48px;">🎨</div>`;
+            } else {
+                content = msg.body || '';
+            }
+
+            // For group messages from others, show sender avatar and name
+            // Check if this is a group message (has author field) AND not from me
+            const hasGroupSender = !isMe && (msg.senderName || msg.author);
+            // Extract phone number from author ID - handle formats like "123@c.us", "123@lid", etc.
+            const authorPhone = msg.author ? msg.author.split('@')[0] : '';
+            const senderDisplayName = msg.senderName || authorPhone || '';
+
+            // Sender avatar for group messages
+            const senderAvatar = hasGroupSender
+                ? (msg.senderProfilePic
+                    ? `<img src="${msg.senderProfilePic}" style="width:28px;height:28px;border-radius:50%;object-fit:cover;flex-shrink:0;" onerror="this.outerHTML='<div style=\\'width:28px;height:28px;border-radius:50%;background:#25D366;color:white;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:600;flex-shrink:0;\\'>${senderDisplayName.charAt(0).toUpperCase()}</div>'">`
+                    : `<div style="width:28px;height:28px;border-radius:50%;background:#25D366;color:white;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:600;flex-shrink:0;">${senderDisplayName.charAt(0).toUpperCase()}</div>`)
+                : '';
+
+            // For group messages, show sender name
+            const senderHeader = hasGroupSender
+                ? `<div style="font-size:12px;font-weight:600;color:#25D366;margin-bottom:4px;">${senderDisplayName}</div>`
+                : '';
+
+            // Message status checkmarks (only for sent messages)
+            // ack: 0=pending, 1=sent, 2=delivered, 3=read
+            let statusIcon = '';
+            if (isMe) {
+                if (msg.ack === 0 || msg.ack === undefined) {
+                    statusIcon = '<i class="fas fa-clock" style="font-size:11px;opacity:0.6;"></i>'; // pending
+                } else if (msg.ack === 1) {
+                    statusIcon = '<i class="fas fa-check" style="font-size:11px;"></i>'; // sent
+                } else if (msg.ack === 2) {
+                    statusIcon = '<i class="fas fa-check-double" style="font-size:11px;"></i>'; // delivered
+                } else if (msg.ack >= 3) {
+                    statusIcon = '<i class="fas fa-check-double" style="font-size:11px;color:#53BDEB;"></i>'; // read (blue)
+                }
+            }
+
+            return `
+                <div style="margin-bottom:8px;display:flex;${isMe ? 'justify-content:flex-end;' : 'justify-content:flex-start;'}">
+                    ${hasGroupSender ? senderAvatar : ''}
+                    <div style="max-width:70%;min-width:60px;padding:10px 14px;border-radius:${isMe ? '18px 18px 4px 18px' : '18px 18px 18px 4px'};
+                                background:${isMe ? 'linear-gradient(135deg,#25D366,#128C7E)' : 'var(--bg-card)'};
+                                color:${isMe ? 'white' : 'var(--text-primary)'};
+                                box-shadow:0 1px 2px rgba(0,0,0,0.1);">
+                        ${senderHeader}
+                        <div style="word-break:break-word;font-size:14px;line-height:1.4;">${content}</div>
+                        <div style="font-size:10px;opacity:0.7;margin-top:4px;display:flex;align-items:center;gap:4px;justify-content:flex-end;">
+                            ${time}
+                            ${statusIcon}
+                        </div>
+                    </div>
+                </div>
+            `;
+        }).join('');
+
+        // Wrap in LTR container with flex-column to ensure correct message alignment and order
+        // direction:ltr fixes RTL page layout affecting flex-start/flex-end
+        // flex-direction:column ensures messages display top-to-bottom (oldest first at top, newest at bottom)
+        // Individual text content remains RTL for Arabic text
+        container.innerHTML = `<div style="direction:ltr;text-align:left;display:flex;flex-direction:column;">${messagesHtml}</div>`;
+
+        container.scrollTop = container.scrollHeight;
+    }
+
+    // Send WhatsApp message
+    async sendWhatsAppMessage(event) {
+        event.preventDefault();
+
+        const input = document.getElementById('waMessageInput');
+        if (!input) return;
+
+        const message = input.value.trim();
+        if (!message) return;
+
+        const userData = JSON.parse(localStorage.getItem('octobot_user') || '{}');
+        const userId = userData.id;
+        if (!userId || !this.currentWaChat) return;
+
+        // Clear input immediately
+        input.value = '';
+
+        // Show sending indicator on button
+        const sendBtn = document.querySelector('#waChatArea button[onclick*="sendWhatsAppMessage"]');
+        if (sendBtn) {
+            sendBtn.disabled = true;
+            sendBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i>';
+        }
+
+        try {
+            const response = await fetch(`${this.API_URL}/api/whatsapp/${userId}/send`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    chatId: this.currentWaChat,
+                    message: message
+                })
+            });
+
+            const data = await response.json();
+
+            if (data.success) {
+                console.log('[WA] Message sent successfully');
+                // Immediately refresh messages to show sent message in correct order
+                await this.loadWhatsAppMessages(false);
+            } else {
+                this.showToast(data.error || 'فشل الإرسال', 'error');
+            }
+        } catch (err) {
+            console.error('WA send error:', err);
+            this.showToast('فشل في إرسال الرسالة', 'error');
+        } finally {
+            // Restore send button
+            if (sendBtn) {
+                sendBtn.disabled = false;
+                sendBtn.innerHTML = '<i class="fas fa-paper-plane"></i>';
+            }
+        }
+    }
+
+    // Refresh messages manually
+    async refreshWaMessages() {
+        await this.loadWhatsAppMessages(false);
+        this.showToast('تم التحديث', 'success');
+    }
+
+    // Close chat and go back to inbox
+    closeWhatsAppChat() {
+        this.stopWaSSE();
+        this.stopWaPolling();
+        this.currentWaChat = null;
+        this.currentWaChatName = null;
+        this.waMessagesData = [];
+
+        // Reload inbox
+        const userData = JSON.parse(localStorage.getItem('octobot_user') || '{}');
+        const userId = userData.id;
+        if (userId) {
+            this.loadWhatsAppChats(userId);
+        }
+    }
+
+    // Start SSE for real-time message updates (replaces polling)
+    startWaSSE() {
+        this.stopWaSSE();
+
+        const userData = JSON.parse(localStorage.getItem('octobot_user') || '{}');
+        const userId = userData.id;
+        if (!userId || !this.currentWaChat) return;
+
+        try {
+            const sseUrl = `${this.API_URL}/api/whatsapp/${userId}/sse/${encodeURIComponent(this.currentWaChat)}`;
+            this.waEventSource = new EventSource(sseUrl);
+
+            this.waEventSource.onmessage = (event) => {
+                try {
+                    const data = JSON.parse(event.data);
+
+                    if (data.type === 'new_message') {
+                        console.log('[SSE] New message received:', data.message.body?.substring(0, 30));
+
+                        // Check if message already exists
+                        const exists = this.waMessagesData.some(m => m.id === data.message.id);
+                        if (!exists) {
+                            // Add to data array
+                            this.waMessagesData.push(data.message);
+
+                            // Append message to DOM without full re-render (preserves scroll)
+                            this.appendWaMessage(data.message);
+
+                            // Play sound for incoming messages
+                            if (!data.message.fromMe) {
+                                this.playNotificationSound();
+                            }
+                        }
+                    } else if (data.type === 'connected') {
+                        console.log('[SSE] Connected to chat:', data.chatId);
+                    }
+                } catch (e) {
+                    console.error('[SSE] Parse error:', e);
+                }
+            };
+
+            this.waEventSource.onerror = (err) => {
+                console.error('[SSE] Connection error');
+                // Don't fall back to polling - just reconnect SSE after a delay
+                this.stopWaSSE();
+                setTimeout(() => this.startWaSSE(), 3000);
+            };
+
+            console.log('[SSE] Started for chat:', this.currentWaChat);
+        } catch (e) {
+            console.error('[SSE] Failed to start:', e);
+        }
+    }
+
+    // Append a single new message to DOM without re-rendering (preserves scroll)
+    appendWaMessage(msg) {
+        const container = document.getElementById('waMessages');
+        if (!container) return;
+
+        const isMe = msg.fromMe;
+        const time = this.formatWaTime(msg.timestamp);
+
+        // Check if user is at bottom before adding
+        const isAtBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 100;
+
+        // Create message element
+        let content = msg.body || '';
+        if (msg.type === 'image' || msg.hasMedia) {
+            content = `<div><i class="fas fa-image"></i> صورة</div>${msg.body || ''}`;
+        } else if (msg.type === 'audio' || msg.type === 'ptt') {
+            content = `<div><i class="fas fa-microphone"></i> رسالة صوتية</div>`;
+        }
+
+        const messageDiv = document.createElement('div');
+        messageDiv.className = 'wa-message';
+        messageDiv.dataset.msgId = msg.id;
+        messageDiv.style.cssText = `margin-bottom:8px;display:flex;${isMe ? 'justify-content:flex-end;' : 'justify-content:flex-start;'}`;
+
+        messageDiv.innerHTML = `
+            <div style="max-width:70%;min-width:60px;padding:10px 14px;border-radius:8px;background:${isMe ? 'linear-gradient(135deg,#25D366,#128C7E)' : 'var(--bg-card)'};color:${isMe ? 'white' : 'var(--text-primary)'};box-shadow:0 1px 1px rgba(0,0,0,0.1);">
+                <div style="word-break:break-word;font-size:14px;line-height:1.4;">${content}</div>
+                <div style="font-size:10px;opacity:0.7;margin-top:4px;display:flex;align-items:center;gap:4px;justify-content:flex-end;">
+                    ${time}
+                    ${isMe ? '<i class="fas fa-check-double" style="color:#34B7F1;"></i>' : ''}
+                </div>
+            </div>
+        `;
+
+        container.appendChild(messageDiv);
+
+        // Scroll to bottom only if user was at bottom OR if it's our message
+        if (isAtBottom || isMe) {
+            container.scrollTop = container.scrollHeight;
+        }
+    }
+
+    // Stop SSE connection
+    stopWaSSE() {
+        if (this.waEventSource) {
+            this.waEventSource.close();
+            this.waEventSource = null;
+            console.log('[SSE] Stopped');
+        }
+    }
+
+
+    // Start real-time polling for messages - DISABLED for performance
+    // Messages will update when user sends a message or manually refreshes
+    startWaPolling() {
+        // DISABLED - polling causes scroll jumping and performance issues
+        // this.stopWaPolling();
+        // this.waPollingInterval = setInterval(async () => {
+        //     if (this.currentWaChat) {
+        //         await this.loadWhatsAppMessages(false);
+        //     }
+        // }, 5000);
+    }
+
+    // Stop message polling
+    stopWaPolling() {
+        if (this.waPollingInterval) {
+            clearInterval(this.waPollingInterval);
+            this.waPollingInterval = null;
+        }
+    }
+
+    // Start inbox polling for new conversations
+    startWaInboxPolling() {
+        this.stopWaInboxPolling();
+
+        this.waInboxPollingInterval = setInterval(async () => {
+            if (!this.currentWaChat) {
+                // Only poll inbox when not in a chat
+                await this.checkForNewWaMessages();
+            }
+        }, 3000); // Poll every 3 seconds
+    }
+
+    // Stop inbox polling
+    stopWaInboxPolling() {
+        if (this.waInboxPollingInterval) {
+            clearInterval(this.waInboxPollingInterval);
+            this.waInboxPollingInterval = null;
+        }
+    }
+
+    // Check for new WhatsApp messages (for notifications)
+    async checkForNewWaMessages() {
+        const userData = JSON.parse(localStorage.getItem('octobot_user') || '{}');
+        const userId = userData.id;
+        if (!userId) return;
+
+        try {
+            const response = await fetch(`${this.API_URL}/api/whatsapp/${userId}/chats?limit=20`);
+            const data = await response.json();
+
+            if (!data.chats) return;
+
+            // Check for unread messages
+            const totalUnread = data.chats.reduce((sum, c) => sum + (c.unreadCount || 0), 0);
+
+            if (totalUnread > 0 && !this.currentWaChat) {
+                // Find chat with new message
+                const chatWithNew = data.chats.find(c => c.unreadCount > 0);
+                if (chatWithNew) {
+                    this.playNotificationSound();
+                    const preview = chatWithNew.lastMessage?.substring(0, 30) || 'رسالة جديدة';
+                    this.showToast(`📱 ${chatWithNew.name}: ${preview}`, 'info');
+                }
+            }
+        } catch (err) {
+            // Silent fail
+        }
+    }
+
+    // Start SSE for real-time inbox updates
+    startWaInboxSSE(userId) {
+        this.stopWaInboxSSE();
+
+        if (!userId) return;
+
+        try {
+            const sseUrl = `${this.API_URL}/api/whatsapp/${userId}/sse/inbox`;
+            this.waInboxEventSource = new EventSource(sseUrl);
+
+            this.waInboxEventSource.onmessage = (event) => {
+                try {
+                    const data = JSON.parse(event.data);
+
+                    if (data.type === 'new_message_notification') {
+                        console.log('[SSE Inbox] New message notification:', data.chatId);
+
+                        // Play notification sound
+                        this.playNotificationSound();
+
+                        // Show toast notification
+                        const senderName = data.senderName || 'رسالة جديدة';
+                        this.showToast(`📱 ${senderName}: ${data.preview}`, 'info');
+
+                        // Refresh inbox silently (no loading spinner)
+                        if (this.waInboxUserId) {
+                            this.loadWhatsAppChats(this.waInboxUserId, false);
+                        }
+                    } else if (data.type === 'connected') {
+                        console.log('[SSE Inbox] Connected to inbox stream');
+                    }
+                } catch (e) {
+                    console.error('[SSE Inbox] Parse error:', e);
+                }
+            };
+
+            this.waInboxEventSource.onerror = (err) => {
+                console.error('[SSE Inbox] Connection error');
+                // Don't retry continuously - just fail silently
+            };
+
+            console.log('[SSE Inbox] Started for user:', userId);
+        } catch (e) {
+            console.error('[SSE Inbox] Failed to start:', e);
+        }
+    }
+
+    // Stop inbox SSE
+    stopWaInboxSSE() {
+        if (this.waInboxEventSource) {
+            this.waInboxEventSource.close();
+            this.waInboxEventSource = null;
+            console.log('[SSE Inbox] Stopped');
+        }
+    }
+
+    // Update unread badge on specific chat item (without full reload)
+    updateWaInboxBadge(chatId) {
+        // Find the chat item element and pulse it to indicate new message
+        const chatItems = document.querySelectorAll('.conversation-item');
+        chatItems.forEach(item => {
+            if (item.onclick && item.onclick.toString().includes(chatId)) {
+                // Add a subtle pulse animation
+                item.style.animation = 'pulse 0.5s ease';
+                setTimeout(() => { item.style.animation = ''; }, 500);
+            }
+        });
+    }
+
+    // ============= TELEGRAM METHODS =============
+
+    // Check Telegram login status
+    async checkTelegramStatus() {
+        const section = document.getElementById('telegram');
+        if (!section) return;
+
+        section.innerHTML = '<div class="loading-spinner"><div class="spinner"></div></div>';
+
+        const userData = JSON.parse(localStorage.getItem('octobot_user') || '{}');
+        let userId = userData.id;
+
+        // For employees, use shared Telegram access if available
+        if (this.userRole !== 'admin' && this.sharedTgUserId) {
+            userId = this.sharedTgUserId;
+            console.log('[TG] Using shared Telegram access:', userId);
+        }
+
+        if (!userId) {
+            section.innerHTML = '<p style="text-align:center;color:var(--error);">يرجى تسجيل الدخول أولاً</p>';
+            return;
+        }
+
+        try {
+            // Check if API is configured
+            const configRes = await fetch(`${this.API_URL}/api/telegram/config`);
+            const configData = await configRes.json();
+
+            if (!configData.configured) {
+                section.innerHTML = `
+                    <div class="connect-prompt" style="max-width:500px;margin:40px auto;">
+                        <i class="fab fa-telegram" style="font-size:64px;color:#0088cc;margin-bottom:20px;display:block;"></i>
+                        <h2>⚙️ تيليجرام غير مُعد</h2>
+                        <p style="color:var(--text-secondary);margin:16px 0;">
+                            يجب إضافة بيانات API في ملف <code>.env</code>:<br>
+                            <code>TELEGRAM_API_ID</code> و <code>TELEGRAM_API_HASH</code><br><br>
+                            احصل عليها من <a href="https://my.telegram.org" target="_blank" style="color:#0088cc;">my.telegram.org</a>
+                        </p>
+                    </div>
+                `;
+                return;
+            }
+
+            // Check login status
+            const statusRes = await fetch(`${this.API_URL}/api/telegram/${userId}/status`);
+            const statusData = await statusRes.json();
+
+            if (statusData.loggedIn) {
+                await this.renderTelegramInbox(userId);
+            } else {
+                // All users (admin and employees) can login with their own Telegram account
+                // Sessions are saved per userId and persist across logins
+                this.renderTelegramLoginForm(userId);
+            }
+        } catch (err) {
+            console.error('Telegram status error:', err);
+            section.innerHTML = '<p style="text-align:center;color:var(--error);">فشل الاتصال بالخادم</p>';
+        }
+    }
+
+    // Render Telegram login form
+    renderTelegramLoginForm(userId) {
+        const section = document.getElementById('telegram');
+        section.innerHTML = `
+            <div style="min-height:calc(100vh - 120px);display:flex;align-items:center;justify-content:center;background:linear-gradient(135deg, #0088cc15 0%, #00aced10 50%, #0077b515 100%);">
+                <div style="width:100%;max-width:420px;margin:20px;">
+                    <!-- Main Card -->
+                    <div style="background:rgba(255,255,255,0.95);backdrop-filter:blur(20px);border-radius:24px;padding:40px;box-shadow:0 25px 50px -12px rgba(0,136,204,0.25);border:1px solid rgba(0,136,204,0.1);position:relative;overflow:hidden;">
+                        
+                        <!-- Decorative Elements -->
+                        <div style="position:absolute;top:-50px;right:-50px;width:150px;height:150px;background:linear-gradient(135deg,#0088cc20,#00aced30);border-radius:50%;"></div>
+                        <div style="position:absolute;bottom:-30px;left:-30px;width:100px;height:100px;background:linear-gradient(135deg,#0077b520,#0088cc20);border-radius:50%;"></div>
+                        
+                        <!-- Logo Section -->
+                        <div style="text-align:center;position:relative;z-index:1;">
+                            <div style="width:90px;height:90px;margin:0 auto 24px;background:linear-gradient(135deg,#0088cc,#00aced);border-radius:50%;display:flex;align-items:center;justify-content:center;box-shadow:0 15px 35px rgba(0,136,204,0.4);animation:float 3s ease-in-out infinite;">
+                                <i class="fab fa-telegram" style="font-size:48px;color:white;"></i>
+                            </div>
+                            <h2 style="font-size:26px;font-weight:700;color:#1a1a2e;margin-bottom:8px;">ربط حساب تيليجرام</h2>
+                            <p style="color:#666;font-size:14px;margin-bottom:32px;">أدخل رقم هاتفك المسجل في تيليجرام للبدء</p>
+                        </div>
+                        
+                        <!-- Step 1: Phone Input -->
+                        <div id="tgLoginStep1" style="position:relative;z-index:1;">
+                            <div style="position:relative;margin-bottom:20px;">
+                                <div style="position:absolute;left:16px;top:50%;transform:translateY(-50%);color:#0088cc;font-size:18px;">
+                                    <i class="fas fa-phone-alt"></i>
+                                </div>
+                                <input type="tel" id="tgPhoneInput" placeholder="+201234567890" 
+                                       style="width:100%;padding:16px 16px 16px 50px;border-radius:14px;border:2px solid #e8e8e8;background:#fafafa;color:#1a1a2e;font-size:17px;text-align:left;direction:ltr;transition:all 0.3s;font-weight:500;"
+                                       onfocus="this.style.borderColor='#0088cc';this.style.background='white';this.style.boxShadow='0 0 0 4px rgba(0,136,204,0.1)';"
+                                       onblur="this.style.borderColor='#e8e8e8';this.style.background='#fafafa';this.style.boxShadow='none';">
+                            </div>
+                            <button onclick="app.startTelegramLogin('${userId}')" 
+                                    style="width:100%;padding:16px;border-radius:14px;border:none;background:linear-gradient(135deg,#0088cc,#00aced);color:white;font-size:16px;font-weight:600;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:10px;transition:all 0.3s;box-shadow:0 8px 25px rgba(0,136,204,0.35);"
+                                    onmouseover="this.style.transform='translateY(-2px)';this.style.boxShadow='0 12px 35px rgba(0,136,204,0.4)';"
+                                    onmouseout="this.style.transform='translateY(0)';this.style.boxShadow='0 8px 25px rgba(0,136,204,0.35)';">
+                                <i class="fab fa-telegram" style="font-size:20px;"></i>
+                                <span>إرسال كود التحقق</span>
+                            </button>
+                        </div>
+                        
+                        <!-- Step 2: Code Input -->
+                        <div id="tgLoginStep2" style="display:none;position:relative;z-index:1;">
+                            <div style="text-align:center;margin-bottom:24px;">
+                                <div style="width:60px;height:60px;margin:0 auto 16px;background:linear-gradient(135deg,#10b981,#059669);border-radius:50%;display:flex;align-items:center;justify-content:center;">
+                                    <i class="fas fa-check" style="font-size:28px;color:white;"></i>
+                                </div>
+                                <p style="color:#10b981;font-weight:600;font-size:15px;">تم إرسال الكود بنجاح!</p>
+                                <p style="color:#888;font-size:13px;margin-top:4px;">تحقق من تطبيق تيليجرام</p>
+                            </div>
+                            <div style="position:relative;margin-bottom:20px;">
+                                <input type="text" id="tgCodeInput" placeholder="• • • • •" maxlength="5"
+                                       style="width:100%;padding:18px;border-radius:14px;border:2px solid #e8e8e8;background:#fafafa;color:#1a1a2e;font-size:28px;text-align:center;letter-spacing:12px;font-weight:700;transition:all 0.3s;"
+                                       onfocus="this.style.borderColor='#0088cc';this.style.background='white';this.style.boxShadow='0 0 0 4px rgba(0,136,204,0.1)';"
+                                       onblur="this.style.borderColor='#e8e8e8';this.style.background='#fafafa';this.style.boxShadow='none';">
+                            </div>
+                            <button onclick="app.verifyTelegramCode('${userId}')" 
+                                    style="width:100%;padding:16px;border-radius:14px;border:none;background:linear-gradient(135deg,#0088cc,#00aced);color:white;font-size:16px;font-weight:600;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:10px;transition:all 0.3s;box-shadow:0 8px 25px rgba(0,136,204,0.35);"
+                                    onmouseover="this.style.transform='translateY(-2px)';"
+                                    onmouseout="this.style.transform='translateY(0)';">
+                                <i class="fas fa-sign-in-alt"></i>
+                                <span>تسجيل الدخول</span>
+                            </button>
+                        </div>
+                        
+                        <!-- Step 3: 2FA Input -->
+                        <div id="tgLogin2FA" style="display:none;position:relative;z-index:1;">
+                            <div style="text-align:center;margin-bottom:24px;">
+                                <div style="width:60px;height:60px;margin:0 auto 16px;background:linear-gradient(135deg,#f59e0b,#d97706);border-radius:50%;display:flex;align-items:center;justify-content:center;">
+                                    <i class="fas fa-shield-alt" style="font-size:26px;color:white;"></i>
+                                </div>
+                                <p style="color:#f59e0b;font-weight:600;font-size:15px;">التحقق بخطوتين مُفعّل</p>
+                                <p style="color:#888;font-size:13px;margin-top:4px;">أدخل كلمة المرور الخاصة بك</p>
+                            </div>
+                            <div style="position:relative;margin-bottom:20px;">
+                                <div style="position:absolute;left:16px;top:50%;transform:translateY(-50%);color:#f59e0b;font-size:18px;">
+                                    <i class="fas fa-lock"></i>
+                                </div>
+                                <input type="password" id="tg2FAInput" placeholder="كلمة مرور التحقق بخطوتين" 
+                                       style="width:100%;padding:16px 16px 16px 50px;border-radius:14px;border:2px solid #e8e8e8;background:#fafafa;color:#1a1a2e;font-size:16px;text-align:center;transition:all 0.3s;"
+                                       onfocus="this.style.borderColor='#f59e0b';this.style.background='white';this.style.boxShadow='0 0 0 4px rgba(245,158,11,0.1)';"
+                                       onblur="this.style.borderColor='#e8e8e8';this.style.background='#fafafa';this.style.boxShadow='none';">
+                            </div>
+                            <button onclick="app.verifyTelegram2FA('${userId}')" 
+                                    style="width:100%;padding:16px;border-radius:14px;border:none;background:linear-gradient(135deg,#f59e0b,#d97706);color:white;font-size:16px;font-weight:600;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:10px;transition:all 0.3s;box-shadow:0 8px 25px rgba(245,158,11,0.35);"
+                                    onmouseover="this.style.transform='translateY(-2px)';"
+                                    onmouseout="this.style.transform='translateY(0)';">
+                                <i class="fas fa-unlock"></i>
+                                <span>تأكيد الدخول</span>
+                            </button>
+                        </div>
+                        
+                        <!-- Error Message -->
+                        <div id="tgLoginError" style="display:none;margin-top:20px;padding:14px;background:rgba(239,68,68,0.1);border:1px solid rgba(239,68,68,0.2);border-radius:12px;color:#dc2626;text-align:center;font-size:14px;"></div>
+                        
+                        <!-- Security Note -->
+                        <div style="margin-top:28px;padding-top:20px;border-top:1px solid #eee;text-align:center;position:relative;z-index:1;">
+                            <div style="display:flex;align-items:center;justify-content:center;gap:8px;color:#888;font-size:12px;">
+                                <i class="fas fa-shield-alt" style="color:#10b981;"></i>
+                                <span>اتصال آمن ومشفر بين حسابك وتيليجرام</span>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <!-- Powered By -->
+                    <div style="text-align:center;margin-top:20px;color:#888;font-size:12px;">
+                        <span>Powered by </span>
+                        <span style="color:#0088cc;font-weight:600;">GramJS</span>
+                    </div>
+                </div>
+            </div>
+            
+            <style>
+                @keyframes float {
+                    0%, 100% { transform: translateY(0); }
+                    50% { transform: translateY(-8px); }
+                }
+            </style>
+        `;
+    }
+
+    // Start Telegram login
+    async startTelegramLogin(userId) {
+        const phoneInput = document.getElementById('tgPhoneInput');
+        const phone = phoneInput.value.trim();
+
+        if (!phone) {
+            this.showToast('أدخل رقم الهاتف', 'error');
+            return;
+        }
+
+        phoneInput.disabled = true;
+
+        try {
+            const res = await fetch(`${this.API_URL}/api/telegram/${userId}/login`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ phoneNumber: phone })
+            });
+
+            const data = await res.json();
+
+            if (data.success) {
+                document.getElementById('tgLoginStep1').style.display = 'none';
+                document.getElementById('tgLoginStep2').style.display = 'block';
+                this.tgPhoneNumber = phone;
+                document.getElementById('tgCodeInput').focus();
+            } else {
+                document.getElementById('tgLoginError').style.display = 'block';
+                document.getElementById('tgLoginError').textContent = data.error || 'فشل إرسال الكود';
+                phoneInput.disabled = false;
+            }
+        } catch (err) {
+            console.error('TG login error:', err);
+            this.showToast('فشل الاتصال', 'error');
+            phoneInput.disabled = false;
+        }
+    }
+
+    // Verify Telegram code
+    async verifyTelegramCode(userId) {
+        const codeInput = document.getElementById('tgCodeInput');
+        const code = codeInput.value.trim();
+
+        if (!code) {
+            this.showToast('أدخل الكود', 'error');
+            return;
+        }
+
+        codeInput.disabled = true;
+
+        try {
+            const res = await fetch(`${this.API_URL}/api/telegram/${userId}/verify`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ code })
+            });
+
+            const data = await res.json();
+
+            if (data.success) {
+                this.showToast('تم تسجيل الدخول بنجاح!', 'success');
+                await this.renderTelegramInbox(userId);
+            } else if (data.code === '2FA_REQUIRED') {
+                document.getElementById('tgLoginStep2').style.display = 'none';
+                document.getElementById('tgLogin2FA').style.display = 'block';
+                this.tgPendingCode = code;
+                document.getElementById('tg2FAInput').focus();
+            } else {
+                document.getElementById('tgLoginError').style.display = 'block';
+                document.getElementById('tgLoginError').textContent = data.error || 'الكود غير صحيح';
+                codeInput.disabled = false;
+            }
+        } catch (err) {
+            console.error('TG verify error:', err);
+            this.showToast('فشل التحقق', 'error');
+            codeInput.disabled = false;
+        }
+    }
+
+    // Verify Telegram 2FA
+    async verifyTelegram2FA(userId) {
+        const pwdInput = document.getElementById('tg2FAInput');
+        const password = pwdInput.value;
+
+        if (!password) {
+            this.showToast('أدخل كلمة المرور', 'error');
+            return;
+        }
+
+        pwdInput.disabled = true;
+
+        try {
+            const res = await fetch(`${this.API_URL}/api/telegram/${userId}/verify`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ code: this.tgPendingCode, password })
+            });
+
+            const data = await res.json();
+
+            if (data.success) {
+                this.showToast('تم تسجيل الدخول بنجاح!', 'success');
+                await this.renderTelegramInbox(userId);
+            } else {
+                document.getElementById('tgLoginError').style.display = 'block';
+                document.getElementById('tgLoginError').textContent = data.error || 'كلمة المرور غير صحيحة';
+                pwdInput.disabled = false;
+            }
+        } catch (err) {
+            console.error('TG 2FA error:', err);
+            this.showToast('فشل التحقق', 'error');
+            pwdInput.disabled = false;
+        }
+    }
+
+    // Render Telegram inbox
+    async renderTelegramInbox(userId) {
+        const section = document.getElementById('telegram');
+        section.innerHTML = `
+            <style>
+                .tg-container { display:flex; height:calc(100vh - 100px); background:var(--bg-main); border-radius:16px; overflow:hidden; border:1px solid var(--border-color); }
+                .tg-sidebar { width:340px; background:var(--bg-card); border-left:1px solid var(--border-color); display:flex; flex-direction:column; }
+                .tg-main { flex:1; display:flex; flex-direction:column; background:var(--bg-secondary); }
+                .tg-header { padding:16px 20px; background:linear-gradient(135deg,#0088cc,#0077b5); display:flex; align-items:center; gap:12px; }
+                .tg-header-info { flex:1; color:white; }
+                .tg-header h2 { font-size:18px; margin:0; color:white; }
+                .tg-header small { opacity:0.85; font-size:13px; }
+                .tg-header-btn { background:rgba(255,255,255,0.15); border:none; color:white; padding:10px 14px; border-radius:10px; cursor:pointer; transition:all 0.2s; display:flex; align-items:center; gap:6px; font-size:13px; }
+                .tg-header-btn:hover { background:rgba(255,255,255,0.25); transform:translateY(-1px); }
+                .tg-search { padding:12px 16px; border-bottom:1px solid var(--border-color); }
+                .tg-search input { width:100%; padding:12px 16px 12px 40px; border-radius:12px; border:1px solid var(--border-color); background:var(--bg-main); color:var(--text-primary); font-size:14px; transition:all 0.2s; }
+                .tg-search input:focus { border-color:#0088cc; box-shadow:0 0 0 3px rgba(0,136,204,0.1); outline:none; }
+                .tg-search-wrapper { position:relative; }
+                .tg-search-icon { position:absolute; right:14px; top:50%; transform:translateY(-50%); color:var(--text-secondary); }
+                .tg-dialogs { flex:1; overflow-y:auto; padding:8px; }
+                .tg-dialog { display:flex; align-items:center; gap:12px; padding:12px; border-radius:12px; cursor:pointer; transition:all 0.2s; margin-bottom:4px; }
+                .tg-dialog:hover { background:rgba(0,136,204,0.08); }
+                .tg-dialog.active { background:rgba(0,136,204,0.15); }
+                .tg-dialog-avatar { width:50px; height:50px; border-radius:50%; display:flex; align-items:center; justify-content:center; color:white; font-size:20px; flex-shrink:0; }
+                .tg-dialog-info { flex:1; min-width:0; }
+                .tg-dialog-name { font-weight:600; font-size:14px; margin-bottom:3px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+                .tg-dialog-msg { font-size:13px; color:var(--text-secondary); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+                .tg-dialog-meta { text-align:left; min-width:50px; }
+                .tg-dialog-time { font-size:11px; color:var(--text-secondary); }
+                .tg-dialog-badge { background:linear-gradient(135deg,#0088cc,#00aced); color:white; border-radius:10px; min-width:20px; height:20px; display:flex; align-items:center; justify-content:center; font-size:11px; font-weight:600; margin-top:4px; padding:0 6px; }
+                .tg-empty-chat { flex:1; display:flex; flex-direction:column; align-items:center; justify-content:center; color:var(--text-secondary); }
+                .tg-empty-chat i { font-size:80px; color:#0088cc; opacity:0.3; margin-bottom:20px; }
+                .tg-empty-chat p { font-size:16px; }
+                .tg-chat-header { padding:14px 20px; background:var(--bg-card); border-bottom:1px solid var(--border-color); display:flex; align-items:center; gap:14px; }
+                .tg-chat-header-avatar { width:44px; height:44px; border-radius:50%; background:#0088cc; display:flex; align-items:center; justify-content:center; color:white; font-size:18px; }
+                .tg-chat-header-info { flex:1; }
+                .tg-chat-header-name { font-weight:600; font-size:15px; }
+                .tg-chat-header-status { font-size:12px; color:var(--text-secondary); }
+                .tg-messages { flex:1; overflow-y:auto; padding:20px; background:linear-gradient(180deg, #e8f4f8 0%, #d4edda 100%); background-image:url("data:image/svg+xml,%3Csvg width='60' height='60' viewBox='0 0 60 60' xmlns='http://www.w3.org/2000/svg'%3E%3Cg fill='none' fill-rule='evenodd'%3E%3Cg fill='%230088cc' fill-opacity='0.03'%3E%3Cpath d='M36 34v-4h-2v4h-4v2h4v4h2v-4h4v-2h-4zm0-30V0h-2v4h-4v2h4v4h2V6h4V4h-4zM6 34v-4H4v4H0v2h4v4h2v-4h4v-2H6zM6 4V0H4v4H0v2h4v4h2V6h4V4H6z'/%3E%3C/g%3E%3C/g%3E%3C/svg%3E"); }
+                .tg-msg { margin-bottom:12px; display:flex; flex-direction:column; }
+                .tg-msg.sent { align-items:flex-end; }
+                .tg-msg.received { align-items:flex-start; }
+                .tg-msg-sender-info { display:flex; align-items:center; gap:8px; margin-bottom:6px; padding:0 4px; }
+                .tg-msg-sender-avatar { width:32px; height:32px; border-radius:50%; display:flex; align-items:center; justify-content:center; font-size:14px; font-weight:600; flex-shrink:0; overflow:hidden; }
+                .tg-msg-sender-avatar img { width:100%; height:100%; object-fit:cover; }
+                .tg-msg-sender-name { font-size:14px; font-weight:600; color:var(--primary); }
+                .tg-msg-bubble { max-width:70%; padding:12px 16px; border-radius:16px; position:relative; box-shadow:0 2px 8px rgba(0,0,0,0.1); }
+                .tg-msg.sent .tg-msg-bubble { background:linear-gradient(135deg,#0088cc,#0077b5); color:white; border-bottom-left-radius:16px; border-bottom-right-radius:4px; }
+                .tg-msg.received .tg-msg-bubble { background:white; color:#1a1a2e; border-bottom-right-radius:16px; border-bottom-left-radius:4px; border:1px solid rgba(0,136,204,0.1); }
+                .tg-msg-text { font-size:15px; line-height:1.6; word-break:break-word; direction:rtl; text-align:right; }
+                .tg-msg-time { font-size:11px; opacity:0.7; margin-top:6px; text-align:left; display:flex; align-items:center; gap:4px; justify-content:flex-end; }
+                .tg-msg-media { color:var(--text-secondary); font-size:13px; display:flex; align-items:center; gap:6px; }
+                .tg-input-area { padding:14px 20px; background:var(--bg-card); border-top:1px solid var(--border-color); display:flex; align-items:center; gap:10px; }
+                .tg-input-area input { flex:1; padding:14px 20px; border:1px solid var(--border-color); border-radius:25px; background:var(--bg-main); color:var(--text-primary); font-size:14px; outline:none; transition:all 0.2s; }
+                .tg-input-area input:focus { border-color:#0088cc; box-shadow:0 0 0 3px rgba(0,136,204,0.1); }
+                .tg-input-btn { width:46px; height:46px; border-radius:50%; border:none; cursor:pointer; display:flex; align-items:center; justify-content:center; font-size:18px; transition:all 0.2s; }
+                .tg-send-btn { background:linear-gradient(135deg,#0088cc,#00aced); color:white; }
+                .tg-send-btn:hover { transform:scale(1.05); box-shadow:0 4px 15px rgba(0,136,204,0.4); }
+                .tg-attach-btn { background:var(--glass); color:var(--text-secondary); border:1px solid var(--border-color); }
+                .tg-attach-btn:hover { color:#0088cc; border-color:#0088cc; }
+                @keyframes tgPulse { 0%, 100% { opacity:1; } 50% { opacity:0.5; } }
+                .tg-typing { animation: tgPulse 1.5s infinite; }
+                
+                /* Media Styles */
+                .tg-media-container { margin:8px 0; max-width:100%; }
+                .tg-media-image { max-width:280px; max-height:280px; border-radius:12px; cursor:pointer; transition:transform 0.2s; display:block; }
+                .tg-media-image:hover { transform:scale(1.02); }
+                .tg-media-video { max-width:320px; max-height:240px; border-radius:12px; }
+                .tg-media-audio { width:260px; height:40px; outline:none; }
+                .tg-audio-container { display:flex; align-items:center; gap:10px; }
+                .tg-audio-icon { font-size:20px; }
+                .tg-document-container { padding:8px; }
+                .tg-document-link { color:#0088cc; text-decoration:none; display:flex; align-items:center; gap:8px; }
+                .tg-document-link:hover { text-decoration:underline; }
+                
+                /* Reply Styles */
+                .tg-reply-preview { background:rgba(0,136,204,0.1); border-left:3px solid #0088cc; padding:10px 12px; margin:-8px -8px 10px; border-radius:8px; font-size:13px; display:flex; justify-content:space-between; align-items:center; }
+                .tg-reply-info { flex:1; }
+                .tg-reply-to { color:#0088cc; font-weight:600; margin-bottom:3px; }
+                .tg-reply-text { color:var(--text-secondary); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:250px; }
+                .tg-reply-close { cursor:pointer; color:var(--text-secondary); padding:4px 8px; border-radius:4px; transition:all 0.2s; }
+                .tg-reply-close:hover { background:rgba(0,136,204,0.2); color:#0088cc; }
+                .tg-msg-reply-btn { background:rgba(0,136,204,0.1); color:#0088cc; border:none; padding:6px 12px; border-radius:12px; cursor:pointer; font-size:12px; transition:all 0.2s; margin-top:6px; }
+                .tg-msg-reply-btn:hover { background:rgba(0,136,204,0.2); }
+                .tg-msg-actions { display:flex; gap:6px; margin-top:6px; opacity:0; transition:opacity 0.2s; }
+                .tg-msg:hover .tg-msg-actions { opacity:1; }
+                .tg-media-caption { margin-top:8px; }
+                
+                /* Scroll to bottom button */
+                .tg-main { position:relative; }
+                .tg-scroll-bottom { position:absolute; bottom:80px; right:20px; width:44px; height:44px; border-radius:50%; background:linear-gradient(135deg,#0088cc,#00aced) !important; color:white; border:none; box-shadow:0 4px 12px rgba(0,136,204,0.4); cursor:pointer; display:flex !important; align-items:center; justify-content:center; font-size:20px; transition:all 0.3s; z-index:1000; }
+                .tg-scroll-bottom:hover { transform:scale(1.1); box-shadow:0 6px 20px rgba(0,136,204,0.6); }
+                .tg-scroll-bottom.show { opacity:1; }
+                .tg-scroll-bottom:not(.show) { opacity:0; pointer-events:none; }
+                @keyframes fadeInUp { from { opacity:0; transform:translateY(10px); } to { opacity:1; transform:translateY(0); } }
+            </style>
+            
+            <div class="tg-container">
+                <!-- Sidebar - Dialogs List -->
+                <div class="tg-sidebar">
+                    <div class="tg-header">
+                        <i class="fab fa-telegram" style="font-size:28px;color:white;"></i>
+                        <div class="tg-header-info">
+                            <h2>تيليجرام</h2>
+                            <small id="tgAccountInfo">@loading...</small>
+                        </div>
+                        <button class="tg-header-btn" onclick="app.refreshTelegramDialogs()" title="تحديث">
+                            <i class="fas fa-sync-alt"></i>
+                        </button>
+                        <button class="tg-header-btn" onclick="app.logoutTelegram('${userId}')" title="تسجيل خروج">
+                            <i class="fas fa-sign-out-alt"></i>
+                        </button>
+                    </div>
+                    <div class="tg-search">
+                        <div class="tg-search-wrapper">
+                            <i class="fas fa-search tg-search-icon"></i>
+                            <input type="text" id="tgSearchInput" placeholder="بحث في المحادثات..." oninput="app.filterTelegramDialogs(this.value)">
+                        </div>
+                    </div>
+                    <div class="tg-dialogs" id="tgDialogsList">
+                        <div class="loading-spinner"><div class="spinner"></div></div>
+                    </div>
+                </div>
+                
+                <!-- Main - Chat Area -->
+                <div class="tg-main" id="tgChatArea">
+                    <div class="tg-empty-chat">
+                        <i class="fab fa-telegram"></i>
+                        <p>اختر محادثة للبدء</p>
+                    </div>
+                </div>
+            </div>
+        `;
+
+        // Load account info
+        try {
+            const accRes = await fetch(`${this.API_URL}/api/telegram/${userId}/account`);
+            const accData = await accRes.json();
+            if (accData.success && accData.account) {
+                const name = accData.account.firstName + (accData.account.lastName ? ' ' + accData.account.lastName : '');
+                const displayName = accData.account.username ? `@${accData.account.username}` : name;
+                document.getElementById('tgAccountInfo').textContent = displayName;
+            }
+        } catch (e) { }
+
+        // Load dialogs
+        await this.loadTelegramDialogs(userId);
+    }
+
+    // Load Telegram dialogs
+    async loadTelegramDialogs(userId) {
+        const dialogsList = document.getElementById('tgDialogsList');
+        if (!dialogsList) return;
+
+        dialogsList.innerHTML = '<div class="loading-spinner"><div class="spinner"></div></div>';
+
+        try {
+            const res = await fetch(`${this.API_URL}/api/telegram/${userId}/dialogs?limit=50`);
+            const data = await res.json();
+
+            if (!data.dialogs || data.dialogs.length === 0) {
+                dialogsList.innerHTML = '<p style="text-align:center;color:var(--text-secondary);padding:40px;">لا توجد محادثات</p>';
+                return;
+            }
+
+            // Initialize read dialogs storage if not exists
+            if (!this.tgReadDialogs) {
+                this.tgReadDialogs = new Set();
+            }
+
+            // Apply local read status to dialogs
+            data.dialogs.forEach(dialog => {
+                if (this.tgReadDialogs.has(dialog.id)) {
+                    dialog.unreadCount = 0;
+                }
+            });
+
+            this.tgDialogs = data.dialogs;
+            this.renderTelegramDialogsList(data.dialogs);
+        } catch (err) {
+            console.error('TG dialogs error:', err);
+            dialogsList.innerHTML = '<p style="text-align:center;color:var(--error);">فشل تحميل المحادثات</p>';
+        }
+    }
+
+    // Render dialogs list (used for filtering)
+    renderTelegramDialogsList(dialogs) {
+        const dialogsList = document.getElementById('tgDialogsList');
+        if (!dialogsList) return;
+
+        const avatarColors = ['#0088cc', '#10b981', '#8b5cf6', '#f59e0b', '#ef4444', '#ec4899', '#06b6d4'];
+
+        dialogsList.innerHTML = dialogs.map((dialog, index) => {
+            const icon = dialog.type === 'channel' ? 'fa-bullhorn' : dialog.type === 'group' ? 'fa-users' : 'fa-user';
+            const color = avatarColors[index % avatarColors.length];
+            const time = dialog.lastMessageDate ? this.formatTgTime(dialog.lastMessageDate) : '';
+            const isActive = this.currentTgDialog === dialog.id;
+            const initial = dialog.title.charAt(0).toUpperCase();
+
+            // Use actual photo if available, otherwise use colored avatar with initial/icon
+            const avatarContent = dialog.photo
+                ? `<img src="${dialog.photo}" alt="" style="width:100%;height:100%;object-fit:cover;border-radius:50%;">`
+                : (dialog.type === 'private' ? initial : `<i class="fas ${icon}"></i>`);
+
+            return `
+                <div onclick="app.openTelegramChat('${dialog.id}', '${dialog.title.replace(/'/g, "\\'")}')" 
+                     class="tg-dialog ${isActive ? 'active' : ''}" data-dialog-id="${dialog.id}">
+                    <div class="tg-dialog-avatar" style="background:${dialog.photo ? 'transparent' : color};overflow:hidden;">
+                        ${avatarContent}
+                    </div>
+                    <div class="tg-dialog-info">
+                        <div class="tg-dialog-name">${dialog.title}</div>
+                        <div class="tg-dialog-msg">${dialog.lastMessage || ''}</div>
+                    </div>
+                    <div class="tg-dialog-meta">
+                        <div class="tg-dialog-time">${time}</div>
+                        ${dialog.unreadCount > 0 ? `<div class="tg-dialog-badge">${dialog.unreadCount}</div>` : ''}
+                    </div>
+                </div>
+            `;
+        }).join('');
+    }
+
+    // Filter Telegram dialogs (local + global search)
+    async filterTelegramDialogs(searchText) {
+        if (!this.tgDialogs) return;
+
+        const dialogsList = document.getElementById('tgDialogsList');
+        if (!dialogsList) return;
+
+        // First, filter local dialogs
+        const filtered = searchText.trim()
+            ? this.tgDialogs.filter(d => d.title.toLowerCase().includes(searchText.toLowerCase()))
+            : this.tgDialogs;
+
+        // Render local results
+        this.renderTelegramDialogsList(filtered);
+
+        // If search text is >= 3 chars and no local results or few results, do global search
+        if (searchText.trim().length >= 3) {
+            // Debounce: clear previous timeout
+            if (this.tgSearchTimeout) clearTimeout(this.tgSearchTimeout);
+
+            this.tgSearchTimeout = setTimeout(async () => {
+                const userData = JSON.parse(localStorage.getItem('octobot_user') || '{}');
+                const userId = userData.id;
+
+                try {
+                    // Show searching indicator
+                    if (filtered.length === 0) {
+                        dialogsList.innerHTML = `
+                            <div style="text-align:center;padding:20px;color:var(--text-secondary);">
+                                <div class="spinner" style="margin:0 auto 10px;"></div>
+                                <p>جاري البحث عن "${searchText}"...</p>
+                            </div>
+                        `;
+                    }
+
+                    const res = await fetch(`${this.API_URL}/api/telegram/${userId}/search?query=${encodeURIComponent(searchText)}`);
+                    const data = await res.json();
+
+                    if (data.success && data.results && data.results.length > 0) {
+                        // Combine local and global results (remove duplicates)
+                        const existingIds = new Set(filtered.map(d => d.id));
+                        const globalResults = data.results.filter(r => !existingIds.has(r.id));
+
+                        if (globalResults.length > 0 || filtered.length === 0) {
+                            // Render combined results
+                            this.renderTelegramSearchResults(filtered, globalResults);
+                        }
+                    } else if (filtered.length === 0) {
+                        dialogsList.innerHTML = `
+                            <div style="text-align:center;padding:40px;color:var(--text-secondary);">
+                                <i class="fas fa-search" style="font-size:32px;opacity:0.3;margin-bottom:10px;"></i>
+                                <p>لم يتم العثور على نتائج لـ "${searchText}"</p>
+                            </div>
+                        `;
+                    }
+                } catch (err) {
+                    console.error('TG global search error:', err);
+                }
+            }, 500); // 500ms debounce
+        }
+    }
+
+    // Render search results (local + global)
+    renderTelegramSearchResults(localDialogs, globalResults) {
+        const dialogsList = document.getElementById('tgDialogsList');
+        if (!dialogsList) return;
+
+        const avatarColors = ['#0088cc', '#10b981', '#8b5cf6', '#f59e0b', '#ef4444', '#ec4899', '#06b6d4'];
+
+        let html = '';
+
+        // Render local dialogs first
+        if (localDialogs.length > 0) {
+            html += localDialogs.map((dialog, index) => {
+                const icon = dialog.type === 'channel' ? 'fa-bullhorn' : dialog.type === 'group' ? 'fa-users' : 'fa-user';
+                const color = avatarColors[index % avatarColors.length];
+                const time = dialog.lastMessageDate ? this.formatTgTime(dialog.lastMessageDate) : '';
+                const isActive = this.currentTgDialog === dialog.id;
+                const initial = dialog.title.charAt(0).toUpperCase();
+
+                const avatarContent = dialog.photo
+                    ? `<img src="${dialog.photo}" alt="" style="width:100%;height:100%;object-fit:cover;border-radius:50%;">`
+                    : (dialog.type === 'private' ? initial : `<i class="fas ${icon}"></i>`);
+
+                return `
+                    <div onclick="app.openTelegramChat('${dialog.id}', '${dialog.title.replace(/'/g, "\\'")}')" 
+                         class="tg-dialog ${isActive ? 'active' : ''}" data-dialog-id="${dialog.id}">
+                        <div class="tg-dialog-avatar" style="background:${dialog.photo ? 'transparent' : color};overflow:hidden;">
+                            ${avatarContent}
+                        </div>
+                        <div class="tg-dialog-info">
+                            <div class="tg-dialog-name">${dialog.title}</div>
+                            <div class="tg-dialog-msg">${dialog.lastMessage || ''}</div>
+                        </div>
+                        <div class="tg-dialog-meta">
+                            <div class="tg-dialog-time">${time}</div>
+                            ${dialog.unreadCount > 0 ? `<div class="tg-dialog-badge">${dialog.unreadCount}</div>` : ''}
+                        </div>
+                    </div>
+                `;
+            }).join('');
+        }
+
+        // Add separator and global results
+        if (globalResults.length > 0) {
+            html += `
+                <div style="padding:12px 16px;color:var(--text-secondary);font-size:12px;font-weight:600;background:var(--bg-secondary);border-top:1px solid var(--border-color);border-bottom:1px solid var(--border-color);margin-top:${localDialogs.length > 0 ? '8px' : '0'};">
+                    <i class="fas fa-globe" style="margin-left:6px;"></i>
+                    نتائج البحث العالمي
+                </div>
+            `;
+
+            html += globalResults.map((result, index) => {
+                const icon = result.type === 'channel' ? 'fa-bullhorn' : result.type === 'group' ? 'fa-users' : 'fa-user';
+                const color = avatarColors[(index + localDialogs.length) % avatarColors.length];
+                const initial = result.title.charAt(0).toUpperCase();
+
+                const avatarContent = result.photo
+                    ? `<img src="${result.photo}" alt="" style="width:100%;height:100%;object-fit:cover;border-radius:50%;">`
+                    : (result.type === 'user' ? initial : `<i class="fas ${icon}"></i>`);
+
+                const subtitle = result.username ? `@${result.username}` : (result.type === 'user' ? 'مستخدم' : result.type === 'channel' ? 'قناة' : 'مجموعة');
+
+                return `
+                    <div onclick="app.openTelegramChat('${result.id}', '${result.title.replace(/'/g, "\\'")}')" 
+                         class="tg-dialog" style="border-right:3px solid #10b981;">
+                        <div class="tg-dialog-avatar" style="background:${result.photo ? 'transparent' : color};overflow:hidden;">
+                            ${avatarContent}
+                        </div>
+                        <div class="tg-dialog-info">
+                            <div class="tg-dialog-name">${result.title}</div>
+                            <div class="tg-dialog-msg" style="color:#10b981;">${subtitle}</div>
+                        </div>
+                        <div class="tg-dialog-meta">
+                            <i class="fas fa-arrow-left" style="color:var(--text-secondary);"></i>
+                        </div>
+                    </div>
+                `;
+            }).join('');
+        }
+
+        dialogsList.innerHTML = html || '<p style="text-align:center;color:var(--text-secondary);padding:40px;">لا توجد نتائج</p>';
+    }
+
+    // Refresh Telegram dialogs
+    async refreshTelegramDialogs() {
+        const userData = JSON.parse(localStorage.getItem('octobot_user') || '{}');
+        await this.loadTelegramDialogs(userData.id);
+        this.showToast('تم التحديث', 'success');
+    }
+
+    // Open Telegram chat
+    async openTelegramChat(dialogId, dialogTitle) {
+        this.currentTgDialog = dialogId;
+        this.currentTgDialogTitle = dialogTitle;
+
+        // Update active dialog styling
+        document.querySelectorAll('.tg-dialog').forEach(el => {
+            el.classList.toggle('active', el.dataset.dialogId === dialogId);
+        });
+
+        const chatArea = document.getElementById('tgChatArea');
+        // Use getTgUserId() for shared Telegram access (employees use admin's session)
+        const userId = this.getTgUserId();
+
+        // Get dialog info for avatar
+        const dialog = this.tgDialogs?.find(d => d.id === dialogId);
+        const avatarColors = ['#0088cc', '#10b981', '#8b5cf6', '#f59e0b', '#ef4444', '#ec4899', '#06b6d4'];
+        const colorIndex = this.tgDialogs?.indexOf(dialog) || 0;
+        const avatarColor = avatarColors[colorIndex % avatarColors.length];
+        const initial = dialogTitle.charAt(0).toUpperCase();
+        const isPrivate = dialog?.type === 'private';
+
+        // Use actual photo if available, otherwise use placeholder
+        let avatarHtml;
+        if (dialog?.photo) {
+            avatarHtml = `<img src="${dialog.photo}" alt="${dialogTitle}" style="width:100%;height:100%;object-fit:cover;border-radius:50%;">`;
+        } else {
+            avatarHtml = `<div class="tg-chat-header-avatar" style="background:${avatarColor};">
+                ${isPrivate ? initial : '<i class="fab fa-telegram"></i>'}
+            </div>`;
+        }
+
+        chatArea.innerHTML = `
+            <div class="tg-chat-header">
+                ${dialog?.photo ? `<div class="tg-chat-header-avatar" style="padding:0;overflow:hidden;">${avatarHtml}</div>` : avatarHtml}
+                <div class="tg-chat-header-info">
+                    <div class="tg-chat-header-name">${dialogTitle}</div>
+                    <div class="tg-chat-header-status">${dialog?.type === 'group' ? 'مجموعة' : dialog?.type === 'channel' ? 'قناة' : 'محادثة خاصة'}</div>
+                </div>
+                <button onclick="app.refreshTelegramMessages()" class="tg-header-btn" style="background:var(--glass);color:var(--text-secondary);border:1px solid var(--border-color);">
+                    <i class="fas fa-sync-alt"></i>
+                </button>
+            </div>
+            
+            <div class="tg-messages" id="tgMessages" onscroll="app.handleTgScroll()">
+                <div class="loading-spinner"><div class="spinner"></div></div>
+            </div>
+            <button class="tg-scroll-bottom" id="tgScrollBottom" onclick="app.scrollToBottom()" title="انتقل لآخر رسالة">
+                <i class="fas fa-chevron-down"></i>
+            </button>
+            
+            
+            <div id="tgReplyPreview" style="display:none; padding:0 20px;"></div>
+            ${this.hasPermission('telegram', 'send') ? `
+            <form onsubmit="app.handleTelegramSubmit(event)" class="tg-input-area">
+                <input type="file" id="tgFileInput" style="display:none" accept="*" onchange="app.handleTelegramFileSelect(event)">
+                <button type="button" class="tg-input-btn tg-attach-btn" title="إرفاق ملف" onclick="document.getElementById('tgFileInput').click()">
+                    <i class="fas fa-paperclip"></i>
+                </button>
+                <input type="text" id="tgMessageInput" placeholder="اكتب رسالة..." autocomplete="off">
+                <button type="submit" class="tg-input-btn tg-send-btn">
+                    <i class="fas fa-paper-plane"></i>
+                </button>
+            </form>
+            ` : `
+            <div style="padding:16px 20px;background:var(--bg-card);border-top:1px solid var(--border-color);text-align:center;color:var(--text-secondary);font-size:13px;">
+                <i class="fas fa-ban" style="margin-left:8px;"></i>
+                ليس لديك صلاحية الإرسال
+            </div>
+            `}
+        `;
+
+        await this.loadTelegramMessages(userId, dialogId);
+
+        // Mark messages as read
+        try {
+            await fetch(`${this.API_URL}/api/telegram/${userId}/mark-read/${encodeURIComponent(dialogId)}`, {
+                method: 'POST'
+            });
+
+            // Add to read dialogs set for persistence
+            if (!this.tgReadDialogs) {
+                this.tgReadDialogs = new Set();
+            }
+            this.tgReadDialogs.add(dialogId);
+
+            // Update dialog list to clear unread count
+            if (this.tgDialogs) {
+                const dialog = this.tgDialogs.find(d => d.id === dialogId);
+                if (dialog) {
+                    dialog.unreadCount = 0;
+                    this.renderTelegramDialogsList(this.tgDialogs);
+                }
+            }
+        } catch (err) {
+            console.error('Error marking as read:', err);
+        }
+
+        // Start real-time polling for this chat
+        this.startTelegramPolling();
+    }
+
+    // Load Telegram messages
+    async loadTelegramMessages(userId, dialogId) {
+        const container = document.getElementById('tgMessages');
+        if (!container) return;
+
+        try {
+            const res = await fetch(`${this.API_URL}/api/telegram/${userId}/messages/${encodeURIComponent(dialogId)}?limit=50`);
+            const data = await res.json();
+
+            if (!data.messages || data.messages.length === 0) {
+                container.innerHTML = `
+                <div style="display:flex;flex-direction:column;align-items:center;justify-content:center;height:100%;color:var(--text-secondary);">
+                    <i class="fas fa-comments" style="font-size:48px;opacity:0.3;margin-bottom:16px;"></i>
+                    <p>لا توجد رسائل بعد</p>
+                </div>
+            `;
+                return;
+            }
+
+            this.tgMessagesData = data.messages;
+
+            container.innerHTML = data.messages.map(msg => {
+                const isMe = msg.isFromMe;
+                const time = this.formatTgTime(msg.date);
+                let content = msg.text || '';
+
+                let mediaHtml = '';
+                if (msg.mediaType) {
+                    const mediaUrl = `${this.API_URL}/api/telegram/${userId}/media/${encodeURIComponent(dialogId)}/${msg.id}`;
+
+                    if (msg.mediaType === 'photo') {
+                        mediaHtml = `<div class="tg-media-container"><img src="${mediaUrl}" alt="صورة" class="tg-media-image" onclick="window.open('${mediaUrl}', '_blank')" onerror="this.style.display='none';this.parentNode.innerHTML='📷 فشل تحميل الصورة'"></div>`;
+                    } else if (msg.mediaType === 'video') {
+                        mediaHtml = `<div class="tg-media-container"><video controls class="tg-media-video"><source src="${mediaUrl}" type="video/mp4">متصفحك لا يدعم تشغيل الفيديو</video></div>`;
+                    } else if (msg.mediaType === 'voice' || msg.mediaType === 'audio') {
+                        const icon = msg.mediaType === 'voice' ? '🎤' : '🎵';
+                        mediaHtml = `<div class="tg-media-container tg-audio-container"><span class="tg-audio-icon">${icon}</span><audio controls class="tg-media-audio"><source src="${mediaUrl}" type="audio/ogg"><source src="${mediaUrl}" type="audio/mpeg">متصفحك لا يدعم تشغيل الصوت</audio></div>`;
+                    } else if (msg.mediaType === 'document') {
+                        mediaHtml = `<div class="tg-media-container tg-document-container"><a href="${mediaUrl}" download class="tg-document-link"><i class="fas fa-file"></i> تحميل الملف</a></div>`;
+                    }
+
+                    content = mediaHtml + (content ? `<div class="tg-media-caption">${content}</div>` : '');
+                }
+
+                // For group messages from others, show sender info
+                let senderInfoHtml = '';
+                if (msg.senderName && !isMe) {
+                    const avatarColors = ['#0088cc', '#10b981', '#8b5cf6', '#f59e0b', '#ef4444', '#ec4899', '#06b6d4'];
+                    const colorIndex = Math.abs(msg.senderId.split('').reduce((a, b) => a + b.charCodeAt(0), 0)) % avatarColors.length;
+                    const avatarColor = avatarColors[colorIndex];
+                    const initial = msg.senderName.charAt(0).toUpperCase();
+
+                    senderInfoHtml = `
+                    <div class="tg-msg-sender-info">
+                        <div class="tg-msg-sender-avatar" style="${msg.senderPhoto ? '' : `background:${avatarColor};color:white;`}">
+                            ${msg.senderPhoto
+                            ? `<img src="${msg.senderPhoto}" alt="${msg.senderName}">`
+                            : initial
+                        }
+                        </div>
+                        <span class="tg-msg-sender-name">${msg.senderName}</span>
+                    </div>
+                `;
+                }
+
+                // Check if this is a reply
+                let replyPreviewHtml = '';
+                if (msg.replyToMsgId) {
+                    console.log('[DEBUG] Message has reply:', msg.id, 'replyTo:', msg.replyToMsgId);
+                    const originalMsg = data.messages.find(m => m.id === msg.replyToMsgId);
+                    console.log('[DEBUG] Found original message:', !!originalMsg);
+                    if (originalMsg) {
+                        const replyText = originalMsg.text || (originalMsg.mediaType ? `📎 ${originalMsg.mediaType}` : 'رسالة');
+                        const truncated = replyText.length > 50 ? replyText.substring(0, 50) + '...' : replyText;
+                        replyPreviewHtml = `
+                            <div onclick="app.scrollToMessage('${msg.replyToMsgId}')" style="margin:0 0 8px 0; padding:8px; background:rgba(${isMe ? '255,255,255' : '0,136,204'},0.15); border-left:3px solid ${isMe ? 'rgba(255,255,255,0.6)' : '#0088cc'}; border-radius:6px; cursor:pointer; transition:all 0.2s;" onmouseover="this.style.background='rgba(${isMe ? '255,255,255' : '0,136,204'},0.25)'" onmouseout="this.style.background='rgba(${isMe ? '255,255,255' : '0,136,204'},0.15)'">
+                                <div style="font-size:12px; font-weight:600; margin-bottom:3px; color:${isMe ? 'rgba(255,255,255,0.9)' : '#0088cc'};">${originalMsg.senderName || (originalMsg.isFromMe ? 'أنت' : 'مجهول')}</div>
+                                <div style="font-size:12px; opacity:0.85;">${truncated}</div>
+                            </div>
+                        `;
+                        console.log('[DEBUG] Reply preview created');
+                    }
+                } else {
+                    console.log('[DEBUG] Message NO reply:', msg.id);
+                }
+
+                return `
+                <div class="tg-msg ${isMe ? 'sent' : 'received'}">
+                    ${senderInfoHtml}
+                    <div class="tg-msg-bubble">
+                        ${replyPreviewHtml}
+                        <div class="tg-msg-text">${content}</div>
+                        <div class="tg-msg-time">
+                            ${time}
+                            ${isMe ? '<i class="fas fa-check" style="font-size:9px;"></i>' : ''}
+                        </div>
+                        <div class="tg-msg-actions">
+                            <button class="tg-msg-reply-btn" onclick="app.setReplyTo('${msg.id}', '${(msg.text || 'media').replace(/'/g, "\\'")}')" title="رد">↪️</button>
+                            <button class="tg-msg-reply-btn" style="background:rgba(59,130,246,0.1);color:#3b82f6;" onclick="app.openForwardModal('${msg.id}')" title="توجيه">➡️</button>
+                                                    ${isMe && msg.text ? `<button class="tg-msg-reply-btn" style="background:rgba(16,185,129,0.1);color:#10b981;" onclick="app.editTelegramMessage('${msg.id}', '${msg.text.replace(/'/g, "\\\\'").replace(/\n/g, ' ')}')" title="تعديل">✏️</button>` : ''}
+                            ${isMe ? `<button class="tg-msg-reply-btn" style="background:rgba(239,68,68,0.1);color:#ef4444;" onclick="app.deleteTelegramMessage('${msg.id}')" title="حذف">🗑️</button>` : ''}
+                            </div>
+                    </div>
+                </div>
+            `;
+            }).join('');
+
+            container.scrollTop = container.scrollHeight;
+        } catch (err) {
+            console.error('TG messages error:', err);
+            container.innerHTML = '<p style="text-align:center;color:var(--error);padding:40px;">فشل تحميل الرسائل</p>';
+        }
+    }
+    // Refresh Telegram messages
+    async refreshTelegramMessages() {
+        const userData = JSON.parse(localStorage.getItem('octobot_user') || '{}');
+        await this.loadTelegramMessages(userData.id, this.currentTgDialog);
+        this.showToast('تم التحديث', 'success');
+    }
+
+    // Set reply to message
+    setReplyTo(messageId, messageText) {
+        this.replyToMessageId = messageId;
+        const preview = document.getElementById('tgReplyPreview');
+        const truncated = messageText.length > 50 ? messageText.substring(0, 50) + '...' : messageText;
+        preview.innerHTML = `
+            <div class="tg-reply-preview">
+                <div class="tg-reply-info">
+                    <div class="tg-reply-to">الرد على:</div>
+                    <div class="tg-reply-text">${truncated}</div>
+                </div>
+                <div class="tg-reply-close" onclick="app.cancelReply()">✕</div>
+            </div>
+        `;
+        preview.style.display = 'block';
+        document.getElementById('tgMessageInput').focus();
+    }
+
+    // Cancel reply
+    cancelReply() {
+        this.replyToMessageId = null;
+        document.getElementById('tgReplyPreview').style.display = 'none';
+    }
+
+    // Handle File Select
+    async handleTelegramFileSelect(event) {
+        const file = event.target.files[0];
+        if (!file) return;
+
+        // Reset input so same file can be selected again
+        event.target.value = '';
+
+        if (!confirm(`هل تريد إرسال الملف:\n${file.name}\nبحجم ${(file.size / 1024 / 1024).toFixed(2)} MB؟`)) {
+            return;
+        }
+
+        const userData = JSON.parse(localStorage.getItem('octobot_user') || '{}');
+        const userId = userData.id;
+        const dialogId = this.currentTgDialog;
+
+        // Show loading state
+        const attachBtn = document.querySelector('.tg-attach-btn');
+        const originalContent = attachBtn.innerHTML;
+        attachBtn.disabled = true;
+        attachBtn.innerHTML = '<div class="spinner" style="width:14px;height:14px;border-width:2px;border-color:#3b82f6 transparent #3b82f6 transparent;"></div>';
+
+        const formData = new FormData();
+        formData.append('file', file);
+        formData.append('dialogId', dialogId);
+
+        // Add caption if there is text in the input
+        const input = document.getElementById('tgMessageInput');
+        if (input.value.trim()) {
+            formData.append('caption', input.value.trim());
+        }
+
+        try {
+            const res = await fetch(`${this.API_URL}/api/telegram/${userId}/send-file`, {
+                method: 'POST',
+                body: formData // No Content-Type header needed, let browser set it with boundary
+            });
+
+            const data = await res.json();
+
+            if (data.success) {
+                this.showToast('تم إرسال الملف بنجاح', 'success');
+                input.value = ''; // Clear caption
+                await this.loadTelegramMessages(userId, dialogId);
+            } else {
+                this.showToast(data.error || 'فشل إرسال الملف', 'error');
+            }
+        } catch (err) {
+            console.error('TG file send error:', err);
+            this.showToast('فشل إرسال الملف', 'error');
+        } finally {
+            attachBtn.disabled = false;
+            attachBtn.innerHTML = originalContent;
+        }
+    }
+
+    // Handle scroll event for messages container
+    handleTgScroll() {
+        const container = document.getElementById('tgMessages');
+        const scrollBtn = document.getElementById('tgScrollBottom');
+
+        if (!container || !scrollBtn) return;
+
+        // Show button if not at bottom (with 100px threshold)
+        const isAtBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 100;
+
+        if (isAtBottom) {
+            scrollBtn.classList.remove('show');
+        } else {
+            scrollBtn.classList.add('show');
+        }
+    }
+
+    // Scroll to bottom of messages
+    scrollToBottom() {
+        const container = document.getElementById('tgMessages');
+        if (container) {
+            container.scrollTo({ top: container.scrollHeight, behavior: 'smooth' });
+        }
+    }
+
+    // Delete Telegram message
+    async deleteTelegramMessage(messageId) {
+        // Confirmation dialog
+        if (!confirm('هل أنت متأكد من حذف هذه الرسالة؟')) {
+            return;
+        }
+
+        const userData = JSON.parse(localStorage.getItem('octobot_user') || '{}');
+        const userId = userData.id;
+
+        try {
+            const res = await fetch(`${this.API_URL}/api/telegram/${userId}/delete/${encodeURIComponent(this.currentTgDialog)}/${messageId}`, {
+                method: 'DELETE'
+            });
+
+            const data = await res.json();
+
+            if (data.success) {
+                this.showToast('تم حذف الرسالة', 'success');
+                // Reload messages to reflect the deletion
+                await this.loadTelegramMessages(userId, this.currentTgDialog);
+            } else {
+                this.showToast(data.error || 'فشل الحذف', 'error');
+            }
+        } catch (err) {
+            console.error('TG delete error:', err);
+            this.showToast('فشل الحذف', 'error');
+        }
+    }
+
+    // Handle Telegram Submit (Send or Edit)
+    async handleTelegramSubmit(event) {
+        event.preventDefault();
+
+        const input = document.getElementById('tgMessageInput');
+        const text = input.value.trim();
+        if (!text) return;
+
+        // Check if editing
+        if (this.editingMessageId) {
+            await this.submitEditMessage(this.editingMessageId, text);
+            return;
+        }
+
+        // Check if sending new message
+        await this.sendTelegramMessage(event);
+    }
+
+    // Edit Telegram message (Populate Input)
+    editTelegramMessage(messageId, currentText) {
+        this.editingMessageId = messageId;
+        const input = document.getElementById('tgMessageInput');
+        input.value = currentText;
+        input.focus();
+
+        // Show edit preview UI
+        const preview = document.getElementById('tgReplyPreview');
+        preview.innerHTML = `
+            <div class="tg-reply-preview" style="border-right-color: #10b981;">
+                <div class="tg-reply-info">
+                    <div class="tg-reply-to" style="color: #10b981;">تعديل الرسالة</div>
+                    <div class="tg-reply-text" style="color: var(--text-primary); direction: rtl; text-align: right;">${currentText.length > 50 ? currentText.substring(0, 50) + '...' : currentText}</div>
+                </div>
+                <div class="tg-reply-close" onclick="app.cancelEdit()">✕</div>
+            </div>
+        `;
+        preview.style.display = 'block';
+
+        // Update send button icon
+        const sendBtn = document.querySelector('.tg-send-btn');
+        if (sendBtn) {
+            sendBtn.innerHTML = '<i class="fas fa-check"></i>';
+            sendBtn.style.color = '#10b981';
+        }
+    }
+
+    // Submit Edited Message
+    async submitEditMessage(messageId, newText) {
+        if (!newText) {
+            this.showToast('النص مطلوب', 'error');
+            return;
+        }
+
+        const userData = JSON.parse(localStorage.getItem('octobot_user') || '{}');
+        const userId = userData.id;
+
+        const sendBtn = document.querySelector('.tg-send-btn');
+        if (sendBtn) {
+            sendBtn.disabled = true;
+            sendBtn.innerHTML = '<div class="spinner" style="width:14px;height:14px;border-width:2px;border-color:#10b981 transparent #10b981 transparent;"></div>';
+        }
+
+        try {
+            const res = await fetch(`${this.API_URL}/api/telegram/${userId}/edit/${encodeURIComponent(this.currentTgDialog)}/${messageId}`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ text: newText })
+            });
+
+            const data = await res.json();
+
+            if (data.success) {
+                this.showToast('تم تعديل الرسالة', 'success');
+                this.cancelEdit();
+                await this.loadTelegramMessages(userId, this.currentTgDialog);
+            } else {
+                this.showToast(data.error || 'فشل التعديل', 'error');
+            }
+        } catch (err) {
+            console.error('TG edit error:', err);
+            this.showToast('فشل التعديل', 'error');
+        } finally {
+            if (sendBtn) {
+                sendBtn.disabled = false;
+                sendBtn.innerHTML = '<i class="fas fa-paper-plane"></i>';
+                sendBtn.style.color = '';
+            }
+        }
+    }
+
+    // Cancel Edit
+    cancelEdit() {
+        this.editingMessageId = null;
+        document.getElementById('tgMessageInput').value = '';
+        document.getElementById('tgReplyPreview').style.display = 'none';
+
+        const sendBtn = document.querySelector('.tg-send-btn');
+        if (sendBtn) {
+            sendBtn.innerHTML = '<i class="fas fa-paper-plane"></i>';
+            sendBtn.style.color = '';
+        }
+    }
+
+    // Send Telegram Message
+    async sendTelegramMessage(event) {
+        if (event) event.preventDefault();
+
+        const input = document.getElementById('tgMessageInput');
+        const text = input.value.trim();
+        if (!text) return;
+
+        const userData = JSON.parse(localStorage.getItem('octobot_user') || '{}');
+        const userId = userData.id;
+
+        const payload = {
+            dialogId: this.currentTgDialog,
+            text
+        };
+
+        if (this.replyToMessageId) {
+            payload.replyTo = this.replyToMessageId;
+        }
+
+        input.value = '';
+        input.focus();
+        this.cancelReply();
+
+        try {
+            const res = await fetch(`${this.API_URL}/api/telegram/${userId}/send`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            });
+
+            const data = await res.json();
+
+            if (data.success) {
+                // Track activity for performance dashboard
+                this.trackTeamActivity('message_sent', 'telegram', this.currentTgDialog, text.length);
+                await this.loadTelegramMessages(userId, this.currentTgDialog);
+            } else {
+                this.showToast(data.error || 'فشل الإرسال', 'error');
+                input.value = text;
+            }
+        } catch (err) {
+            console.error('TG send error:', err);
+            this.showToast('فشل الإرسال', 'error');
+            input.value = text;
+        }
+    }
+
+    // Open Forward Modal with multi-select
+    async openForwardModal(messageId) {
+        this.forwardMessageId = messageId;
+        this.selectedForwardDialogs = new Set(); // Track selected dialogs
+
+        // Remove existing modal if any
+        const existing = document.getElementById('forwardModal');
+        if (existing) existing.remove();
+
+        // Use tgDialogs which contains photos
+        let dialogs = this.tgDialogs || [];
+
+        // If no cached dialogs, load from API
+        if (dialogs.length === 0) {
+            const userData = JSON.parse(localStorage.getItem('octobot_user') || '{}');
+            const userId = userData.id;
+
+            try {
+                const res = await fetch(`${this.API_URL}/api/telegram/${userId}/dialogs`);
+                const data = await res.json();
+                if (data.dialogs) {
+                    dialogs = data.dialogs;
+                    this.tgDialogs = dialogs; // Cache for future use
+                }
+            } catch (err) {
+                console.error('[Forward] Failed to load dialogs:', err);
+            }
+        }
+
+        console.log('[Forward] Dialogs count:', dialogs.length);
+
+        const avatarColors = ['#0088cc', '#10b981', '#8b5cf6', '#f59e0b', '#ef4444', '#ec4899', '#06b6d4'];
+
+        const modalHtml = `
+            <div id="forwardModal" style="position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.7);z-index:10000;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(5px);">
+                <div style="background:var(--bg-card);width:90%;max-width:400px;border-radius:16px;border:1px solid var(--border-color);overflow:hidden;animation:slideUp 0.3s ease;box-shadow: 0 10px 30px rgba(0,0,0,0.5);">
+                    <div style="padding:16px;border-bottom:1px solid var(--border-color);background:var(--bg-secondary);">
+                        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+                            <h3 style="margin:0;font-size:16px;color:var(--text-primary);">توجيه الرسالة إلى...</h3>
+                            <button onclick="app.closeForwardModal()" style="background:none;border:none;color:var(--text-secondary);cursor:pointer;font-size:20px;width:30px;height:30px;display:flex;align-items:center;justify-content:center;border-radius:50%;transition:background 0.2s;">✕</button>
+                        </div>
+                        <input type="text" id="forwardSearchInput" placeholder="🔍 ابحث عن محادثة..." style="width:100%;padding:8px 12px;border:1px solid var(--border-color);border-radius:8px;background:var(--bg-card);color:var(--text-primary);font-size:14px;" oninput="app.filterForwardDialogs(this.value)">
+                    </div>
+                    <div id="forwardDialogsList" style="max-height:50vh;overflow-y:auto;padding:8px;background:var(--bg-card);">
+                        ${dialogs.length > 0 ? dialogs.map((d, index) => {
+            const color = avatarColors[index % avatarColors.length];
+            const initial = d.title ? d.title.charAt(0).toUpperCase() : '?';
+            const icon = d.type === 'channel' ? 'fa-bullhorn' : d.type === 'group' ? 'fa-users' : 'fa-user';
+            const isPrivate = d.type === 'private';
+
+            const avatarContent = d.photo
+                ? `<img src="${d.photo}" alt="" style="width:100%;height:100%;object-fit:cover;border-radius:50%;">`
+                : (isPrivate ? initial : `<i class="fas ${icon}" style="font-size:16px;"></i>`);
+
+            const typeLabel = d.type === 'channel' ? 'قناة' : d.type === 'group' ? 'مجموعة' : 'محادثة خاصة';
+
+            return `
+                            <div class="forward-dialog-item" data-dialog-id="${d.id}" data-title="${(d.title || '').toLowerCase()}" onclick="app.toggleForwardSelect('${d.id}')" style="display:flex;align-items:center;gap:12px;padding:12px;cursor:pointer;border-radius:12px;transition:all 0.2s;margin-bottom:4px;border:2px solid transparent;" id="forward-item-${d.id}">
+                                <div class="forward-checkbox" style="width:22px;height:22px;border-radius:6px;border:2px solid var(--border-color);display:flex;align-items:center;justify-content:center;transition:all 0.2s;flex-shrink:0;">
+                                    <i class="fas fa-check" style="color:white;font-size:12px;display:none;"></i>
+                                </div>
+                                <div style="width:40px;height:40px;border-radius:50%;background:${d.photo ? 'transparent' : `linear-gradient(135deg, ${color}, ${color}dd)`};color:white;display:flex;align-items:center;justify-content:center;font-weight:600;font-size:16px;box-shadow: 0 4px 6px rgba(0,0,0,0.15);overflow:hidden;flex-shrink:0;">
+                                    ${avatarContent}
+                                </div>
+                                <div style="flex:1;min-width:0;">
+                                    <div style="font-weight:600;font-size:14px;color:var(--text-primary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${d.title || 'مجهول'}</div>
+                                    <div style="font-size:12px;color:var(--text-secondary);display:flex;align-items:center;gap:4px;">
+                                        <i class="fas ${icon}" style="font-size:10px;"></i> ${typeLabel}
+                                    </div>
+                                </div>
+                            </div>
+                        `}).join('') : '<div style="text-align:center;padding:40px;color:var(--text-secondary);">لا توجد محادثات<br><small>افتح محادثة أولاً</small></div>'}
+                    </div>
+                    <div id="forwardFooter" style="padding:16px;border-top:1px solid var(--border-color);background:var(--bg-secondary);display:flex;gap:12px;align-items:center;">
+                        <div id="forwardSelectedCount" style="flex:1;font-size:14px;color:var(--text-secondary);">اختر محادثة أو أكثر</div>
+                        <button id="forwardConfirmBtn" onclick="app.executeMultiForward()" disabled style="padding:10px 24px;background:linear-gradient(135deg,#3b82f6,#2563eb);color:white;border:none;border-radius:8px;font-weight:600;cursor:pointer;transition:all 0.2s;opacity:0.5;">
+                            <i class="fas fa-paper-plane" style="margin-left:6px;"></i>
+                            توجيه
+                        </button>
+                    </div>
+                </div>
+            </div>
+        `;
+
+        document.body.insertAdjacentHTML('beforeend', modalHtml);
+
+        // Focus search input
+        setTimeout(() => document.getElementById('forwardSearchInput')?.focus(), 100);
+    }
+
+    // Toggle forward dialog selection
+    toggleForwardSelect(dialogId) {
+        const item = document.getElementById(`forward-item-${dialogId}`);
+        if (!item) return;
+
+        const checkbox = item.querySelector('.forward-checkbox');
+        const checkIcon = checkbox.querySelector('i');
+
+        if (this.selectedForwardDialogs.has(dialogId)) {
+            // Deselect
+            this.selectedForwardDialogs.delete(dialogId);
+            item.style.borderColor = 'transparent';
+            item.style.background = 'transparent';
+            checkbox.style.background = 'transparent';
+            checkbox.style.borderColor = 'var(--border-color)';
+            checkIcon.style.display = 'none';
+        } else {
+            // Select
+            this.selectedForwardDialogs.add(dialogId);
+            item.style.borderColor = '#3b82f6';
+            item.style.background = 'rgba(59,130,246,0.1)';
+            checkbox.style.background = '#3b82f6';
+            checkbox.style.borderColor = '#3b82f6';
+            checkIcon.style.display = 'block';
+        }
+
+        // Update footer
+        this.updateForwardFooter();
+    }
+
+    // Update forward footer with selected count
+    updateForwardFooter() {
+        const count = this.selectedForwardDialogs.size;
+        const countEl = document.getElementById('forwardSelectedCount');
+        const btn = document.getElementById('forwardConfirmBtn');
+
+        if (count === 0) {
+            countEl.textContent = 'اختر محادثة أو أكثر';
+            btn.disabled = true;
+            btn.style.opacity = '0.5';
+        } else {
+            countEl.innerHTML = `<strong style="color:var(--text-primary);">${count}</strong> محادثة مختارة`;
+            btn.disabled = false;
+            btn.style.opacity = '1';
+        }
+    }
+
+    // Execute multi-forward
+    async executeMultiForward() {
+        if (!this.forwardMessageId || this.selectedForwardDialogs.size === 0) return;
+
+        const userData = JSON.parse(localStorage.getItem('octobot_user') || '{}');
+        const userId = userData.id;
+        const fromDialogId = this.currentTgDialog;
+        const messageId = this.forwardMessageId;
+        const targetIds = Array.from(this.selectedForwardDialogs);
+
+        // Visual feedback
+        this.showToast(`جاري توجيه الرسالة إلى ${targetIds.length} محادثة...`, 'info');
+        this.closeForwardModal();
+
+        let successCount = 0;
+        let failCount = 0;
+
+        for (const targetDialogId of targetIds) {
+            try {
+                const res = await fetch(`${this.API_URL}/api/telegram/${userId}/forward`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        toDialogId: targetDialogId,
+                        fromDialogId: fromDialogId,
+                        messageId: messageId
+                    })
+                });
+
+                const data = await res.json();
+                if (data.success) {
+                    successCount++;
+                } else {
+                    failCount++;
+                }
+            } catch (err) {
+                console.error('TG forward error:', err);
+                failCount++;
+            }
+        }
+
+        // Show result
+        if (failCount === 0) {
+            this.showToast(`✅ تم توجيه الرسالة إلى ${successCount} محادثة`, 'success');
+        } else {
+            this.showToast(`تم التوجيه: ${successCount} نجاح، ${failCount} فشل`, failCount > successCount ? 'error' : 'warning');
+        }
+
+        // Reload if forwarded to current dialog
+        if (targetIds.includes(this.currentTgDialog)) {
+            await this.loadTelegramMessages(userId, this.currentTgDialog);
+        }
+    }
+
+    filterForwardDialogs(query) {
+        const items = document.querySelectorAll('.forward-dialog-item');
+        const lowerQuery = query.toLowerCase().trim();
+
+        items.forEach(item => {
+            const title = item.getAttribute('data-title') || '';
+            if (title.includes(lowerQuery)) {
+                item.style.display = 'flex';
+            } else {
+                item.style.display = 'none';
+            }
+        });
+    }
+
+    // closeForwardModal is defined below (duplicate removed)
+
+    closeForwardModal() {
+        const modal = document.getElementById('forwardModal');
+        if (modal) modal.remove();
+        this.forwardMessageId = null;
+    }
+
+    // Execute Forward
+    async executeForwardMessage(targetDialogId) {
+        if (!this.forwardMessageId) return;
+
+        const userData = JSON.parse(localStorage.getItem('octobot_user') || '{}');
+        const userId = userData.id;
+        const fromDialogId = this.currentTgDialog;
+        const messageId = this.forwardMessageId;
+
+        // Visual feedback
+        this.showToast('جاري التوجيه...', 'info');
+        this.closeForwardModal();
+
+        try {
+            const res = await fetch(`${this.API_URL}/api/telegram/${userId}/forward`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    toDialogId: targetDialogId,
+                    fromDialogId: fromDialogId,
+                    messageId: messageId
+                })
+            });
+
+            const data = await res.json();
+
+            if (data.success) {
+                this.showToast('تم توجيه الرسالة بنجاح', 'success');
+                // If forwarded to current dialog, reload
+                if (targetDialogId === this.currentTgDialog) {
+                    await this.loadTelegramMessages(userId, this.currentTgDialog);
+                }
+            } else {
+                this.showToast(data.error || 'فشل التوجيه', 'error');
+            }
+        } catch (err) {
+            console.error('TG forward error:', err);
+            this.showToast('فشل التوجيه', 'error');
+        }
+    }
+
+    /* OLD FUNCTIONS DISABLED */
+    editTelegramMessage_OLD(messageId, currentText) {
+        const messages = document.querySelectorAll('.tg-msg');
+        let targetMessage = null;
+
+        messages.forEach(msg => {
+
+            const deleteBtn = msg.querySelector(`button[onclick*="deleteTelegramMessage('${messageId}')"]`);
+            if (deleteBtn) {
+                targetMessage = msg;
+            }
+        });
+
+        if (!targetMessage) return;
+
+        const textContainer = targetMessage.querySelector('.tg-msg-text');
+        const actionsContainer = targetMessage.querySelector('.tg-msg-actions');
+
+        // Create inline edit UI
+        const originalHTML = textContainer.innerHTML;
+        textContainer.innerHTML = `
+            <textarea id="editTextarea_${messageId}" style="width:100%;min-height:60px;padding:8px;border:1px solid var(--border-color);border-radius:8px;background:var(--glass);color:var(--text-primary);font-family:inherit;font-size:14px;resize:vertical;">${currentText}</textarea>
+            <div style="display:flex;gap:8px;margin-top:8px;">
+                <button onclick="app.saveEditMessage('${messageId}', \`${originalHTML}\`)" style="flex:1;padding:8px 16px;background:#10b981;color:white;border:none;border-radius:8px;cursor:pointer;font-weight:600;">✓ حفظ</button>
+                <button onclick="app.cancelEditMessage('${messageId}', \`${originalHTML}\`)" style="flex:1;padding:8px 16px;background:rgba(239,68,68,0.1);color:#ef4444;border:none;border-radius:8px;cursor:pointer;font-weight:600;">✕ إلغاء</button>
+            </div>
+        `;
+
+        // Hide action buttons during edit
+        if (actionsContainer) {
+            actionsContainer.style.display = 'none';
+        }
+
+        // Focus on textarea
+        document.getElementById(`editTextarea_${messageId}`).focus();
+    }
+
+    // Save edit message
+    async saveEditMessage(messageId, originalHTML) {
+        const textarea = document.getElementById(`editTextarea_${messageId}`);
+        const newText = textarea.value.trim();
+
+        if (!newText) {
+            this.showToast('النص مطلوب', 'error');
+            return;
+        }
+
+        const userData = JSON.parse(localStorage.getItem('octobot_user') || '{}');
+        const userId = userData.id;
+
+        try {
+            const res = await fetch(`${this.API_URL}/api/telegram/${userId}/edit/${encodeURIComponent(this.currentTgDialog)}/${messageId}`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ text: newText })
+            });
+
+            const data = await res.json();
+
+            if (data.success) {
+                this.showToast('تم تعديل الرسالة', 'success');
+                // Reload messages
+                await this.loadTelegramMessages(userId, this.currentTgDialog);
+            } else {
+                this.showToast(data.error || 'فشل التعديل', 'error');
+            }
+        } catch (err) {
+            console.error('TG edit error:', err);
+            this.showToast('فشل التعديل', 'error');
+        }
+    }
+
+    // Cancel edit message
+    cancelEditMessage(messageId, originalHTML) {
+        const messages = document.querySelectorAll('.tg-msg');
+        messages.forEach(msg => {
+            const textarea = msg.querySelector(`#editTextarea_${messageId}`);
+            if (textarea) {
+                const textContainer = msg.querySelector('.tg-msg-text');
+                const actionsContainer = msg.querySelector('.tg-msg-actions');
+
+                textContainer.innerHTML = originalHTML;
+
+                if (actionsContainer) {
+                    actionsContainer.style.display = 'flex';
+                }
+            }
+        });
+    }
+
+    // Scroll to message
+    scrollToMessage(messageId) {
+        const container = document.getElementById('tgMessages');
+        const messages = container.querySelectorAll('.tg-msg');
+
+        // Find message by data attribute or search through messages
+        messages.forEach(msgEl => {
+            const replyBtn = msgEl.querySelector('.tg-msg-reply-btn');
+            if (replyBtn && replyBtn.getAttribute('onclick').includes(`'${messageId}'`)) {
+                // Scroll to message
+                msgEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+
+                // Highlight message temporarily
+                const bubble = msgEl.querySelector('.tg-msg-bubble');
+                const originalBg = bubble.style.background;
+                bubble.style.transition = 'background 0.3s';
+                bubble.style.background = 'rgba(0, 136, 204, 0.2)';
+
+                setTimeout(() => {
+                    bubble.style.background = originalBg;
+                }, 1500);
+            }
+        });
+    }
+
+    // Send Telegram message
+    async sendTelegramMessage(event) {
+        event.preventDefault();
+
+        const input = document.getElementById('tgMessageInput');
+        const text = input.value.trim();
+        if (!text) return;
+
+        const userData = JSON.parse(localStorage.getItem('octobot_user') || '{}');
+        const userId = userData.id;
+
+        const payload = {
+            dialogId: this.currentTgDialog,
+            text
+        };
+
+        if (this.replyToMessageId) {
+            payload.replyTo = this.replyToMessageId;
+        }
+
+        input.value = '';
+        input.disabled = true;
+        this.cancelReply();
+
+        try {
+            const res = await fetch(`${this.API_URL}/api/telegram/${userId}/send`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            });
+
+            const data = await res.json();
+
+            if (data.success) {
+                await this.loadTelegramMessages(userId, this.currentTgDialog);
+            } else {
+                this.showToast(data.error || 'فشل الإرسال', 'error');
+            }
+        } catch (err) {
+            console.error('TG send error:', err);
+            this.showToast('فشل الإرسال', 'error');
+        } finally {
+            input.disabled = false;
+            input.focus();
+        }
+    }
+
+    // Close Telegram chat
+    closeTelegramChat() {
+        this.currentTgDialog = null;
+        this.currentTgDialogTitle = null;
+
+        // Stop polling
+        this.stopTelegramPolling();
+
+        // Remove active state from dialogs
+        document.querySelectorAll('.tg-dialog').forEach(el => el.classList.remove('active'));
+
+        // Reset chat area to empty state
+        const chatArea = document.getElementById('tgChatArea');
+        if (chatArea) {
+            chatArea.innerHTML = `
+                <div class="tg-empty-chat">
+                    <i class="fab fa-telegram"></i>
+                    <p>اختر محادثة للبدء</p>
+                </div>
+            `;
+        }
+    }
+
+    // Logout from Telegram
+    async logoutTelegram(userId) {
+        if (!confirm('هل تريد قطع اتصال تيليجرام؟')) return;
+
+        try {
+            await fetch(`${this.API_URL}/api/telegram/${userId}/logout`, { method: 'POST' });
+            this.showToast('تم تسجيل الخروج', 'success');
+            this.checkTelegramStatus();
+        } catch (err) {
+            this.showToast('فشل تسجيل الخروج', 'error');
+        }
+    }
+
+    // Start Telegram polling for real-time messages
+    startTelegramPolling() {
+        this.stopTelegramPolling(); // Clear any existing polling
+
+        const userData = JSON.parse(localStorage.getItem('octobot_user') || '{}');
+        const userId = userData.id;
+
+        if (!userId || !this.currentTgDialog) return;
+
+        this.tgPollingInterval = setInterval(async () => {
+            if (this.currentTgDialog) {
+                await this.refreshTelegramMessages(userId, this.currentTgDialog);
+            }
+        }, 5000); // Poll every 5 seconds - safe from Telegram rate limits
+    }
+
+    // Stop Telegram polling
+    stopTelegramPolling() {
+        if (this.tgPollingInterval) {
+            clearInterval(this.tgPollingInterval);
+            this.tgPollingInterval = null;
+        }
+    }
+
+    // Handle file selection for Telegram
+    handleTelegramFileSelect(event) {
+        const file = event.target.files[0];
+        if (!file) return;
+
+        // Show preview and caption input
+        const modal = document.createElement('div');
+        modal.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.8);display:flex;align-items:center;justify-content:center;z-index:10000;';
+
+        let preview = '';
+        if (file.type.startsWith('image/')) {
+            const url = URL.createObjectURL(file);
+            preview = `<img src="${url}" style="max-width:400px;max-height:400px;border-radius:12px;">`;
+        } else if (file.type.startsWith('video/')) {
+            const url = URL.createObjectURL(file);
+            preview = `<video src="${url}" controls style="max-width:400px;max-height:400px;border-radius:12px;"></video>`;
+        } else {
+            preview = `<div style="padding:40px;text-align:center;"><i class="fas fa-file" style="font-size:60px;color:#0088cc;"></i><br><br>${file.name}</div>`;
+        }
+
+        modal.innerHTML = `
+            <div style="background:var(--bg-card);border-radius:16px;padding:30px;max-width:500px;width:90%;">
+                <h3 style="margin:0 0 20px;color:var(--text-primary);">إرسال ملف</h3>
+                ${preview}
+                <input type="text" id="tgCaptionInput" placeholder="إضافة تعليق (اختياري)" style="width:100%;padding:12px;margin:20px 0;border:1px solid var(--border-color);border-radius:8px;background:var(--bg-main);color:var(--text-primary);">
+                <div style="display:flex;gap:10px;">
+                    <button onclick="app.sendTelegramMedia()" style="flex:1;padding:12px;background:#0088cc;color:white;border:none;border-radius:8px;cursor:pointer;font-weight:600;">إرسال</button>
+                    <button onclick="this.closest('div').parentElement.parentElement.remove()" style="flex:1;padding:12px;background:var(--glass);color:var(--text-secondary);border:1px solid var(--border-color);border-radius:8px;cursor:pointer;">إلغاء</button>
+                </div>
+            </div>
+        `;
+
+        document.body.appendChild(modal);
+        this.selectedFile = file;
+    }
+
+    // Send Telegram media
+    async sendTelegramMedia() {
+        if (!this.selectedFile) return;
+
+        const caption = document.getElementById('tgCaptionInput')?.value || '';
+        const userData = JSON.parse(localStorage.getItem('octobot_user') || '{}');
+        const userId = userData.id;
+
+        const formData = new FormData();
+        formData.append('photo', this.selectedFile);
+        formData.append('dialogId', this.currentTgDialog);
+        if (caption) formData.append('caption', caption);
+
+        try {
+            // Remove modal
+            document.querySelectorAll('div').forEach(el => {
+                if (el.style.position === 'fixed' && el.style.zIndex === '10000') el.remove();
+            });
+
+            this.showToast('جاري الإرسال...', 'info');
+
+            const res = await fetch(`${this.API_URL}/api/telegram/${userId}/send-photo`, {
+                method: 'POST',
+                body: formData
+            });
+
+            const data = await res.json();
+
+            if (data.success) {
+                this.showToast('تم الإرسال بنجاح', 'success');
+                await this.loadTelegramMessages(userId, this.currentTgDialog);
+            } else {
+                this.showToast(data.error || 'فشل الإرسال', 'error');
+            }
+
+            this.selectedFile = null;
+            document.getElementById('tgFileInput').value = '';
+        } catch (err) {
+            console.error('Send media error:', err);
+            this.showToast('فشل الإرسال', 'error');
+        }
+    }
+
+    // Refresh Telegram messages without resetting scroll
+    async refreshTelegramMessages(userId, dialogId) {
+        const container = document.getElementById('tgMessages');
+        if (!container) return;
+
+        // Store scroll position
+        const wasAtBottom = container.scrollHeight - container.scrollTop <= container.clientHeight + 100;
+
+        try {
+            const res = await fetch(`${this.API_URL}/api/telegram/${userId}/messages/${encodeURIComponent(dialogId)}?limit=50`);
+            const data = await res.json();
+
+            if (!data.messages || data.messages.length === 0) return;
+
+            // Only update if there are new messages
+            const lastMsgId = this.tgMessagesData?.[this.tgMessagesData.length - 1]?.id;
+            const newLastMsgId = data.messages[data.messages.length - 1]?.id;
+
+            if (lastMsgId === newLastMsgId) return; // No new messages
+
+            this.tgMessagesData = data.messages;
+
+            container.innerHTML = data.messages.map(msg => {
+                const isMe = msg.isFromMe;
+                const time = this.formatTgTime(msg.date);
+                let content = msg.text || '';
+
+                if (msg.mediaType) {
+                    const mediaLabels = { photo: '📷 صورة', video: '🎬 فيديو', voice: '🎤 صوتية', audio: '🎵 صوت', document: '📎 ملف' };
+                    const mediaLabel = mediaLabels[msg.mediaType] || '📎 مرفق';
+                    content = content ? `${mediaLabel}<br>${content}` : mediaLabel;
+                }
+
+                let senderInfoHtml = '';
+                if (msg.senderName && !isMe) {
+                    const avatarColors = ['#0088cc', '#10b981', '#8b5cf6', '#f59e0b', '#ef4444', '#ec4899', '#06b6d4'];
+                    const colorIndex = Math.abs(msg.senderId.split('').reduce((a, b) => a + b.charCodeAt(0), 0)) % avatarColors.length;
+                    const avatarColor = avatarColors[colorIndex];
+                    const initial = msg.senderName.charAt(0).toUpperCase();
+
+                    senderInfoHtml = `
+                    <div class="tg-msg-sender-info">
+                        <div class="tg-msg-sender-avatar" style="${msg.senderPhoto ? '' : `background:${avatarColor};color:white;`}">
+                            ${msg.senderPhoto ? `<img src="${msg.senderPhoto}" alt="${msg.senderName}">` : initial}
+                        </div>
+                        <span class="tg-msg-sender-name">${msg.senderName}</span>
+                    </div>
+                `;
+                }
+
+                return `
+                <div class="tg-msg ${isMe ? 'sent' : 'received'}">
+                    ${senderInfoHtml}
+                    <div class="tg-msg-bubble">
+                        <div class="tg-msg-text">${content}</div>
+                        <div class="tg-msg-time">
+                            ${time}
+                            ${isMe ? '<i class="fas fa-check" style="font-size:9px;"></i>' : ''}
+                        </div>
+                    </div>
+                </div>
+            `;
+            }).join('');
+
+            // Only scroll to bottom if user was already at bottom or if they sent the message
+            if (wasAtBottom) {
+                container.scrollTop = container.scrollHeight;
+            }
+        } catch (err) {
+            console.error('TG refresh error:', err);
+        }
+    }
+
+    // Format Telegram timestamp
+    formatTgTime(timestamp) {
+        if (!timestamp) return '';
+        const date = new Date(timestamp);
+        const now = new Date();
+        const isToday = date.toDateString() === now.toDateString();
+
+        if (isToday) {
+            return date.toLocaleTimeString('ar-EG', { hour: '2-digit', minute: '2-digit' });
+        }
+        return date.toLocaleDateString('ar-EG', { day: 'numeric', month: 'short' });
+    }
+
+    // ============= TEAM MANAGEMENT METHODS =============
+
+    // Switch between team tabs
+    switchTeamTab(tabName) {
+        // Hide all tab contents
+        document.querySelectorAll('.team-tab-content').forEach(el => el.style.display = 'none');
+
+        // Show selected tab content
+        const tabContent = document.getElementById(`team${tabName.charAt(0).toUpperCase() + tabName.slice(1)}Tab`);
+        if (tabContent) tabContent.style.display = 'block';
+
+        // Update tab button styles - only toggle active class, let CSS handle the styling
+        document.querySelectorAll('.team-tab').forEach(btn => {
+            if (btn.dataset.tab === tabName) {
+                btn.classList.add('active');
+            } else {
+                btn.classList.remove('active');
+            }
+        });
+
+        // Load content for specific tabs
+        if (tabName === 'performance') {
+            this.loadPerformanceData();
+        } else if (tabName === 'chat') {
+            this.loadTeamChat();
+        }
+    }
+
+    async loadTeamMembers() {
+        const list = document.getElementById('teamList');
+        if (!list) return;
+
+        const token = localStorage.getItem('octobot_token');
+        const currentUser = JSON.parse(localStorage.getItem('octobot_user') || '{}');
+        const isAdmin = currentUser.role === 'admin';
+
+        list.innerHTML = '<div class="loading-spinner"><div class="spinner"></div></div>';
+
+        try {
+            // Fetch team members and online status in parallel
+            const [teamRes, onlineRes] = await Promise.all([
+                fetch(`${this.API_URL}/api/auth/team`, {
+                    headers: { 'Authorization': `Bearer ${token}` }
+                }),
+                fetch(`${this.API_URL}/api/online-users`)
+            ]);
+
+            const data = await teamRes.json();
+            const onlineData = await onlineRes.json();
+
+            // Create map of online users
+            const onlineMap = {};
+            if (onlineData.users) {
+                onlineData.users.forEach(u => {
+                    onlineMap[u.userId] = u;
+                });
+            }
+
+            if (!data.users || data.users.length === 0) {
+                list.innerHTML = '<p style="text-align:center;color:var(--text-secondary);">لا يوجد أعضاء</p>';
+                return;
+            }
+
+            const roleLabels = {
+                admin: { text: 'مسؤول', color: '#0EA5E9', icon: 'fa-crown' },
+                supervisor: { text: 'مشرف', color: '#f59e0b', icon: 'fa-user-shield' },
+                agent: { text: 'موظف', color: '#64748b', icon: 'fa-user' }
+            };
+
+            const searchHtml = `
+            <div style="margin-bottom:24px;position:relative;">
+                <input type="text" id="teamSearchInput" placeholder="بحث عن عضو (الاسم، البريد الإلكتروني...)" 
+                    onkeyup="app.filterTeamMembers(this.value)"
+                    style="width:100%;padding:16px 50px 16px 16px;border:1px solid var(--border-color);border-radius:12px;background:var(--bg-card);color:var(--text-primary);font-size:15px;transition:all 0.3s;box-shadow:0 4px 20px rgba(0,0,0,0.03);">
+                <i class="fas fa-search" style="position:absolute;right:20px;top:50%;transform:translateY(-50%);color:var(--text-secondary);font-size:18px;pointer-events:none;"></i>
+            </div>
+            `;
+
+            list.innerHTML = searchHtml + data.users.map(u => {
+                const roleInfo = roleLabels[u.role] || roleLabels.agent;
+                const isSelf = u.id === currentUser.id;
+
+                // Check online status
+                const onlineInfo = onlineMap[u.id];
+                const isOnline = onlineInfo && onlineInfo.status === 'online';
+                const lastActiveAgo = onlineInfo?.lastActiveAgo;
+
+                // Build online status badge
+                const onlineStatusBadge = isOnline
+                    ? '<span style="background:rgba(16,185,129,0.15);color:#10b981;padding:4px 12px;border-radius:20px;font-size:12px;display:flex;align-items:center;gap:4px;"><span style="width:8px;height:8px;background:#10b981;border-radius:50%;animation:pulse 2s infinite;"></span> متصل الآن</span>'
+                    : '<span style="background:rgba(239,68,68,0.15);color:#ef4444;padding:4px 12px;border-radius:20px;font-size:12px;display:flex;align-items:center;gap:4px;"><span style="width:8px;height:8px;background:#ef4444;border-radius:50%;"></span> غير متصل</span>';
+
+                return `
+                <div class="team-member-card" data-name="${u.name.toLowerCase()}" data-email="${u.email.toLowerCase()}" style="background:var(--bg-card);border-radius:16px;padding:20px;margin-bottom:16px;border:1px solid var(--border-color);transition:all 0.3s;${isOnline ? 'border-left:4px solid #10b981;' : 'border-left:4px solid #ef4444;'}">
+                    <div style="display:flex;align-items:center;gap:16px;margin-bottom:16px;">
+                        <div style="position:relative;">
+                            <div style="width:56px;height:56px;border-radius:50%;background:linear-gradient(135deg,${roleInfo.color},${roleInfo.color}aa);display:flex;align-items:center;justify-content:center;color:white;font-size:20px;font-weight:600;box-shadow:0 4px 12px ${roleInfo.color}44;">
+                                ${u.name.charAt(0).toUpperCase()}
+                            </div>
+                            <span style="position:absolute;bottom:2px;right:2px;width:14px;height:14px;border-radius:50%;background:${isOnline ? '#10b981' : '#ef4444'};border:3px solid var(--bg-card);"></span>
+                        </div>
+                        <div style="flex:1;">
+                            <div style="font-weight:600;font-size:16px;color:var(--text-primary);display:flex;align-items:center;gap:8px;">
+                                ${u.name}
+                                ${isSelf ? '<span style="font-size:11px;background:var(--accent);color:white;padding:2px 8px;border-radius:10px;">أنت</span>' : ''}
+                            </div>
+                            <div style="font-size:13px;color:var(--text-secondary);margin-top:2px;">${u.email}</div>
+                            <div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:8px;">
+                                ${onlineStatusBadge}
+                                <span style="background:${roleInfo.color};color:white;padding:4px 12px;border-radius:20px;font-size:12px;display:flex;align-items:center;gap:4px;">
+                                    <i class="fas ${roleInfo.icon}" style="font-size:10px;"></i> ${roleInfo.text}
+                                </span>
+                                ${u.isVerified ?
+                        '<span style="background:rgba(16,185,129,0.15);color:#10b981;padding:4px 12px;border-radius:20px;font-size:12px;"><i class="fas fa-check-circle"></i> مفعل</span>' :
+                        '<span style="background:rgba(245,158,11,0.15);color:#f59e0b;padding:4px 12px;border-radius:20px;font-size:12px;"><i class="fas fa-clock"></i> غير مفعل</span>'}
+                            </div>
+                        </div>
+                    </div>
+                    
+                    ${isAdmin && !isSelf ? `
+                    <div style="display:flex;flex-wrap:wrap;gap:10px;padding-top:16px;border-top:1px solid var(--border-color);">
+                        <select onchange="app.updateUserRole('${u.id}', this.value)" style="flex:1;min-width:120px;padding:10px 14px;border:1px solid var(--border-color);border-radius:8px;background:var(--bg-secondary);color:var(--text-primary);cursor:pointer;font-size:13px;">
+                            <option value="agent" ${u.role === 'agent' ? 'selected' : ''}>موظف</option>
+                            <option value="supervisor" ${u.role === 'supervisor' ? 'selected' : ''}>مشرف</option>
+                            <option value="admin" ${u.role === 'admin' ? 'selected' : ''}>مسؤول</option>
+                        </select>
+                        <button onclick="app.openPermissionsModal('${u.id}', '${u.name}', ${JSON.stringify(u.permissions || {}).replace(/"/g, '&quot;')})" 
+                            style="flex:1;min-width:100px;padding:10px 14px;background:linear-gradient(135deg,#3b82f6,#2563eb);color:white;border:none;border-radius:8px;cursor:pointer;font-weight:500;display:flex;align-items:center;justify-content:center;gap:6px;font-size:13px;">
+                            <i class="fas fa-key"></i> الصلاحيات
+                        </button>
+                        <button onclick="app.openSubscriptionModal('${u.id}', '${u.name}', '${u.subscriptionExpiresAt || ''}')" 
+                            style="flex:1;min-width:100px;padding:10px 14px;background:linear-gradient(135deg,#8b5cf6,#7c3aed);color:white;border:none;border-radius:8px;cursor:pointer;font-weight:500;display:flex;align-items:center;justify-content:center;gap:6px;font-size:13px;">
+                            <i class="fas fa-calendar-alt"></i> الاشتراك
+                        </button>
+                        <label style="display:flex;align-items:center;gap:8px;padding:10px 14px;background:var(--bg-secondary);border-radius:8px;cursor:pointer;font-size:13px;">
+                            <input type="checkbox" ${u.isWorkingToday ? 'checked' : ''} onchange="app.toggleWorkingStatus('${u.id}', this.checked)" style="width:16px;height:16px;">
+                            <span style="color:${u.isWorkingToday ? '#10b981' : 'var(--text-secondary)'};">يعمل اليوم</span>
+                        </label>
+                        ${!u.isVerified ? `
+                        <button onclick="app.verifyUser('${u.id}', '${u.name}')" 
+                            style="padding:10px 14px;background:linear-gradient(135deg,#10b981,#059669);color:white;border:none;border-radius:8px;cursor:pointer;font-weight:500;display:flex;align-items:center;justify-content:center;gap:6px;font-size:13px;">
+                            <i class="fas fa-check-circle"></i> تفعيل
+                        </button>
+                        ` : ''}
+                        <button onclick="app.deleteTeamMember('${u.id}', '${u.name}')" 
+                            style="padding:10px 14px;background:rgba(239,68,68,0.1);color:#ef4444;border:1px solid rgba(239,68,68,0.3);border-radius:8px;cursor:pointer;font-weight:500;display:flex;align-items:center;justify-content:center;gap:6px;font-size:13px;">
+                            <i class="fas fa-trash"></i>
+                        </button>
+                    </div>
+                    ${u.subscriptionExpiresAt ? `
+                    <div style="margin-top:12px;padding:10px 16px;background:${new Date(u.subscriptionExpiresAt) > new Date() ? 'rgba(16,185,129,0.1)' : 'rgba(239,68,68,0.1)'};border-radius:8px;display:flex;align-items:center;gap:8px;">
+                        <i class="fas fa-calendar-check" style="color:${new Date(u.subscriptionExpiresAt) > new Date() ? '#10b981' : '#ef4444'};"></i>
+                        <span style="font-size:13px;color:${new Date(u.subscriptionExpiresAt) > new Date() ? '#10b981' : '#ef4444'};">
+                            ${new Date(u.subscriptionExpiresAt) > new Date() ? 'اشتراك فعال حتى' : 'انتهى الاشتراك في'}: 
+                            ${new Date(u.subscriptionExpiresAt).toLocaleDateString('ar-EG', { year: 'numeric', month: 'long', day: 'numeric' })}
+                        </span>
+                    </div>
+                    ` : ''}
+                    ` : `
+                    <div style="display:flex;flex-wrap:wrap;gap:10px;padding-top:16px;border-top:1px solid var(--border-color);">
+                        <label style="display:flex;align-items:center;gap:8px;padding:10px 14px;background:var(--bg-secondary);border-radius:8px;cursor:pointer;font-size:13px;">
+                            <input type="checkbox" ${u.isWorkingToday ? 'checked' : ''} ${!isAdmin && !isSelf ? 'disabled' : ''} onchange="app.toggleWorkingStatus('${u.id}', this.checked)" style="width:16px;height:16px;">
+                            <span style="color:${u.isWorkingToday ? '#10b981' : 'var(--text-secondary)'};">يعمل اليوم</span>
+                        </label>
+                    </div>
+                    `}
+                </div>
+            `}).join('');
+        } catch (err) {
+            console.error('Load team error:', err);
+            list.innerHTML = '<p style="color:var(--error);">فشل تحميل الفريق</p>';
+        }
+    }
+
+    // Filter team members list
+    filterTeamMembers(query) {
+        const searchTerm = query.toLowerCase().trim();
+        const cards = document.querySelectorAll('.team-member-card');
+
+        cards.forEach(card => {
+            const name = card.dataset.name || '';
+            const email = card.dataset.email || '';
+
+            if (name.includes(searchTerm) || email.includes(searchTerm)) {
+                card.style.display = 'block';
+            } else {
+                card.style.display = 'none';
+            }
+        });
+    }
+
+    // ============= PRIVATE SUPPORT CHAT FUNCTIONS =============
+
+    // Load support chat (different UI for admin vs employee)
+    async loadTeamChat() {
+        const chatContainer = document.getElementById('teamChatTab');
+        if (!chatContainer) return;
+
+        const userData = JSON.parse(localStorage.getItem('octobot_user') || '{}');
+        const isAdmin = userData.role === 'admin';
+
+        if (isAdmin) {
+            // Admin: Show employee conversations list
+            await this.loadSupportConversationsList(chatContainer);
+        } else {
+            // Employee: Show direct chat with admin
+            await this.loadSupportChatUI(chatContainer, null);
+        }
+    }
+
+    // Admin: Load list of employee conversations
+    async loadSupportConversationsList(container) {
+        container.innerHTML = `
+            <div style="display:flex;flex-direction:column;height:500px;background:var(--bg-card);border-radius:16px;border:1px solid var(--border-color);overflow:hidden;">
+                <div style="padding:16px 20px;background:linear-gradient(135deg,#22c55e,#16a34a);color:white;display:flex;align-items:center;gap:12px;">
+                    <i class="fas fa-headset" style="font-size:24px;"></i>
+                    <div>
+                        <div style="font-weight:600;font-size:16px;">الدعم الفني</div>
+                        <div style="font-size:12px;opacity:0.8;">محادثات الموظفين</div>
+                    </div>
+                </div>
+                <div id="supportConvsList" style="flex:1;overflow-y:auto;padding:16px;">
+                    <div style="text-align:center;padding:20px;color:var(--text-secondary);"><i class="fas fa-spinner fa-spin"></i></div>
+                </div>
+            </div>
+        `;
+
+        try {
+            const token = localStorage.getItem('octobot_token');
+            const response = await fetch(`${this.API_URL}/api/support/conversations`, {
+                headers: { 'Authorization': `Bearer ${token}` }
+            });
+            const data = await response.json();
+            const conversations = data.conversations || [];
+
+            const listContainer = document.getElementById('supportConvsList');
+
+            if (conversations.length === 0) {
+                listContainer.innerHTML = `
+                    <div style="text-align:center;padding:40px;color:var(--text-secondary);">
+                        <i class="fas fa-inbox" style="font-size:48px;opacity:0.3;margin-bottom:16px;"></i>
+                        <p>لا توجد محادثات دعم</p>
+                    </div>
+                `;
+                return;
+            }
+
+            listContainer.innerHTML = conversations.map(conv => `
+                <div onclick="app.openSupportChat('${conv.id}', '${conv.name}')" style="display:flex;align-items:center;gap:12px;padding:14px;border-radius:12px;cursor:pointer;transition:all 0.2s;border:1px solid var(--border-color);margin-bottom:10px;${conv.unreadCount > 0 ? 'background:rgba(34,197,94,0.1);border-color:#22c55e;' : ''}" onmouseover="this.style.background='var(--bg-secondary)'" onmouseout="this.style.background='${conv.unreadCount > 0 ? 'rgba(34,197,94,0.1)' : 'transparent'}'">
+                    <div style="width:46px;height:46px;border-radius:50%;background:linear-gradient(135deg,#22c55e,#16a34a);display:flex;align-items:center;justify-content:center;color:white;font-weight:600;font-size:18px;">
+                        ${conv.name.charAt(0)}
+                    </div>
+                    <div style="flex:1;min-width:0;">
+                        <div style="font-weight:600;color:var(--text-primary);display:flex;align-items:center;gap:8px;">
+                            ${conv.name}
+                            ${conv.unreadCount > 0 ? `<span style="background:#22c55e;color:white;font-size:11px;padding:2px 8px;border-radius:10px;">${conv.unreadCount}</span>` : ''}
+                        </div>
+                        <div style="font-size:13px;color:var(--text-secondary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">
+                            ${conv.lastMessage || 'لا توجد رسائل'}
+                        </div>
+                    </div>
+                    <i class="fas fa-chevron-left" style="color:var(--text-secondary);"></i>
+                </div>
+            `).join('');
+
+        } catch (err) {
+            console.error('Load support conversations error:', err);
+        }
+    }
+
+    // Open support chat with specific employee (for admin)
+    async openSupportChat(employeeId, employeeName) {
+        this.currentSupportEmployee = { id: employeeId, name: employeeName };
+        const container = document.getElementById('teamChatTab');
+        await this.loadSupportChatUI(container, employeeId, employeeName);
+    }
+
+    // Load support chat UI
+    async loadSupportChatUI(container, employeeId, employeeName = null) {
+        const userData = JSON.parse(localStorage.getItem('octobot_user') || '{}');
+        const isAdmin = userData.role === 'admin';
+        const chatTitle = isAdmin ? employeeName || 'دعم' : 'الدعم الفني';
+        const chatSubtitle = isAdmin ? 'محادثة مع موظف' : 'تواصل مع الإدارة';
+
+        container.innerHTML = `
+            <div style="display:flex;flex-direction:column;height:500px;background:var(--bg-card);border-radius:16px;border:1px solid var(--border-color);overflow:hidden;">
+                <div style="padding:16px 20px;background:linear-gradient(135deg,#22c55e,#16a34a);color:white;display:flex;align-items:center;gap:12px;">
+                    ${isAdmin ? `<button onclick="app.loadTeamChat()" style="background:rgba(255,255,255,0.2);border:none;color:white;width:36px;height:36px;border-radius:50%;cursor:pointer;"><i class="fas fa-arrow-right"></i></button>` : '<i class="fas fa-headset" style="font-size:24px;"></i>'}
+                    <div>
+                        <div style="font-weight:600;font-size:16px;">${chatTitle}</div>
+                        <div style="font-size:12px;opacity:0.8;">${chatSubtitle}</div>
+                    </div>
+                </div>
+                <div id="teamChatMessages" style="flex:1;overflow-y:auto;padding:16px;background:var(--bg-secondary);">
+                    <div style="text-align:center;padding:20px;color:var(--text-secondary);"><i class="fas fa-spinner fa-spin"></i></div>
+                </div>
+
+                <div id="teamChatFilePreview" style="display:none;padding:10px;background:var(--bg-secondary);border-top:1px solid var(--border-color);">
+                    <div style="display:inline-block;position:relative;">
+                        <img id="previewImage" src="" style="height:60px;border-radius:8px;border:1px solid var(--border-color);">
+                        <button onclick="document.getElementById('supportFileInput').value='';document.getElementById('teamChatFilePreview').style.display='none';" style="position:absolute;top:-8px;right:-8px;background:red;color:white;border:none;border-radius:50%;width:20px;height:20px;font-size:12px;cursor:pointer;">&times;</button>
+                    </div>
+                </div>
+
+                <div style="padding:12px 16px;background:var(--bg-card);border-top:1px solid var(--border-color);">
+                    <form id="teamChatForm" onsubmit="app.sendSupportMessage(event)" style="display:flex;gap:10px;align-items:center;">
+                        <input type="file" id="supportFileInput" hidden accept="image/*" onchange="const file=this.files[0];if(file){const reader=new FileReader();reader.onload=e=>{document.getElementById('previewImage').src=e.target.result;document.getElementById('teamChatFilePreview').style.display='block';};reader.readAsDataURL(file);}">
+                        <button type="button" onclick="document.getElementById('supportFileInput').click()" style="background:none;border:none;color:var(--text-secondary);font-size:20px;cursor:pointer;padding:8px;"><i class="fas fa-paperclip"></i></button>
+                        <input type="text" id="teamChatInput" placeholder="اكتب رسالتك للدعم الفني..." 
+                            style="flex:1;padding:12px 16px;border:1px solid var(--border-color);border-radius:10px;background:var(--bg-secondary);color:var(--text-primary);font-size:14px;">
+                        <button type="submit" style="background:linear-gradient(135deg,#22c55e,#16a34a);color:white;border:none;padding:12px 20px;border-radius:10px;cursor:pointer;font-weight:500;">
+                            <i class="fas fa-paper-plane"></i>
+                        </button>
+                    </form>
+                </div>
+            </div>
+        `;
+
+        await this.loadSupportMessages(employeeId);
+        this.startTeamChatPolling(employeeId);
+    }
+
+    // Load support messages
+    async loadSupportMessages(employeeId = null) {
+        try {
+            const messagesContainer = document.getElementById('teamChatMessages');
+            if (!messagesContainer) return;
+
+            const token = localStorage.getItem('octobot_token');
+            const url = employeeId
+                ? `${this.API_URL}/api/support/messages?userId=${employeeId}`
+                : `${this.API_URL}/api/support/messages`;
+
+            const response = await fetch(url, {
+                headers: { 'Authorization': `Bearer ${token}` }
+            });
+            const data = await response.json();
+
+            if (!data.messages || data.messages.length === 0) {
+                messagesContainer.innerHTML = `
+                    <div style="text-align:center;color:var(--text-secondary);padding:40px;">
+                        <i class="fas fa-comments" style="font-size:48px;opacity:0.3;margin-bottom:16px;"></i>
+                        <p>ابدأ المحادثة!</p>
+                    </div>
+                `;
+                return;
+            }
+
+            const userData = JSON.parse(localStorage.getItem('octobot_user') || '{}');
+
+            messagesContainer.innerHTML = data.messages.map(msg => {
+                const isMe = msg.senderId === userData.id;
+                const time = new Date(msg.createdAt).toLocaleTimeString('ar-EG', { hour: '2-digit', minute: '2-digit' });
+
+                return `
+                    <div style="display:flex;justify-content:${isMe ? 'flex-end' : 'flex-start'};margin-bottom:12px;">
+                        <div style="max-width:70%;${isMe ? '' : 'display:flex;gap:10px;'}">
+                            ${!isMe ? `<div style="width:36px;height:36px;border-radius:50%;background:linear-gradient(135deg,#22c55e,#16a34a);display:flex;align-items:center;justify-content:center;color:white;font-weight:600;flex-shrink:0;">${msg.senderName.charAt(0)}</div>` : ''}
+                            <div>
+                                ${!isMe ? `<div style="font-size:12px;color:var(--text-secondary);margin-bottom:4px;">${msg.senderName}</div>` : ''}
+                                <div style="background:${isMe ? 'linear-gradient(135deg,#22c55e,#16a34a)' : 'var(--bg-card)'};color:${isMe ? 'white' : 'var(--text-primary)'};padding:${msg.attachment ? '6px' : '12px 16px'};border-radius:16px;border-${isMe ? 'bottom-left' : 'bottom-right'}-radius:4px;${!isMe ? 'border:1px solid var(--border-color);' : ''}">
+                                    ${msg.attachment && msg.attachment.type === 'image' ?
+                        `<img src="${msg.attachment.url}" style="max-width:100%;border-radius:12px;cursor:pointer;display:block;margin-bottom:${msg.message ? '8px' : '0'};" onclick="window.open(this.src, '_blank')">`
+                        : ''}
+                                    ${msg.message ? `<div>${msg.message}</div>` : ''}
+                                </div>
+                                <div style="font-size:11px;color:var(--text-secondary);margin-top:4px;text-align:${isMe ? 'left' : 'right'};">${time}</div>
+                            </div>
+                        </div>
+                    </div>
+                `;
+            }).join('');
+
+            messagesContainer.scrollTop = messagesContainer.scrollHeight;
+
+            // Mark as read and refresh badge/list
+            fetch(`${this.API_URL}/api/support/mark-read`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${token}`
+                },
+                body: JSON.stringify({ senderId: employeeId })
+            }).then(() => {
+                // Refresh badge count
+                this.loadSupportUnreadCount();
+                // Refresh conversations list if visible
+                const supportConvsList = document.getElementById('supportConvsList');
+                if (supportConvsList) {
+                    this.loadTeamChat();
+                }
+                // Refresh floating modal list if visible
+                if (document.getElementById('supportListContent')) {
+                    this.refreshSupportListContent();
+                }
+            });
+        } catch (err) {
+            console.error('Load support messages error:', err);
+        }
+    }
+
+    // For backward compatibility
+    async loadTeamChatMessages() {
+        const employeeId = this.currentSupportEmployee?.id || null;
+        await this.loadSupportMessages(employeeId);
+    }
+
+    // Send support message
+    async sendSupportMessage(event) {
+        event.preventDefault();
+
+        const input = document.getElementById('teamChatInput');
+        const fileInput = document.getElementById('supportFileInput');
+        const message = input?.value.trim();
+        const file = fileInput?.files[0];
+
+        if (!message && !file) return;
+
+        const token = localStorage.getItem('octobot_token');
+        const userData = JSON.parse(localStorage.getItem('octobot_user') || '{}');
+        const formData = new FormData();
+
+        if (this.currentSupportEmployee?.id) {
+            formData.append('receiverId', this.currentSupportEmployee.id);
+        }
+        if (message) formData.append('message', message);
+        if (file) formData.append('file', file);
+
+        input.value = '';
+        if (fileInput) fileInput.value = '';
+        document.getElementById('teamChatFilePreview').style.display = 'none';
+
+        try {
+            await fetch(`${this.API_URL}/api/support/send`, {
+                method: 'POST',
+                headers: {
+                    'Authorization': `Bearer ${token}`
+                },
+                body: formData
+            });
+
+            await this.loadSupportMessages(this.currentSupportEmployee?.id);
+        } catch (err) {
+            console.error('Send support message error:', err);
+            this.showToast('فشل إرسال الرسالة', 'error');
+        }
+    }
+
+    // For backward compatibility
+    async sendTeamMessage(event) {
+        await this.sendSupportMessage(event);
+    }
+
+    // Start support chat polling
+    startTeamChatPolling(employeeId = null) {
+        this.stopTeamChatPolling();
+        this.teamChatPollInterval = setInterval(() => {
+            this.loadSupportMessages(employeeId);
+        }, 5000);
+    }
+
+    // Stop team chat polling
+    stopTeamChatPolling() {
+        if (this.teamChatPollInterval) {
+            clearInterval(this.teamChatPollInterval);
+            this.teamChatPollInterval = null;
+        }
+    }
+
+    // Open link conversation modal
+    openLinkConversationModal() {
+        // Show modal to select a conversation
+        const modal = document.createElement('div');
+        modal.id = 'linkConvModal';
+        modal.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.6);display:flex;align-items:center;justify-content:center;z-index:10000;';
+        modal.innerHTML = `
+            <div style="background:var(--bg-card);border-radius:20px;width:90%;max-width:500px;max-height:80vh;overflow:hidden;box-shadow:0 20px 60px rgba(0,0,0,0.3);">
+                <div style="padding:20px;background:linear-gradient(135deg,#0EA5E9,#2563EB);color:white;">
+                    <div style="display:flex;justify-content:space-between;align-items:center;">
+                        <h3 style="margin:0;"><i class="fas fa-link"></i> ربط محادثة عميل</h3>
+                        <button onclick="document.getElementById('linkConvModal').remove()" style="background:none;border:none;color:white;font-size:20px;cursor:pointer;">&times;</button>
+                    </div>
+                </div>
+                <div style="padding:20px;">
+                    <!-- Platform Buttons -->
+                    <div style="display:flex;gap:10px;margin-bottom:16px;">
+                        <button onclick="app.selectPlatformForLink('facebook')" id="linkPlatformFb" style="flex:1;padding:12px;background:#1877f2;color:white;border:none;border-radius:10px;cursor:pointer;font-weight:500;opacity:0.7;">
+                            <i class="fab fa-facebook"></i> فيسبوك
+                        </button>
+                        <button onclick="app.selectPlatformForLink('instagram')" id="linkPlatformIg" style="flex:1;padding:12px;background:linear-gradient(45deg,#f09433,#e6683c,#dc2743,#cc2366,#bc1888);color:white;border:none;border-radius:10px;cursor:pointer;font-weight:500;opacity:0.7;">
+                            <i class="fab fa-instagram"></i> انستجرام
+                        </button>
+                    </div>
+                    
+                    <!-- Page Selector (for Facebook) -->
+                    <div id="linkPageSelector" style="margin-bottom:16px;display:none;">
+                        <label style="color:var(--text-secondary);font-size:12px;margin-bottom:6px;display:block;">اختر الصفحة:</label>
+                        <select id="linkPageSelect" onchange="app.onLinkPageChange()" style="width:100%;padding:12px;border:1px solid var(--border-color);border-radius:10px;background:var(--bg-secondary);color:var(--text-primary);font-size:14px;">
+                            <option value="">-- اختر الصفحة --</option>
+                        </select>
+                    </div>
+                    
+                    <!-- Search Input -->
+                    <div style="margin-bottom:16px;">
+                        <div style="display:flex;gap:10px;">
+                            <input type="text" id="linkConvSearch" placeholder="ابحث باسم العميل..." 
+                                style="flex:1;padding:12px 16px;border:1px solid var(--border-color);border-radius:10px;background:var(--bg-secondary);color:var(--text-primary);font-size:14px;"
+                                oninput="clearTimeout(app.searchDebounce); app.searchDebounce = setTimeout(() => app.searchConversationsForLink(), 300);">
+                            <button onclick="app.searchConversationsForLink()" style="background:linear-gradient(135deg,#0EA5E9,#2563EB);color:white;border:none;padding:12px 20px;border-radius:10px;cursor:pointer;">
+                                <i class="fas fa-search"></i>
+                            </button>
+                        </div>
+                    </div>
+                    
+                    <!-- Results -->
+                    <div id="linkConvList" style="max-height:300px;overflow-y:auto;">
+                        <p style="text-align:center;color:var(--text-secondary);">اختر المنصة ثم ابحث عن العميل</p>
+                    </div>
+                </div>
+            </div>
+        `;
+        document.body.appendChild(modal);
+
+        // Close on background click only (not content click)
+        modal.addEventListener('click', (e) => {
+            if (e.target === modal) {
+                modal.remove();
+            }
+        });
+
+        // Stop propagation from modal content to prevent team chat modal closing
+        modal.querySelector('div').addEventListener('click', (e) => {
+            e.stopPropagation();
+        });
+
+        // Select Facebook by default and load pages
+        this.linkPlatform = 'facebook';
+        document.getElementById('linkPlatformFb').style.opacity = '1';
+        this.loadPagesForLink();
+
+        // Auto-load conversations after a short delay
+        setTimeout(() => this.searchConversationsForLink(), 500);
+    }
+
+    // Load Facebook pages for page selector
+    async loadPagesForLink() {
+        try {
+            const fbUserId = localStorage.getItem('fb_user_id');
+            if (!fbUserId) return;
+
+            const pagesRes = await fetch(`${this.API_URL}/api/pages/${fbUserId}`);
+            const pagesData = await pagesRes.json();
+            const pages = pagesData.pages || [];
+
+            this.linkPages = pages;
+
+            if (pages.length > 0) {
+                const select = document.getElementById('linkPageSelect');
+                const selector = document.getElementById('linkPageSelector');
+
+                if (select && selector) {
+                    select.innerHTML = pages.map(p =>
+                        `<option value="${p.id}">${p.name}</option>`
+                    ).join('');
+
+                    // Select first page by default
+                    this.selectedLinkPageId = pages[0].id;
+                    selector.style.display = 'block';
+                }
+            }
+        } catch (err) {
+            console.error('Load pages error:', err);
+        }
+    }
+
+    // Handle page change in link modal
+    onLinkPageChange() {
+        const select = document.getElementById('linkPageSelect');
+        if (select) {
+            this.selectedLinkPageId = select.value;
+            // Clear search results
+            document.getElementById('linkConvList').innerHTML = '<p style="text-align:center;color:var(--text-secondary);">ابحث عن اسم العميل</p>';
+        }
+    }
+
+    // Select platform for linking
+    selectPlatformForLink(platform) {
+        this.linkPlatform = platform;
+
+        // Update button styles
+        document.getElementById('linkPlatformFb').style.opacity = platform === 'facebook' ? '1' : '0.7';
+        document.getElementById('linkPlatformIg').style.opacity = platform === 'instagram' ? '1' : '0.7';
+
+        // Show/hide page selector based on platform
+        const pageSelector = document.getElementById('linkPageSelector');
+        if (pageSelector) {
+            if (platform === 'facebook') {
+                pageSelector.style.display = 'block';
+                this.loadPagesForLink();
+            } else {
+                pageSelector.style.display = 'none';
+            }
+        }
+
+        // Clear search and results
+        document.getElementById('linkConvSearch').value = '';
+        document.getElementById('linkConvList').innerHTML = '<p style="text-align:center;color:var(--text-secondary);">ابحث عن اسم العميل</p>';
+    }
+
+    // Search conversations for linking
+    async searchConversationsForLink() {
+        const searchInput = document.getElementById('linkConvSearch');
+        const list = document.getElementById('linkConvList');
+        const query = searchInput?.value.trim() || '';
+
+        // Start loading immediately (even with empty query)
+        list.innerHTML = '<div style="text-align:center;padding:20px;"><i class="fas fa-spinner fa-spin"></i> جاري التحميل...</div>';
+
+        try {
+            const userData = JSON.parse(localStorage.getItem('octobot_user') || '{}');
+            const platform = this.linkPlatform || 'facebook';
+            let conversations = [];
+
+            console.log('[LinkSearch] Platform:', platform, 'Query:', query);
+
+            if (platform === 'facebook') {
+                // Get pages from API
+                const fbUserId = localStorage.getItem('fb_user_id');
+                console.log('[LinkSearch] FB User ID:', fbUserId);
+
+                if (!fbUserId) {
+                    list.innerHTML = '<p style="text-align:center;color:var(--text-secondary);">لم يتم تسجيل الدخول لفيسبوك</p>';
+                    return;
+                }
+
+                // Use selected page or first page
+                const pageId = this.selectedLinkPageId || (this.linkPages && this.linkPages[0]?.id);
+                console.log('[LinkSearch] Selected Page ID:', pageId);
+
+                if (!pageId) {
+                    list.innerHTML = '<p style="text-align:center;color:var(--text-secondary);">اختر صفحة أولاً</p>';
+                    return;
+                }
+
+                // Call correct API (/api/inbox) to get conversations
+                const response = await fetch(`${this.API_URL}/api/inbox/${fbUserId}/${pageId}/conversations?limit=50`);
+                const data = await response.json();
+                console.log('[LinkSearch] Conversations API response:', data);
+
+                if (data.conversations && data.conversations.length > 0) {
+                    // Debug: log first full conversation
+                    console.log('[LinkSearch] First conversation FULL:', data.conversations[0]);
+
+                    // Map conversations first
+                    let allConversations = data.conversations.map(c => {
+                        // Use 'participant' field which contains the actual customer name!
+                        const fullName = c.participant  // This is where the name is!
+                            || c.senders?.data?.[0]?.name
+                            || c.participants?.data?.[0]?.name
+                            || 'عميل';
+
+                        return {
+                            id: c.id,
+                            name: fullName,
+                            lastMessage: c.messages?.data?.[0]?.message || c.snippet || '',
+                            platform: 'facebook',
+                            pageId
+                        };
+                    });
+
+                    console.log('[LinkSearch] Mapped conversations with names:', allConversations.map(c => c.name));
+
+                    // Filter by customer NAME only (not message content)
+                    if (query.length === 0) {
+                        conversations = allConversations;
+                    } else {
+                        // Search in name only
+                        conversations = allConversations.filter(c =>
+                            c.name.toLowerCase().includes(query.toLowerCase())
+                        );
+                    }
+
+                    console.log('[LinkSearch] Filtered results:', conversations.length);
+
+                    // If no results, show all conversations to see their names
+                    if (conversations.length === 0 && query.length > 0) {
+                        console.log('[LinkSearch] Available customer names:');
+                        data.conversations.forEach((c, i) => {
+                            const n = c.senders?.data?.[0]?.name || c.participants?.data?.[0]?.name || c.name || '(no name)';
+                            console.log(`  ${i + 1}. ${n}`);
+                        });
+                    }
+                } else {
+                    console.log('[LinkSearch] No conversations from API');
+                }
+            } else if (platform === 'instagram') {
+                // Call IG API directly
+                const igUserId = this.getIgUserId();
+                console.log('[LinkSearch] IG User ID:', igUserId);
+
+                if (!igUserId) {
+                    list.innerHTML = '<p style="text-align:center;color:var(--text-secondary);">لم يتم تسجيل الدخول للانستجرام</p>';
+                    return;
+                }
+
+                const response = await fetch(`${this.API_URL}/api/ig/${igUserId}/inbox`);
+                const data = await response.json();
+                console.log('[LinkSearch] IG API response:', data);
+
+                if (data.conversations && data.conversations.length > 0) {
+                    conversations = data.conversations
+                        .filter(c => {
+                            const name = c.title || c.users?.[0]?.username || '';
+                            return query.length === 0 || name.toLowerCase().includes(query.toLowerCase());
+                        })
+                        .map(c => ({
+                            id: c.id,
+                            name: c.title || c.users?.[0]?.username || 'عميل',
+                            lastMessage: c.lastMessage || '',
+                            platform: 'instagram',
+                            pageId: igUserId
+                        }));
+                }
+            }
+
+            if (conversations.length === 0) {
+                list.innerHTML = `<p style="text-align:center;color:var(--text-secondary);">لا توجد نتائج لـ "${query}"</p>`;
+                return;
+            }
+
+            list.innerHTML = conversations.map((c, index) => {
+                return `
+                <div class="link-conv-item" data-index="${index}" 
+                    style="padding:12px;border-radius:10px;border:1px solid var(--border-color);margin-bottom:8px;cursor:pointer;transition:all 0.2s;background:var(--bg-secondary);">
+                    <div style="display:flex;align-items:center;gap:10px;">
+                        <div style="width:40px;height:40px;border-radius:50%;background:${c.platform === 'facebook' ? '#1877f2' : 'linear-gradient(45deg,#f09433,#dc2743)'};display:flex;align-items:center;justify-content:center;color:white;font-weight:600;">
+                            ${(c.name || 'ع').charAt(0)}
+                        </div>
+                        <div style="flex:1;">
+                            <div style="font-weight:600;color:var(--text-primary);">${c.name}</div>
+                            <div style="font-size:12px;color:var(--text-secondary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${(c.lastMessage || '').substring(0, 40)}...</div>
+                        </div>
+                        <i class="fas fa-chevron-left" style="color:var(--text-secondary);"></i>
+                    </div>
+                </div>`;
+            }).join('');
+
+            // Store conversations for click handling
+            this.linkConversationResults = conversations;
+
+            // Add click handlers
+            list.querySelectorAll('.link-conv-item').forEach(item => {
+                item.onclick = (e) => {
+                    e.stopPropagation(); // Prevent bubbling to parent modals
+                    e.preventDefault();
+                    const index = parseInt(item.dataset.index);
+                    const c = this.linkConversationResults[index];
+                    console.log('[LinkSearch] Clicked conversation:', index, c);
+                    if (c) {
+                        try {
+                            console.log('[LinkSearch] About to call selectConversationForLink...');
+                            this.selectConversationForLink(c.platform, c.id, c.name, c.lastMessage, c.pageId);
+                            console.log('[LinkSearch] selectConversationForLink completed!');
+                        } catch (err) {
+                            console.error('[LinkSearch] ERROR in selectConversationForLink:', err);
+                        }
+                    }
+                };
+            });
+        } catch (err) {
+            console.error('Search conversations error:', err);
+            list.innerHTML = '<p style="text-align:center;color:var(--error);">فشل البحث - ' + err.message + '</p>';
+        }
+    }
+
+    // Select a conversation to link in the team chat message - AUTO SEND
+    async selectConversationForLink(platform, conversationId, customerName, lastMessage, pageId) {
+        console.log('[TeamChat] Selected conversation to link:', { platform, conversationId, customerName, pageId });
+
+        // Close the link modal
+        const linkModal = document.getElementById('linkConvModal');
+        if (linkModal) linkModal.remove();
+
+        // Auto-send message with linked conversation
+        try {
+            const userData = JSON.parse(localStorage.getItem('octobot_user') || '{}');
+
+            const linkedConversation = {
+                platform,
+                conversationId,
+                customerName,
+                lastMessage: lastMessage ? lastMessage.substring(0, 50) : '',
+                pageId
+            };
+
+            console.log('[TeamChat] Sending linked conversation:', linkedConversation);
+
+            const response = await fetch(`${this.API_URL}/api/team-chat/send`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    senderId: userData.id,
+                    senderName: userData.name,
+                    message: `📎 محادثة العميل: ${customerName}`,
+                    linkedConversation
+                })
+            });
+
+            const result = await response.json();
+            console.log('[TeamChat] Send result:', result);
+
+            if (result.success) {
+                this.showToast(`✅ تم إرسال محادثة "${customerName}"`, 'success');
+                this.loadTeamChatModalMessages();
+            } else {
+                this.showToast('❌ فشل إرسال المحادثة', 'error');
+            }
+        } catch (err) {
+            console.error('[TeamChat] Error sending linked conversation:', err);
+            this.showToast('❌ فشل إرسال المحادثة', 'error');
+        }
+    }
+
+    // Cancel the pending linked conversation
+    cancelLinkedConversation() {
+        this.pendingLinkedConversation = null;
+        const preview = document.getElementById('linkedConvPreviewModal');
+        if (preview) {
+            preview.innerHTML = '';
+            preview.style.display = 'none';
+        }
+    }
+    async loadConversationsForLink(platform) {
+        const list = document.getElementById('linkConvList');
+        if (!list) return;
+
+        list.innerHTML = '<div style="text-align:center;padding:20px;"><i class="fas fa-spinner fa-spin"></i> جاري التحميل...</div>';
+
+        try {
+            const userData = JSON.parse(localStorage.getItem('octobot_user') || '{}');
+            let conversations = [];
+
+            if (platform === 'facebook') {
+                // Try to use cached conversations first
+                if (this.cachedConversations && this.cachedConversations.length > 0) {
+                    conversations = this.cachedConversations.map(c => ({
+                        id: c.id,
+                        name: c.senders?.data?.[0]?.name || c.participants?.data?.find(p => p.id !== this.activePage)?.name || 'عميل',
+                        lastMessage: c.messages?.data?.[0]?.message || c.snippet || '',
+                        platform: 'facebook',
+                        pageId: this.activePage
+                    }));
+                } else {
+                    // Get pages from localStorage
+                    const pages = JSON.parse(localStorage.getItem(`fb_pages_${userData.id}`) || '[]');
+                    if (pages.length > 0) {
+                        const pageId = pages[0].id;
+                        const token = pages[0].access_token;
+                        // Use the inbox API
+                        const response = await fetch(`${this.API_URL}/api/conversations/${userData.id}/${pageId}?limit=20`);
+                        const data = await response.json();
+                        console.log('[LinkConv] Facebook data:', data);
+                        conversations = (data.conversations || []).map(c => ({
+                            id: c.id,
+                            name: c.senders?.data?.[0]?.name || c.participants?.data?.[0]?.name || 'عميل',
+                            lastMessage: c.messages?.data?.[0]?.message || c.snippet || '',
+                            platform: 'facebook',
+                            pageId
+                        }));
+                    } else {
+                        list.innerHTML = '<p style="text-align:center;color:var(--text-secondary);">لا توجد صفحات متصلة</p>';
+                        return;
+                    }
+                }
+            } else if (platform === 'instagram') {
+                // Try to use cached IG conversations first
+                if (this.cachedIgConversations && this.cachedIgConversations.length > 0) {
+                    conversations = this.cachedIgConversations.map(c => ({
+                        id: c.thread_id,
+                        name: c.thread_title || c.users?.[0]?.username || 'عميل',
+                        lastMessage: c.last_permanent_item?.text || '',
+                        platform: 'instagram',
+                        pageId: this.getIgUserId()
+                    }));
+                } else {
+                    // No cached IG conversations - Instagram API not available
+                    list.innerHTML = '<p style="text-align:center;color:var(--text-secondary);">افتح صفحة الانستجرام أولاً لتحميل المحادثات</p>';
+                    return;
+                }
+            }
+
+            console.log('[LinkConv] Final conversations:', conversations);
+
+            if (conversations.length === 0) {
+                list.innerHTML = '<p style="text-align:center;color:var(--text-secondary);">لا توجد محادثات - تأكد من فتح صفحة الرسائل أولاً</p>';
+                return;
+            }
+
+            list.innerHTML = conversations.map(c => {
+                const safeName = (c.name || '').replace(/'/g, "\\'").replace(/"/g, "&quot;");
+                const safeMsg = (c.lastMessage?.substring(0, 50) || '').replace(/'/g, "\\'").replace(/"/g, "&quot;");
+                return `
+                <div onclick="app.selectConversationForLink('${c.platform}', '${c.id}', '${safeName}', '${safeMsg}', '${c.pageId}')" 
+                    style="padding:12px;border-radius:10px;border:1px solid var(--border-color);margin-bottom:8px;cursor:pointer;transition:all 0.2s;background:var(--bg-secondary);">
+                    <div style="display:flex;align-items:center;gap:10px;">
+                        <div style="width:40px;height:40px;border-radius:50%;background:${platform === 'facebook' ? '#1877f2' : 'linear-gradient(45deg,#f09433,#dc2743)'};display:flex;align-items:center;justify-content:center;color:white;font-weight:600;">
+                            ${c.name.charAt(0)}
+                        </div>
+                        <div style="flex:1;">
+                            <div style="font-weight:600;color:var(--text-primary);">${c.name}</div>
+                            <div style="font-size:12px;color:var(--text-secondary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${c.lastMessage?.substring(0, 40) || 'لا توجد رسائل'}...</div>
+                        </div>
+                        <i class="fas fa-chevron-left" style="color:var(--text-secondary);"></i>
+                    </div>
+                </div>`;
+            }).join('');
+        } catch (err) {
+            console.error('Load conversations for link error:', err);
+            list.innerHTML = '<p style="text-align:center;color:var(--error);">فشل تحميل المحادثات - ' + err.message + '</p>';
+        }
+    }
+
+
+
+
+    // Clear linked conversation
+    clearLinkedConversation() {
+        this.pendingLinkedConversation = null;
+        const preview = document.getElementById('linkedConvPreview');
+        if (preview) preview.style.display = 'none';
+    }
+
+
+
+    // Open permissions modal
+    openPermissionsModal(userId, userName, currentPermissions) {
+        const defaultPerms = {
+            facebook: { view: false, send: false, broadcast: false, manage: false, allowedPages: [] },
+            telegram: { view: false, send: false, manage: false },
+            whatsapp: { view: false, send: false, manage: false },
+            instagram: { view: false, send: false, manage: false }
+        };
+
+        const permissions = { ...defaultPerms };
+        // Deep merge current permissions
+        if (currentPermissions) {
+            Object.keys(currentPermissions).forEach(platform => {
+                if (permissions[platform]) {
+                    permissions[platform] = { ...permissions[platform], ...currentPermissions[platform] };
+                }
+            });
+        }
+        const allowedPages = permissions.facebook?.allowedPages || [];
+
+        // Get available FB pages from admin's connection
+        const fbPages = this.fbPages || [];
+
+        const modal = document.createElement('div');
+        modal.id = 'permissionsModal';
+        modal.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.7);display:flex;align-items:center;justify-content:center;z-index:10000;backdrop-filter:blur(5px);overflow-y:auto;padding:20px;';
+
+        modal.innerHTML = `
+                <div style="background:var(--bg-card);width:90%;max-width:600px;border-radius:20px;padding:24px;border:1px solid var(--border-color);box-shadow:0 20px 40px rgba(0,0,0,0.4);max-height:90vh;overflow-y:auto;">
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:24px;">
+                    <h3 style="margin:0;font-size:18px;color:var(--text-primary);"><i class="fas fa-key" style="color:#0EA5E9;margin-left:8px;"></i> صلاحيات ${userName}</h3>
+                    <button onclick="document.getElementById('permissionsModal').remove()" style="background:none;border:none;color:var(--text-secondary);cursor:pointer;font-size:20px;width:36px;height:36px;border-radius:50%;display:flex;align-items:center;justify-content:center;transition:background 0.2s;">✕</button>
+                </div>
+                
+                <div style="display:flex;flex-direction:column;gap:16px;">
+                    <!-- FACEBOOK SECTION -->
+                    <div style="background:var(--bg-secondary);border-radius:12px;padding:16px;border:1px solid var(--border-color);">
+                        <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px;">
+                            <i class="fab fa-facebook" style="color:#1877f2;font-size:20px;width:24px;text-align:center;"></i>
+                            <span style="font-weight:600;color:var(--text-primary);">فيسبوك</span>
+                        </div>
+                        <div style="display:flex;flex-wrap:wrap;gap:12px;">
+                            <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px;color:var(--text-secondary);" title="عرض الرسائل في صندوق الوارد فقط">
+                                <input type="checkbox" id="perm_facebook_view" ${permissions.facebook?.view ? 'checked' : ''} style="width:16px;height:16px;">
+                                <i class="fas fa-eye" style="font-size:12px;"></i> عرض الرسائل
+                            </label>
+                            <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px;color:var(--text-secondary);" title="الرد على الرسائل في صندوق الوارد">
+                                <input type="checkbox" id="perm_facebook_send" ${permissions.facebook?.send ? 'checked' : ''} style="width:16px;height:16px;">
+                                <i class="fas fa-reply" style="font-size:12px;"></i> الرد على الرسائل
+                            </label>
+                            <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px;color:var(--text-secondary);" title="استخدام ميزة الإرسال الجماعي (Broadcast)">
+                                <input type="checkbox" id="perm_facebook_broadcast" ${permissions.facebook?.broadcast ? 'checked' : ''} style="width:16px;height:16px;">
+                                <i class="fas fa-bullhorn" style="font-size:12px;"></i> إرسال جماعي
+                            </label>
+                            <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px;color:var(--text-secondary);" title="نشر منشورات على الصفحة">
+                                <input type="checkbox" id="perm_facebook_manage" ${permissions.facebook?.manage ? 'checked' : ''} style="width:16px;height:16px;">
+                                <i class="fas fa-edit" style="font-size:12px;"></i> نشر منشورات
+                            </label>
+                        </div>
+                        ${fbPages.length > 0 ? `
+                        <div style="margin-top:16px;padding-top:12px;border-top:1px solid var(--border-color);">
+                            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+                                <span style="font-size:13px;color:var(--text-secondary);">
+                                    <i class="fas fa-file-alt" style="margin-left:4px;"></i> الصفحات المسموحة:
+                                </span>
+                                <div style="display:flex;gap:8px;">
+                                    <button type="button" onclick="document.querySelectorAll('.fb-page-checkbox').forEach(c=>c.checked=true)" style="padding:4px 10px;font-size:11px;background:var(--accent);color:white;border:none;border-radius:6px;cursor:pointer;">تحديد الكل</button>
+                                    <button type="button" onclick="document.querySelectorAll('.fb-page-checkbox').forEach(c=>c.checked=false)" style="padding:4px 10px;font-size:11px;background:var(--bg-card);color:var(--text-secondary);border:1px solid var(--border-color);border-radius:6px;cursor:pointer;">إلغاء الكل</button>
+                                </div>
+                            </div>
+                            <div style="display:flex;flex-direction:column;gap:8px;max-height:150px;overflow-y:auto;">
+                                ${fbPages.map(page => `
+                                    <label style="display:flex;align-items:center;gap:10px;padding:8px 12px;background:var(--bg-card);border-radius:8px;cursor:pointer;font-size:13px;border:1px solid var(--border-color);">
+                                        <input type="checkbox" class="fb-page-checkbox" value="${page.id}" ${allowedPages.includes(page.id) ? 'checked' : ''} style="width:16px;height:16px;">
+                                        <img src="${page.picture || 'https://placehold.co/24'}" style="width:24px;height:24px;border-radius:50%;" alt="">
+                                        <span style="color:var(--text-primary);">${page.name}</span>
+                                    </label>
+                                `).join('')}
+                            </div>
+                            <p style="font-size:11px;color:var(--text-secondary);margin-top:8px;"><i class="fas fa-info-circle"></i> إذا لم تحدد أي صفحة، لن يظهر للموظف أي صفحة.</p>
+                        </div>
+                        ` : ''}
+                    </div>
+                    
+                    <!-- TELEGRAM SECTION -->
+                    <div style="background:var(--bg-secondary);border-radius:12px;padding:16px;border:1px solid var(--border-color);">
+                        <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px;">
+                            <i class="fab fa-telegram" style="color:#0088cc;font-size:20px;width:24px;text-align:center;"></i>
+                            <span style="font-weight:600;color:var(--text-primary);">تيليجرام</span>
+                        </div>
+                        <div style="display:flex;flex-wrap:wrap;gap:12px;">
+                            <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px;color:var(--text-secondary);" title="عرض المحادثات">
+                                <input type="checkbox" id="perm_telegram_view" ${permissions.telegram?.view ? 'checked' : ''} style="width:16px;height:16px;">
+                                <i class="fas fa-eye" style="font-size:12px;"></i> عرض المحادثات
+                            </label>
+                            <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px;color:var(--text-secondary);" title="إرسال الرسائل">
+                                <input type="checkbox" id="perm_telegram_send" ${permissions.telegram?.send ? 'checked' : ''} style="width:16px;height:16px;">
+                                <i class="fas fa-paper-plane" style="font-size:12px;"></i> إرسال الرسائل
+                            </label>
+                            <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px;color:var(--text-secondary);" title="حذف وتعديل الرسائل">
+                                <input type="checkbox" id="perm_telegram_manage" ${permissions.telegram?.manage ? 'checked' : ''} style="width:16px;height:16px;">
+                                <i class="fas fa-cog" style="font-size:12px;"></i> إدارة الرسائل
+                            </label>
+                        </div>
+                    </div>
+                    
+                    <!-- WHATSAPP SECTION -->
+                    <div style="background:var(--bg-secondary);border-radius:12px;padding:16px;border:1px solid var(--border-color);">
+                        <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px;">
+                            <i class="fab fa-whatsapp" style="color:#25d366;font-size:20px;width:24px;text-align:center;"></i>
+                            <span style="font-weight:600;color:var(--text-primary);">واتساب</span>
+                        </div>
+                        <div style="display:flex;flex-wrap:wrap;gap:12px;">
+                            <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px;color:var(--text-secondary);">
+                                <input type="checkbox" id="perm_whatsapp_view" ${permissions.whatsapp?.view ? 'checked' : ''} style="width:16px;height:16px;">
+                                <i class="fas fa-eye" style="font-size:12px;"></i> عرض المحادثات
+                            </label>
+                            <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px;color:var(--text-secondary);">
+                                <input type="checkbox" id="perm_whatsapp_send" ${permissions.whatsapp?.send ? 'checked' : ''} style="width:16px;height:16px;">
+                                <i class="fas fa-paper-plane" style="font-size:12px;"></i> إرسال الرسائل
+                            </label>
+                            <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px;color:var(--text-secondary);">
+                                <input type="checkbox" id="perm_whatsapp_manage" ${permissions.whatsapp?.manage ? 'checked' : ''} style="width:16px;height:16px;">
+                                <i class="fas fa-cog" style="font-size:12px;"></i> إدارة
+                            </label>
+                        </div>
+                    </div>
+                    
+                    <!-- INSTAGRAM SECTION -->
+                    <div style="background:var(--bg-secondary);border-radius:12px;padding:16px;border:1px solid var(--border-color);">
+                        <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px;">
+                            <i class="fab fa-instagram" style="color:#e4405f;font-size:20px;width:24px;text-align:center;"></i>
+                            <span style="font-weight:600;color:var(--text-primary);">انستجرام</span>
+                        </div>
+                        <div style="display:flex;flex-wrap:wrap;gap:12px;">
+                            <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px;color:var(--text-secondary);">
+                                <input type="checkbox" id="perm_instagram_view" ${permissions.instagram?.view ? 'checked' : ''} style="width:16px;height:16px;">
+                                <i class="fas fa-eye" style="font-size:12px;"></i> عرض المحادثات
+                            </label>
+                            <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px;color:var(--text-secondary);">
+                                <input type="checkbox" id="perm_instagram_send" ${permissions.instagram?.send ? 'checked' : ''} style="width:16px;height:16px;">
+                                <i class="fas fa-paper-plane" style="font-size:12px;"></i> إرسال الرسائل
+                            </label>
+                            <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px;color:var(--text-secondary);">
+                                <input type="checkbox" id="perm_instagram_manage" ${permissions.instagram?.manage ? 'checked' : ''} style="width:16px;height:16px;">
+                                <i class="fas fa-cog" style="font-size:12px;"></i> إدارة
+                            </label>
+                        </div>
+                    </div>
+
+                    <!-- E-COMMERCE SECTION -->
+                    <div style="background:var(--bg-secondary);border-radius:12px;padding:16px;border:1px solid var(--border-color);">
+                        <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px;">
+                            <i class="fas fa-shopping-cart" style="color:#22c55e;font-size:20px;width:24px;text-align:center;"></i>
+                            <span style="font-weight:600;color:var(--text-primary);">متجر إلكتروني (E-Commerce)</span>
+                        </div>
+                        <div style="display:flex;flex-wrap:wrap;gap:12px;">
+                            <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px;color:var(--text-secondary);">
+                                <input type="checkbox" id="perm_ecommerce_view" ${permissions.ecommerce?.view ? 'checked' : ''} style="width:16px;height:16px;">
+                                <i class="fas fa-eye" style="font-size:12px;"></i> عرض القسم
+                            </label>
+                            <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px;color:var(--text-secondary);">
+                                <input type="checkbox" id="perm_ecommerce_manage" ${permissions.ecommerce?.manage ? 'checked' : ''} style="width:16px;height:16px;">
+                                <i class="fas fa-edit" style="font-size:12px;"></i> إدارة المتجر
+                            </label>
+                        </div>
+                    </div>
+
+                    <!-- EXCEL / SHEETS SECTION -->
+                    <div style="background:var(--bg-secondary);border-radius:12px;padding:16px;border:1px solid var(--border-color);">
+                        <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px;">
+                            <i class="fas fa-file-excel" style="color:#217346;font-size:20px;width:24px;text-align:center;"></i>
+                            <span style="font-weight:600;color:var(--text-primary);">Excel / Sheets</span>
+                        </div>
+                        <div style="display:flex;flex-wrap:wrap;gap:12px;">
+                            <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px;color:var(--text-secondary);">
+                                <input type="checkbox" id="perm_sheets_view" ${permissions.sheets?.view ? 'checked' : ''} style="width:16px;height:16px;">
+                                <i class="fas fa-eye" style="font-size:12px;"></i> عرض القسم
+                            </label>
+                            <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px;color:var(--text-secondary);">
+                                <input type="checkbox" id="perm_sheets_manage" ${permissions.sheets?.manage ? 'checked' : ''} style="width:16px;height:16px;">
+                                <i class="fas fa-edit" style="font-size:12px;"></i> تعديل البيانات
+                            </label>
+                        </div>
+                    </div>
+                </div>
+                
+                <div style="display:flex;gap:12px;margin-top:24px;">
+                    <button onclick="app.saveUserPermissions('${userId}')" style="flex:1;padding:14px;background:linear-gradient(135deg,#0EA5E9,#2563EB);color:white;border:none;border-radius:10px;cursor:pointer;font-weight:600;font-size:15px;">
+                        <i class="fas fa-save" style="margin-left:6px;"></i> حفظ الصلاحيات
+                    </button>
+                    <button onclick="document.getElementById('permissionsModal').remove()" style="padding:14px 24px;background:var(--bg-secondary);color:var(--text-secondary);border:1px solid var(--border-color);border-radius:10px;cursor:pointer;font-weight:500;">
+                        إلغاء
+                    </button>
+                </div>
+            </div>
+                `;
+
+        document.body.appendChild(modal);
+    }
+
+    // Open subscription modal (Admin only)
+    openSubscriptionModal(userId, userName, currentExpiresAt) {
+        const currentDate = currentExpiresAt ? new Date(currentExpiresAt).toISOString().split('T')[0] : '';
+
+        const modal = document.createElement('div');
+        modal.id = 'subscriptionModal';
+        modal.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.7);display:flex;align-items:center;justify-content:center;z-index:10000;backdrop-filter:blur(5px);padding:20px;';
+
+        modal.innerHTML = `
+        <div style="background:var(--bg-card);width:90%;max-width:450px;border-radius:20px;padding:24px;border:1px solid var(--border-color);box-shadow:0 20px 40px rgba(0,0,0,0.4);">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:24px;">
+                <h3 style="margin:0;font-size:18px;color:var(--text-primary);"><i class="fas fa-calendar-alt" style="color:#8b5cf6;margin-left:8px;"></i> اشتراك ${userName}</h3>
+                <button onclick="document.getElementById('subscriptionModal').remove()" style="background:none;border:none;color:var(--text-secondary);cursor:pointer;font-size:20px;width:36px;height:36px;border-radius:50%;display:flex;align-items:center;justify-content:center;">✕</button>
+            </div>
+            
+            <div style="margin-bottom:24px;">
+                <label style="display:block;margin-bottom:8px;font-size:14px;color:var(--text-secondary);">
+                    <i class="fas fa-clock" style="margin-left:6px;"></i> تاريخ انتهاء الاشتراك
+                </label>
+                <input type="date" id="subscriptionDateInput" value="${currentDate}" 
+                    style="width:100%;padding:14px 16px;border:2px solid var(--border-color);border-radius:12px;background:var(--bg-secondary);color:var(--text-primary);font-size:16px;font-family:inherit;">
+            </div>
+            
+            ${currentExpiresAt ? `
+            <div style="margin-bottom:24px;padding:12px 16px;background:${new Date(currentExpiresAt) > new Date() ? 'rgba(16,185,129,0.1)' : 'rgba(239,68,68,0.1)'};border-radius:10px;display:flex;align-items:center;gap:10px;">
+                <i class="fas ${new Date(currentExpiresAt) > new Date() ? 'fa-check-circle' : 'fa-exclamation-circle'}" style="color:${new Date(currentExpiresAt) > new Date() ? '#10b981' : '#ef4444'};"></i>
+                <span style="font-size:14px;color:${new Date(currentExpiresAt) > new Date() ? '#10b981' : '#ef4444'};">
+                    ${new Date(currentExpiresAt) > new Date() ? 'الاشتراك فعال' : 'الاشتراك منتهي'}
+                </span>
+            </div>
+            ` : ''}
+            
+            <div style="display:flex;gap:12px;">
+                <button onclick="app.saveUserSubscription('${userId}')" style="flex:1;padding:14px;background:linear-gradient(135deg,#8b5cf6,#7c3aed);color:white;border:none;border-radius:10px;cursor:pointer;font-weight:600;font-size:15px;">
+                    <i class="fas fa-save" style="margin-left:6px;"></i> حفظ
+                </button>
+                <button onclick="app.clearUserSubscription('${userId}')" style="padding:14px 18px;background:rgba(239,68,68,0.1);color:#ef4444;border:1px solid rgba(239,68,68,0.3);border-radius:10px;cursor:pointer;font-weight:500;">
+                    <i class="fas fa-times"></i> إزالة
+                </button>
+                <button onclick="document.getElementById('subscriptionModal').remove()" style="padding:14px 24px;background:var(--bg-secondary);color:var(--text-secondary);border:1px solid var(--border-color);border-radius:10px;cursor:pointer;font-weight:500;">
+                    إلغاء
+                </button>
+            </div>
+        </div>
+    `;
+
+        document.body.appendChild(modal);
+    }
+
+    // Save user subscription date
+    async saveUserSubscription(userId) {
+        const dateInput = document.getElementById('subscriptionDateInput');
+        const subscriptionExpiresAt = dateInput?.value || null;
+
+        try {
+            const token = localStorage.getItem('octobot_token');
+            const res = await fetch(`${this.API_URL}/api/auth/team/${userId}/subscription`, {
+                method: 'PUT',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${token}`
+                },
+                body: JSON.stringify({ subscriptionExpiresAt })
+            });
+
+            if (res.ok) {
+                this.showToast('تم حفظ تاريخ الاشتراك', 'success');
+                document.getElementById('subscriptionModal')?.remove();
+                this.loadTeamMembers(); // Refresh list
+            } else {
+                this.showToast('فشل حفظ الاشتراك', 'error');
+            }
+        } catch (err) {
+            console.error('Save subscription error:', err);
+            this.showToast('حدث خطأ', 'error');
+        }
+    }
+
+    // Clear user subscription
+    async clearUserSubscription(userId) {
+        try {
+            const token = localStorage.getItem('octobot_token');
+            const res = await fetch(`${this.API_URL}/api/auth/team/${userId}/subscription`, {
+                method: 'PUT',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${token}`
+                },
+                body: JSON.stringify({ subscriptionExpiresAt: null })
+            });
+
+            if (res.ok) {
+                this.showToast('تم إزالة تاريخ الاشتراك', 'success');
+                document.getElementById('subscriptionModal')?.remove();
+                this.loadTeamMembers();
+            } else {
+                this.showToast('فشل إزالة الاشتراك', 'error');
+            }
+        } catch (err) {
+            console.error('Clear subscription error:', err);
+            this.showToast('حدث خطأ', 'error');
+        }
+    }
+
+    // Save user permissions
+    async saveUserPermissions(userId) {
+        const platforms = ['facebook', 'telegram', 'whatsapp', 'instagram', 'ecommerce', 'sheets'];
+        const permissions = {};
+
+        platforms.forEach(platform => {
+            permissions[platform] = {
+                view: document.getElementById(`perm_${platform}_view`)?.checked || false,
+                send: document.getElementById(`perm_${platform}_send`)?.checked || false,
+                manage: document.getElementById(`perm_${platform}_manage`)?.checked || false
+            };
+        });
+
+        // Add broadcast permission for Facebook
+        permissions.facebook.broadcast = document.getElementById('perm_facebook_broadcast')?.checked || false;
+
+        // Get allowed Facebook pages
+        const pageCheckboxes = document.querySelectorAll('.fb-page-checkbox:checked');
+        const allowedPages = Array.from(pageCheckboxes).map(cb => cb.value);
+        permissions.facebook.allowedPages = allowedPages;
+
+        // IMPORTANT: Save the admin's user ID AND their current FB connection
+        // so employees use the exact FB connection the admin is currently using
+        const userData = JSON.parse(localStorage.getItem('octobot_user') || '{}');
+        const currentFbUserId = localStorage.getItem('fb_user_id');
+
+        if (userData.role === 'admin' && allowedPages.length > 0) {
+            permissions.facebook.assignedAdminId = userData.id;
+            // Save the specific FB user ID the admin is currently connected to
+            if (currentFbUserId) {
+                permissions.facebook.assignedFbUserId = currentFbUserId;
+                console.log('[Permissions] Setting assignedFbUserId to:', currentFbUserId);
+            }
+            console.log('[Permissions] Setting assignedAdminId to:', userData.id);
+        }
+
+
+        const token = localStorage.getItem('octobot_token');
+
+
+        try {
+            const response = await fetch(`${this.API_URL}/api/auth/team/${userId}/permissions`, {
+                method: 'PUT',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${token}`
+                },
+                body: JSON.stringify({ permissions })
+            });
+
+            const data = await response.json();
+
+            if (data.success) {
+                this.showToast('تم حفظ الصلاحيات بنجاح', 'success');
+                document.getElementById('permissionsModal')?.remove();
+                this.loadTeamMembers();
+            } else {
+                this.showToast(data.error || 'فشل حفظ الصلاحيات', 'error');
+            }
+        } catch (err) {
+            console.error('Save permissions error:', err);
+            this.showToast('فشل حفظ الصلاحيات', 'error');
+        }
+    }
+
+    // Update user role
+    async updateUserRole(userId, newRole) {
+        const token = localStorage.getItem('octobot_token');
+
+        try {
+            const response = await fetch(`${this.API_URL}/api/auth/team/${userId}/role`, {
+                method: 'PUT',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${token}`
+                },
+                body: JSON.stringify({ role: newRole })
+            });
+
+            const data = await response.json();
+
+            if (data.success) {
+                const roleLabels = { admin: 'مسؤول', supervisor: 'مشرف', agent: 'موظف' };
+                this.showToast(`تم تغيير الدور إلى ${roleLabels[newRole]}`, 'success');
+                this.loadTeamMembers();
+            } else {
+                this.showToast(data.error || 'فشل تغيير الدور', 'error');
+            }
+        } catch (err) {
+            console.error('Update role error:', err);
+            this.showToast('فشل تغيير الدور', 'error');
+        }
+    }
+
+    // Delete team member
+    async deleteTeamMember(userId, userName) {
+        if (!confirm(`هل أنت متأكد من حذف ${userName} من الفريق؟`)) return;
+
+        const token = localStorage.getItem('octobot_token');
+
+        try {
+            const response = await fetch(`${this.API_URL}/api/auth/team/${userId}`, {
+                method: 'DELETE',
+                headers: { 'Authorization': `Bearer ${token}` }
+            });
+
+            const data = await response.json();
+
+            if (data.success) {
+                this.showToast('تم حذف العضو بنجاح', 'success');
+                this.loadTeamMembers();
+            } else {
+                this.showToast(data.error || 'فشل حذف العضو', 'error');
+            }
+        } catch (err) {
+            console.error('Delete member error:', err);
+            this.showToast('فشل حذف العضو', 'error');
+        }
+    }
+
+    // Verify/Activate user account (admin only)
+    async verifyUser(userId, userName) {
+        if (!confirm(`هل تريد تفعيل حساب ${userName}؟`)) return;
+
+        const token = localStorage.getItem('octobot_token');
+
+        try {
+            const response = await fetch(`${this.API_URL}/api/auth/team/${userId}/verify`, {
+                method: 'PUT',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${token}`
+                }
+            });
+
+            const data = await response.json();
+
+            if (data.success) {
+                this.showToast('تم تفعيل الحساب بنجاح ✓', 'success');
+                this.loadTeamMembers();
+            } else {
+                this.showToast(data.error || 'فشل تفعيل الحساب', 'error');
+            }
+        } catch (err) {
+            console.error('Verify user error:', err);
+            this.showToast('فشل تفعيل الحساب', 'error');
+        }
+    }
+
+    async toggleWorkingStatus(userId, isWorking) {
+        const token = localStorage.getItem('octobot_token');
+        try {
+            await fetch(`${this.API_URL}/api/auth/team/${userId}/working`, {
+                method: 'PUT',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${token}`
+                },
+                body: JSON.stringify({ isWorkingToday: isWorking })
+            });
+            this.showToast(isWorking ? 'تم تسجيل الحضور' : 'تم تسجيل الانصراف', 'success');
+        } catch (err) {
+            this.showToast('فشل في تحديث الحالة', 'error');
+        }
+    }
+
+    inviteTeamMember() {
+        const email = prompt('أدخل البريد الإلكتروني للعضو الجديد:');
+        if (!email) return;
+        alert('📧 لدعوة عضو جديد، أرسل له رابط التسجيل: ' + window.location.origin + '/register.html');
+    }
+
+    // Load performance data from API
+    async loadPerformanceData() {
+        const content = document.getElementById('performanceContent');
+        if (!content) return;
+
+        content.innerHTML = '<div style="text-align:center;padding:40px;"><div class="spinner"></div><p style="color:var(--text-secondary);margin-top:12px;">جاري تحميل الإحصائيات...</p></div>';
+
+        try {
+            const [statsResponse, leaderboardResponse] = await Promise.all([
+                fetch(`${this.API_URL}/api/team/stats?period=week`),
+                fetch(`${this.API_URL}/api/team/leaderboard?period=week`)
+            ]);
+
+            const statsData = await statsResponse.json();
+            const leaderboardData = await leaderboardResponse.json();
+
+            if (!statsData.success) {
+                content.innerHTML = '<p style="text-align:center;color:var(--text-secondary);padding:40px;">لا توجد بيانات متاحة</p>';
+                return;
+            }
+
+            const leaderboard = leaderboardData?.leaderboard || [];
+
+            content.innerHTML = `
+                <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:16px;margin-bottom:24px;">
+                    <div style="background:linear-gradient(135deg, rgba(16,185,129,0.15), rgba(5,150,105,0.1));padding:24px;border-radius:16px;border:1px solid rgba(16,185,129,0.3);">
+                        <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;">
+                            <i class="fas fa-paper-plane" style="color:#10b981;font-size:20px;"></i>
+                            <span style="color:var(--text-secondary);font-size:13px;">إجمالي الرسائل</span>
+                        </div>
+                        <div style="font-size:28px;font-weight:700;color:var(--text-primary);">${statsData.totalMessages || 0}</div>
+                        <div style="font-size:11px;color:var(--text-secondary);margin-top:4px;">هذا الأسبوع</div>
+                    </div>
+                    <div style="background:linear-gradient(135deg, rgba(99,102,241,0.15), rgba(79,70,229,0.1));padding:24px;border-radius:16px;border:1px solid rgba(99,102,241,0.3);">
+                        <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;">
+                            <i class="fas fa-users" style="color:#6366f1;font-size:20px;"></i>
+                            <span style="color:var(--text-secondary);font-size:13px;">الموظفين النشطين</span>
+                        </div>
+                        <div style="font-size:28px;font-weight:700;color:var(--text-primary);">${statsData.userStats?.length || 0}</div>
+                    </div>
+                    <div style="background:linear-gradient(135deg, rgba(59,130,246,0.15), rgba(37,99,235,0.1));padding:24px;border-radius:16px;border:1px solid rgba(59,130,246,0.3);">
+                        <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;">
+                            <i class="fab fa-facebook" style="color:#3b82f6;font-size:20px;"></i>
+                            <span style="color:var(--text-secondary);font-size:13px;">فيسبوك</span>
+                        </div>
+                        <div style="font-size:28px;font-weight:700;color:var(--text-primary);">${statsData.platformStats?.facebook || 0}</div>
+                    </div>
+                    <div style="background:linear-gradient(135deg, rgba(225,48,108,0.15), rgba(193,53,132,0.1));padding:24px;border-radius:16px;border:1px solid rgba(225,48,108,0.3);">
+                        <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;">
+                            <i class="fab fa-instagram" style="color:#E1306C;font-size:20px;"></i>
+                            <span style="color:var(--text-secondary);font-size:13px;">انستجرام</span>
+                        </div>
+                        <div style="font-size:28px;font-weight:700;color:var(--text-primary);">${statsData.platformStats?.instagram || 0}</div>
+                    </div>
+                    <div style="background:linear-gradient(135deg, rgba(0,136,204,0.15), rgba(0,100,150,0.1));padding:24px;border-radius:16px;border:1px solid rgba(0,136,204,0.3);">
+                        <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;">
+                            <i class="fab fa-telegram" style="color:#0088cc;font-size:20px;"></i>
+                            <span style="color:var(--text-secondary);font-size:13px;">تيليجرام</span>
+                        </div>
+                        <div style="font-size:28px;font-weight:700;color:var(--text-primary);">${statsData.platformStats?.telegram || 0}</div>
+                    </div>
+                </div>
+
+                <div style="background:var(--bg-secondary);border-radius:16px;padding:20px;border:1px solid var(--border-color);">
+                    <h4 style="margin:0 0 16px 0;color:var(--text-primary);display:flex;align-items:center;gap:10px;">
+                        <i class="fas fa-trophy" style="color:#f59e0b;"></i> ترتيب الموظفين
+                    </h4>
+                    ${leaderboard.length > 0 ? `
+                    <div style="display:flex;flex-direction:column;gap:10px;">
+                        ${leaderboard.map((user, index) => `
+                        <div style="display:flex;align-items:center;gap:14px;padding:12px 16px;background:var(--bg-card);border-radius:12px;border:1px solid var(--border-color);">
+                            <div style="width:32px;height:32px;border-radius:50%;background:${index === 0 ? 'linear-gradient(135deg, #f59e0b, #d97706)' : index === 1 ? 'linear-gradient(135deg, #9ca3af, #6b7280)' : index === 2 ? 'linear-gradient(135deg, #b45309, #92400e)' : 'var(--bg-secondary)'};display:flex;align-items:center;justify-content:center;color:white;font-weight:700;font-size:13px;">
+                                ${index < 3 ? ['🥇', '🥈', '🥉'][index] : index + 1}
+                            </div>
+                            <div style="flex:1;">
+                                <div style="font-weight:600;color:var(--text-primary);font-size:14px;">${user.userName}</div>
+                                <div style="font-size:12px;color:var(--text-secondary);">${user.messagesSent} رسالة</div>
+                            </div>
+                        </div>
+                        `).join('')}
+                    </div>
+                    ` : '<p style="text-align:center;color:var(--text-secondary);padding:20px;">لا توجد بيانات أداء بعد. ابدأ بإرسال الرسائل!</p>'}
+                </div>
+            `;
+        } catch (err) {
+            console.error('Error loading performance data:', err);
+            content.innerHTML = '<p style="text-align:center;color:var(--error);padding:40px;">فشل في تحميل الإحصائيات</p>';
+        }
+    }
+
+    // Show toast notification
+    showToast(message, type = 'info') {
+        // Remove existing toast
+        const existing = document.getElementById('appToast');
+        if (existing) existing.remove();
+
+        const colors = {
+            success: '#4CAF50',
+            error: '#f44336',
+            warning: '#ff9800',
+            info: '#E1306C' // Instagram pink for info
+        };
+
+        const toast = document.createElement('div');
+        toast.id = 'appToast';
+        toast.innerHTML = message;
+        toast.style.cssText = `
+            position: fixed;
+            bottom: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: ${colors[type] || colors.info};
+            color: white;
+            padding: 12px 24px;
+            border-radius: 25px;
+            font-size: 14px;
+            font-weight: 500;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.3);
+            z-index: 10000;
+            animation: slideUp 0.3s ease;
+            direction: rtl;
+        `;
+        document.body.appendChild(toast);
+
+        // Auto remove after 3 seconds
+        setTimeout(() => {
+            toast.style.animation = 'slideDown 0.3s ease';
+            setTimeout(() => toast.remove(), 300);
+        }, 3000);
+    }
+
+    // Play notification sound for new messages
+    playNotificationSound() {
+        try {
+            // Create a simple beep using Web Audio API
+            const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+            const oscillator = audioContext.createOscillator();
+            const gainNode = audioContext.createGain();
+
+            oscillator.connect(gainNode);
+            gainNode.connect(audioContext.destination);
+
+            oscillator.frequency.value = 800; // Frequency in Hz
+            oscillator.type = 'sine';
+
+            gainNode.gain.setValueAtTime(0.3, audioContext.currentTime);
+            gainNode.gain.exponentialRampToValueAtTime(0.01, audioContext.currentTime + 0.3);
+
+            oscillator.start(audioContext.currentTime);
+            oscillator.stop(audioContext.currentTime + 0.3);
+        } catch (e) {
+            // Audio not supported or blocked
+            console.log('[Notification] Audio not available');
+        }
+    }
+
+    // ============= TEAM PERFORMANCE DASHBOARD =============
+
+    // Load team statistics from API
+    async loadTeamStats(period = 'week') {
+        try {
+            const response = await fetch(`${this.API_URL}/api/team/stats?period=${period}`);
+            const data = await response.json();
+            return data;
+        } catch (err) {
+            console.error('Error loading team stats:', err);
+            return null;
+        }
+    }
+
+    // Load leaderboard from API
+    async loadLeaderboard(period = 'week') {
+        try {
+            const response = await fetch(`${this.API_URL}/api/team/leaderboard?period=${period}`);
+            const data = await response.json();
+            return data;
+        } catch (err) {
+            console.error('Error loading leaderboard:', err);
+            return null;
+        }
+    }
+
+    // Open Performance Dashboard Modal
+    async openPerformanceModal() {
+        // Remove existing modal
+        const existingModal = document.getElementById('performanceModal');
+        if (existingModal) existingModal.remove();
+
+        // Create modal
+        const modal = document.createElement('div');
+        modal.id = 'performanceModal';
+        modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.7);display:flex;align-items:center;justify-content:center;z-index:10000;padding:20px;';
+
+        modal.innerHTML = `
+        <div style="background:var(--bg-card);width:95%;max-width:900px;border-radius:20px;padding:24px;border:1px solid var(--border-color);box-shadow:0 20px 40px rgba(0,0,0,0.4);max-height:90vh;overflow-y:auto;">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:24px;">
+                <h3 style="margin:0;font-size:20px;color:var(--text-primary);"><i class="fas fa-chart-line" style="color:#10b981;margin-left:10px;"></i> لوحة أداء الفريق</h3>
+                <button onclick="document.getElementById('performanceModal').remove()" style="background:none;border:none;color:var(--text-secondary);cursor:pointer;font-size:20px;width:36px;height:36px;border-radius:50%;display:flex;align-items:center;justify-content:center;">✕</button>
+            </div>
+            
+            <div style="display:flex;gap:12px;margin-bottom:20px;">
+                <button onclick="app.refreshPerformanceData('today')" id="perfPeriodToday" class="perf-period-btn" style="padding:8px 16px;border-radius:8px;border:1px solid var(--border-color);background:var(--bg-secondary);color:var(--text-secondary);cursor:pointer;">اليوم</button>
+                <button onclick="app.refreshPerformanceData('week')" id="perfPeriodWeek" class="perf-period-btn" style="padding:8px 16px;border-radius:8px;border:none;background:linear-gradient(135deg, #10b981, #059669);color:white;cursor:pointer;">الأسبوع</button>
+                <button onclick="app.refreshPerformanceData('month')" id="perfPeriodMonth" class="perf-period-btn" style="padding:8px 16px;border-radius:8px;border:1px solid var(--border-color);background:var(--bg-secondary);color:var(--text-secondary);cursor:pointer;">الشهر</button>
+            </div>
+            
+            <div id="performanceContent">
+                <div style="text-align:center;padding:40px;"><div class="spinner"></div><p style="color:var(--text-secondary);margin-top:12px;">جاري تحميل الإحصائيات...</p></div>
+            </div>
+        </div>`;
+
+        document.body.appendChild(modal);
+        modal.onclick = (e) => { if (e.target === modal) modal.remove(); };
+
+        // Load data
+        await this.refreshPerformanceData('week');
+    }
+
+    // Refresh performance data
+    async refreshPerformanceData(period) {
+        // Update button styles
+        document.querySelectorAll('.perf-period-btn').forEach(btn => {
+            btn.style.background = 'var(--bg-secondary)';
+            btn.style.border = '1px solid var(--border-color)';
+            btn.style.color = 'var(--text-secondary)';
+        });
+        const activeBtn = document.getElementById(`perfPeriod${period.charAt(0).toUpperCase() + period.slice(1)}`);
+        if (activeBtn) {
+            activeBtn.style.background = 'linear-gradient(135deg, #10b981, #059669)';
+            activeBtn.style.border = 'none';
+            activeBtn.style.color = 'white';
+        }
+
+        const content = document.getElementById('performanceContent');
+        if (!content) return;
+
+        content.innerHTML = '<div style="text-align:center;padding:40px;"><div class="spinner"></div></div>';
+
+        const [statsData, leaderboardData] = await Promise.all([
+            this.loadTeamStats(period),
+            this.loadLeaderboard(period)
+        ]);
+
+        if (!statsData || !statsData.success) {
+            content.innerHTML = '<p style="text-align:center;color:var(--text-secondary);padding:40px;">لا توجد بيانات متاحة</p>';
+            return;
+        }
+
+        const periodLabel = period === 'today' ? 'اليوم' : period === 'week' ? 'هذا الأسبوع' : 'هذا الشهر';
+        const leaderboard = leaderboardData?.leaderboard || [];
+
+        content.innerHTML = `
+        <!-- Stats Cards -->
+        <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(200px, 1fr));gap:16px;margin-bottom:24px;">
+            <div style="background:linear-gradient(135deg, rgba(16,185,129,0.15), rgba(5,150,105,0.1));border-radius:16px;padding:20px;border:1px solid rgba(16,185,129,0.3);">
+                <div style="display:flex;align-items:center;gap:12px;margin-bottom:8px;">
+                    <i class="fas fa-paper-plane" style="color:#10b981;font-size:24px;"></i>
+                    <span style="color:var(--text-secondary);font-size:14px;">إجمالي الرسائل</span>
+                </div>
+                <div style="font-size:32px;font-weight:700;color:var(--text-primary);">${statsData.totalMessages || 0}</div>
+                <div style="font-size:12px;color:var(--text-secondary);margin-top:4px;">${periodLabel}</div>
+            </div>
+            
+            <div style="background:linear-gradient(135deg, rgba(99,102,241,0.15), rgba(79,70,229,0.1));border-radius:16px;padding:20px;border:1px solid rgba(99,102,241,0.3);">
+                <div style="display:flex;align-items:center;gap:12px;margin-bottom:8px;">
+                    <i class="fas fa-users" style="color:#6366f1;font-size:24px;"></i>
+                    <span style="color:var(--text-secondary);font-size:14px;">الموظفين النشطين</span>
+                </div>
+                <div style="font-size:32px;font-weight:700;color:var(--text-primary);">${statsData.userStats?.length || 0}</div>
+            </div>
+            
+            <div style="background:linear-gradient(135deg, rgba(245,158,11,0.15), rgba(217,119,6,0.1));border-radius:16px;padding:20px;border:1px solid rgba(245,158,11,0.3);">
+                <div style="display:flex;align-items:center;gap:12px;margin-bottom:8px;">
+                    <i class="fab fa-facebook" style="color:#f59e0b;font-size:24px;"></i>
+                    <span style="color:var(--text-secondary);font-size:14px;">فيسبوك</span>
+                </div>
+                <div style="font-size:32px;font-weight:700;color:var(--text-primary);">${statsData.platformStats?.facebook || 0}</div>
+            </div>
+
+            <div style="background:linear-gradient(135deg, rgba(225,48,108,0.15), rgba(193,53,132,0.1));border-radius:16px;padding:20px;border:1px solid rgba(225,48,108,0.3);">
+                <div style="display:flex;align-items:center;gap:12px;margin-bottom:8px;">
+                    <i class="fab fa-instagram" style="color:#E1306C;font-size:24px;"></i>
+                    <span style="color:var(--text-secondary);font-size:14px;">انستجرام</span>
+                </div>
+                <div style="font-size:32px;font-weight:700;color:var(--text-primary);">${statsData.platformStats?.instagram || 0}</div>
+            </div>
+            
+            <div style="background:linear-gradient(135deg, rgba(0,136,204,0.15), rgba(0,100,150,0.1));border-radius:16px;padding:20px;border:1px solid rgba(0,136,204,0.3);">
+                <div style="display:flex;align-items:center;gap:12px;margin-bottom:8px;">
+                    <i class="fab fa-telegram" style="color:#0088cc;font-size:24px;"></i>
+                    <span style="color:var(--text-secondary);font-size:14px;">تيليجرام</span>
+                </div>
+                <div style="font-size:32px;font-weight:700;color:var(--text-primary);">${statsData.platformStats?.telegram || 0}</div>
+            </div>
+        </div>
+
+        <!-- Leaderboard -->
+        <div style="background:var(--bg-secondary);border-radius:16px;padding:20px;border:1px solid var(--border-color);">
+            <h4 style="margin:0 0 16px 0;color:var(--text-primary);display:flex;align-items:center;gap:10px;">
+                <i class="fas fa-trophy" style="color:#f59e0b;"></i> ترتيب الموظفين
+            </h4>
+            
+            ${leaderboard.length > 0 ? `
+            <div style="display:flex;flex-direction:column;gap:12px;">
+                ${leaderboard.map((user, index) => `
+                <div style="display:flex;align-items:center;gap:16px;padding:12px 16px;background:var(--bg-card);border-radius:12px;border:1px solid var(--border-color);">
+                    <div style="width:36px;height:36px;border-radius:50%;background:${index === 0 ? 'linear-gradient(135deg, #f59e0b, #d97706)' : index === 1 ? 'linear-gradient(135deg, #9ca3af, #6b7280)' : index === 2 ? 'linear-gradient(135deg, #b45309, #92400e)' : 'var(--bg-secondary)'};display:flex;align-items:center;justify-content:center;color:white;font-weight:700;font-size:14px;">
+                        ${index < 3 ? ['🥇', '🥈', '🥉'][index] : index + 1}
+                    </div>
+                    <div style="flex:1;">
+                        <div style="font-weight:600;color:var(--text-primary);">${user.userName}</div>
+                        <div style="font-size:12px;color:var(--text-secondary);">${user.messagesSent} رسالة</div>
+                    </div>
+                    ${user.avgResponseTime ? `<div style="font-size:12px;color:var(--text-secondary);"><i class="fas fa-clock"></i> ${user.avgResponseTime}ث</div>` : ''}
+                </div>
+                `).join('')}
+            </div>
+            ` : '<p style="text-align:center;color:var(--text-secondary);padding:20px;">لا توجد بيانات أداء بعد. ابدأ بإرسال الرسائل لرؤية الإحصائيات!</p>'}
+        </div>
+        `;
+    }
+
+    // ============= E-COMMERCE FUNCTIONS =============
+
+    // Switch E-Commerce tabs
+    switchEcomTab(tabName) {
+        // Hide all tabs
+        document.querySelectorAll('.ecom-tab-content').forEach(t => t.style.display = 'none');
+        // Reset all tab buttons
+        document.querySelectorAll('.ecom-tab').forEach(btn => {
+            btn.style.background = 'transparent';
+            btn.style.color = 'var(--text-primary)';
+        });
+        // Show selected tab - try different ID formats
+        let tab = document.getElementById(`ecom${tabName.charAt(0).toUpperCase() + tabName.slice(1)}Tab`);
+        if (!tab) tab = document.getElementById(`ecom-${tabName}`); // For ai-content
+        if (tab) tab.style.display = 'block';
+        // Activate button - try both data-tab and data-ecom-tab
+        let btn = document.querySelector(`.ecom-tab[data-tab="${tabName}"]`);
+        if (!btn) btn = document.querySelector(`.ecom-tab[data-ecom-tab="${tabName}"]`);
+        if (btn) {
+            btn.style.background = 'var(--primary)';
+            btn.style.color = 'white';
+        }
+
+        // Auto-load data for specific tabs
+        if (tabName === 'customers') {
+            this.loadEcomCustomers(true);
+        } else if (tabName === 'settings') {
+            this.loadEcomSettings();
+        }
+    }
+
+    // Show connect store modal
+    showConnectStoreModal() {
+        const modal = document.createElement('div');
+        modal.id = 'connectStoreModal';
+        modal.style.cssText = `
+            position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+            background: rgba(0,0,0,0.6); backdrop-filter: blur(10px);
+            display: flex; align-items: center; justify-content: center;
+            z-index: 10000; opacity: 0; transition: opacity 0.3s ease;
+        `;
+
+        const isDark = document.body.classList.contains('dark-mode') ||
+            window.matchMedia('(prefers-color-scheme: dark)').matches;
+        const bgColor = isDark ? '#1e1e30' : '#ffffff';
+        const textColor = isDark ? '#fff' : '#1a1a2e';
+        const borderColor = isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.1)';
+
+        modal.innerHTML = `
+            <div class="connect-store-card" style="
+                background: ${bgColor};
+                border: 1px solid ${borderColor};
+                border-radius: 24px;
+                padding: 32px;
+                min-width: 450px;
+                max-width: 90vw;
+                max-height: 85vh;
+                overflow-y: auto;
+                box-shadow: 0 25px 80px rgba(0,0,0,0.4);
+                transform: scale(0.9) translateY(20px);
+                transition: transform 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+            ">
+                <!-- Header -->
+                <div style="text-align: center; margin-bottom: 28px;">
+                    <div style="
+                        width: 70px; height: 70px; margin: 0 auto 16px;
+                        background: linear-gradient(135deg, #22c55e, #16a34a);
+                        border-radius: 20px;
+                        display: flex; align-items: center; justify-content: center;
+                        font-size: 32px; color: white;
+                        box-shadow: 0 10px 30px rgba(34, 197, 94, 0.3);
+                    ">🛒</div>
+                    <h2 style="margin: 0 0 8px 0; color: ${textColor}; font-size: 24px;">ربط متجر إلكتروني</h2>
+                    <p style="margin: 0; color: var(--text-secondary); font-size: 14px;">اختر منصة المتجر الخاصة بك</p>
+                </div>
+                
+                <!-- Platform Selection -->
+                <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; margin-bottom: 24px;">
+                    <button onclick="app.selectEcomPlatform('shopify')" class="platform-btn" style="
+                        padding: 24px 16px; border: 2px solid ${borderColor}; background: transparent;
+                        border-radius: 14px; cursor: pointer; transition: all 0.25s ease;
+                        display: flex; flex-direction: column; align-items: center; gap: 12px;
+                    " onmouseover="this.style.borderColor='#95bf47';this.style.transform='translateY(-3px)';this.style.boxShadow='0 8px 25px rgba(149,191,71,0.25)'" 
+                       onmouseout="this.style.borderColor='${borderColor}';this.style.transform='translateY(0)';this.style.boxShadow='none'">
+                        ${window.PLATFORM_ICONS?.shopify || '🛍️'}
+                        <span style="color: ${textColor}; font-weight: 600; font-size: 15px;">Shopify</span>
+                    </button>
+                    
+                    <button onclick="app.selectEcomPlatform('woocommerce')" class="platform-btn" style="
+                        padding: 24px 16px; border: 2px solid ${borderColor}; background: transparent;
+                        border-radius: 14px; cursor: pointer; transition: all 0.25s ease;
+                        display: flex; flex-direction: column; align-items: center; gap: 12px;
+                    " onmouseover="this.style.borderColor='#96588a';this.style.transform='translateY(-3px)';this.style.boxShadow='0 8px 25px rgba(150,88,138,0.25)'" 
+                       onmouseout="this.style.borderColor='${borderColor}';this.style.transform='translateY(0)';this.style.boxShadow='none'">
+                        ${window.PLATFORM_ICONS?.woocommerce || '🛒'}
+                        <span style="color: ${textColor}; font-weight: 600; font-size: 15px;">WooCommerce</span>
+                    </button>
+                    
+                    <button onclick="app.selectEcomPlatform('salla')" class="platform-btn" style="
+                        padding: 24px 16px; border: 2px solid ${borderColor}; background: transparent;
+                        border-radius: 14px; cursor: pointer; transition: all 0.25s ease;
+                        display: flex; flex-direction: column; align-items: center; gap: 12px;
+                    " onmouseover="this.style.borderColor='#004dbc';this.style.transform='translateY(-3px)';this.style.boxShadow='0 8px 25px rgba(0,77,188,0.25)'" 
+                       onmouseout="this.style.borderColor='${borderColor}';this.style.transform='translateY(0)';this.style.boxShadow='none'">
+                        ${window.PLATFORM_ICONS?.salla || '📦'}
+                        <span style="color: ${textColor}; font-weight: 600; font-size: 15px;">Salla (سلة)</span>
+                    </button>
+                    
+                    <button onclick="app.selectEcomPlatform('zid')" class="platform-btn" style="
+                        padding: 24px 16px; border: 2px solid ${borderColor}; background: transparent;
+                        border-radius: 14px; cursor: pointer; transition: all 0.25s ease;
+                        display: flex; flex-direction: column; align-items: center; gap: 12px;
+                    " onmouseover="this.style.borderColor='#1E88E5';this.style.transform='translateY(-3px)';this.style.boxShadow='0 8px 25px rgba(30,136,229,0.25)'" 
+                       onmouseout="this.style.borderColor='${borderColor}';this.style.transform='translateY(0)';this.style.boxShadow='none'">
+                        ${window.PLATFORM_ICONS?.zid || '🏪'}
+                        <span style="color: ${textColor}; font-weight: 600; font-size: 15px;">Zid (زد)</span>
+                    </button>
+                    
+                    <button onclick="app.selectEcomPlatform('easyorder')" class="platform-btn" style="
+                        padding: 24px 16px; border: 2px solid ${borderColor}; background: transparent;
+                        border-radius: 14px; cursor: pointer; transition: all 0.25s ease;
+                        display: flex; flex-direction: column; align-items: center; gap: 12px;
+                    " onmouseover="this.style.borderColor='#FF6B35';this.style.transform='translateY(-3px)';this.style.boxShadow='0 8px 25px rgba(255,107,53,0.25)'" 
+                       onmouseout="this.style.borderColor='${borderColor}';this.style.transform='translateY(0)';this.style.boxShadow='none'">
+                        ${window.PLATFORM_ICONS?.easyorder || '📋'}
+                        <span style="color: ${textColor}; font-weight: 600; font-size: 15px;">EasyOrder</span>
+                    </button>
+                    
+                    <button onclick="app.selectEcomPlatform('custom')" class="platform-btn" style="
+                        padding: 24px 16px; border: 2px solid ${borderColor}; background: transparent;
+                        border-radius: 14px; cursor: pointer; transition: all 0.25s ease;
+                        display: flex; flex-direction: column; align-items: center; gap: 12px;
+                        grid-column: span 2;
+                    " onmouseover="this.style.borderColor='#8b5cf6';this.style.transform='translateY(-3px)';this.style.boxShadow='0 8px 25px rgba(139,92,246,0.25)'" 
+                       onmouseout="this.style.borderColor='${borderColor}';this.style.transform='translateY(0)';this.style.boxShadow='none'">
+                        ${window.PLATFORM_ICONS?.custom || '🔗'}
+                        <span style="color: ${textColor}; font-weight: 600; font-size: 15px;">Custom API</span>
+                    </button>
+                
+                <!-- Close Button -->
+                <button onclick="document.getElementById('connectStoreModal').remove()" style="
+                    width: 100%; padding: 14px 20px; background: var(--bg-secondary);
+                    border: 1px solid ${borderColor}; color: var(--text-secondary);
+                    border-radius: 12px; cursor: pointer; font-size: 14px; font-weight: 500;
+                    display: flex; align-items: center; justify-content: center; gap: 8px;
+                    transition: all 0.2s ease;
+                " onmouseover="this.style.background='var(--bg-tertiary)';this.style.color='var(--text-primary)';this.style.borderColor='var(--text-secondary)'"
+                   onmouseout="this.style.background='var(--bg-secondary)';this.style.color='var(--text-secondary)';this.style.borderColor='${borderColor}'">
+                    <i class="fas fa-times"></i>
+                    إغلاق
+                </button>
+            </div>
+        `;
+
+        modal.onclick = (e) => { if (e.target === modal) modal.remove(); };
+        document.body.appendChild(modal);
+
+        requestAnimationFrame(() => {
+            modal.style.opacity = '1';
+            modal.querySelector('.connect-store-card').style.transform = 'scale(1) translateY(0)';
+        });
+    }
+
+    // Select e-commerce platform
+    selectEcomPlatform(platform) {
+        document.getElementById('connectStoreModal')?.remove();
+        this.showPlatformConfigModal(platform);
+    }
+
+    // Show platform configuration modal
+    showPlatformConfigModal(platform) {
+        const platformNames = {
+            shopify: 'Shopify',
+            woocommerce: 'WooCommerce',
+            salla: 'Salla (سلة)',
+            zid: 'Zid (زد)',
+            easyorder: 'EasyOrder',
+            custom: 'Custom API'
+        };
+
+        const modal = document.createElement('div');
+        modal.id = 'platformConfigModal';
+        modal.style.cssText = `
+            position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+            background: rgba(0,0,0,0.6); backdrop-filter: blur(10px);
+            display: flex; align-items: center; justify-content: center;
+            z-index: 10000;
+        `;
+
+        const isDark = document.body.classList.contains('dark-mode');
+        const bgColor = isDark ? '#1e1e30' : '#ffffff';
+        const textColor = isDark ? '#fff' : '#1a1a2e';
+
+        let fieldsHTML = '';
+        if (platform === 'shopify') {
+            fieldsHTML = `
+                <div style="margin-bottom:16px;">
+                    <label style="display:block;margin-bottom:6px;font-weight:500;color:${textColor};">Store URL</label>
+                    <input type="text" id="storeUrl" placeholder="your-store.myshopify.com" style="width:100%;padding:12px 16px;border-radius:10px;border:1px solid var(--border-color);background:var(--bg-secondary);color:var(--text-primary);">
+                </div>
+                <div style="margin-bottom:16px;">
+                    <label style="display:block;margin-bottom:6px;font-weight:500;color:${textColor};">Access Token</label>
+                    <input type="password" id="accessToken" placeholder="shpat_..." style="width:100%;padding:12px 16px;border-radius:10px;border:1px solid var(--border-color);background:var(--bg-secondary);color:var(--text-primary);">
+                </div>
+            `;
+        } else if (platform === 'woocommerce') {
+            fieldsHTML = `
+                <div style="margin-bottom:16px;">
+                    <label style="display:block;margin-bottom:6px;font-weight:500;color:${textColor};">Store URL</label>
+                    <input type="text" id="storeUrl" placeholder="https://your-store.com" style="width:100%;padding:12px 16px;border-radius:10px;border:1px solid var(--border-color);background:var(--bg-secondary);color:var(--text-primary);">
+                </div>
+                <div style="margin-bottom:16px;">
+                    <label style="display:block;margin-bottom:6px;font-weight:500;color:${textColor};">Consumer Key</label>
+                    <input type="text" id="consumerKey" placeholder="ck_..." style="width:100%;padding:12px 16px;border-radius:10px;border:1px solid var(--border-color);background:var(--bg-secondary);color:var(--text-primary);">
+                </div>
+                <div style="margin-bottom:16px;">
+                    <label style="display:block;margin-bottom:6px;font-weight:500;color:${textColor};">Consumer Secret</label>
+                    <input type="password" id="consumerSecret" placeholder="cs_..." style="width:100%;padding:12px 16px;border-radius:10px;border:1px solid var(--border-color);background:var(--bg-secondary);color:var(--text-primary);">
+                </div>
+            `;
+        } else {
+            // Zid (Special handling for manager token)
+            if (platform === 'zid') {
+                fieldsHTML = `
+                <div style="margin-bottom:16px;">
+                    <label style="display:block;margin-bottom:6px;font-weight:500;color:${textColor};">X-Manager-Token</label>
+                    <input type="password" id="apiKey" placeholder="TzR..." style="width:100%;padding:12px 16px;border-radius:10px;border:1px solid var(--border-color);background:var(--bg-secondary);color:var(--text-primary);">
+                    <p style="font-size:11px;color:var(--text-secondary);margin-top:4px;">احصل على التوكين من <a href="https://web.zid.sa/home/marketplace/integrated-apps" target="_blank" style="color:var(--primary);">التطبيقات المفعلة</a> في لوحة زد.</p>
+                </div>
+            `;
+            } else if (platform === 'easyorder') {
+                fieldsHTML = `
+                <div style="margin-bottom:16px;">
+                    <label style="display:block;margin-bottom:6px;font-weight:500;color:${textColor};">API Key</label>
+                    <input type="password" id="apiKey" placeholder="أدخل الـ API Key..." style="width:100%;padding:12px 16px;border-radius:10px;border:1px solid var(--border-color);background:var(--bg-secondary);color:var(--text-primary);">
+                    <p style="font-size:11px;color:var(--text-secondary);margin-top:4px;">احصل على الـ API Key من لوحة تحكم EasyOrder.</p>
+                </div>
+            `;
+            } else {
+                // Salla and Custom
+                fieldsHTML = `
+                <div style="margin-bottom:16px;">
+                    <label style="display:block;margin-bottom:6px;font-weight:500;color:${textColor};">Store URL / API Base</label>
+                    <input type="text" id="storeUrl" placeholder="https://api.your-store.com" style="width:100%;padding:12px 16px;border-radius:10px;border:1px solid var(--border-color);background:var(--bg-secondary);color:var(--text-primary);">
+                </div>
+                <div style="margin-bottom:16px;">
+                    <label style="display:block;margin-bottom:6px;font-weight:500;color:${textColor};">API Key / Token</label>
+                    <input type="password" id="apiKey" placeholder="Your API key..." style="width:100%;padding:12px 16px;border-radius:10px;border:1px solid var(--border-color);background:var(--bg-secondary);color:var(--text-primary);">
+                </div>
+            `;
+            }
+        }
+
+        modal.innerHTML = `
+            <div style="background:${bgColor};border-radius:20px;padding:28px;min-width:400px;max-width:90vw;">
+                <h3 style="margin:0 0 20px 0;color:${textColor};display:flex;align-items:center;gap:10px;">
+                    <i class="fas fa-plug" style="color:#22c55e;"></i>
+                    ربط ${platformNames[platform]}
+                </h3>
+                ${fieldsHTML}
+                <div style="display:flex;gap:12px;margin-top:24px;">
+                    <button onclick="app.connectStore('${platform}')" class="btn btn-primary" style="flex:1;">
+                        <i class="fas fa-link"></i> ربط المتجر
+                    </button>
+                    <button onclick="document.getElementById('platformConfigModal').remove()" class="btn btn-secondary">
+                        إلغاء
+                    </button>
+                </div>
+            </div>
+        `;
+
+        modal.onclick = (e) => { if (e.target === modal) modal.remove(); };
+        document.body.appendChild(modal);
+    }
+
+    // Connect store (placeholder - will implement full logic later)
+    async connectStore(platform) {
+        // 1. Get Store URL first
+        const storeUrl = document.getElementById('storeUrl')?.value;
+
+        // Zid and EasyOrder don't require store URL manually, only API key
+        if (!storeUrl && platform !== 'zid' && platform !== 'easyorder') {
+            this.showToast('يرجى إدخال رابط المتجر', 'warning');
+            return;
+        }
+
+        // 2. Get all other credentials BEFORE removing the modal
+        const accessToken = document.getElementById('accessToken')?.value;
+        const consumerKey = document.getElementById('consumerKey')?.value;
+        const consumerSecret = document.getElementById('consumerSecret')?.value;
+        // For Zid, we use the 'apiKey' input ID for the Manager Token.
+        // For Woo, we use 'consumerKey'.
+        // For others, we might use 'apiKey'.
+        const apiKey = document.getElementById('apiKey')?.value || consumerKey;
+
+        // 3. Close modal & Show loading
+        this.showToast(`جاري ربط ${platform}...`, 'info');
+        document.getElementById('platformConfigModal')?.remove();
+
+        try {
+
+            const token = localStorage.getItem('octobot_token');
+            const response = await fetch(`${this.API_URL}/api/ecommerce/stores/connect`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${token}`
+                },
+                body: JSON.stringify({
+                    platform,
+                    storeUrl,
+                    apiKey: apiKey,
+                    apiSecret: consumerSecret,
+                    accessToken: accessToken
+                })
+            });
+
+            const data = await response.json();
+
+            if (data.success) {
+                this.showToast(`تم ربط ${platform} بنجاح! ✅`, 'success');
+                this.loadConnectedStores();
+                this.loadEcomStats();
+            } else {
+                this.showToast(`فشل الربط: ${data.error || data.details}`, 'error');
+            }
+        } catch (err) {
+            console.error('[E-Commerce] Connect error:', err);
+            this.showToast('حدث خطأ أثناء الربط', 'error');
+        }
+    }
+
+    // Load connected stores from API
+    async loadConnectedStores() {
+        const grid = document.querySelector('.ecom-stores-grid');
+        if (!grid) return;
+
+        try {
+            const token = localStorage.getItem('octobot_token');
+            const response = await fetch(`${this.API_URL}/api/ecommerce/stores`, {
+                headers: { 'Authorization': `Bearer ${token}` }
+            });
+            const data = await response.json();
+            const stores = data.stores || [];
+
+            // Clear and rebuild grid
+            const addCard = grid.querySelector('.ecom-add-store-card');
+            grid.innerHTML = '';
+
+            const platformIcons = {
+                shopify: '🛍️', woocommerce: '🛒', salla: '📦', zid: '🏪', easyorder: '📋', custom: '🔗'
+            };
+
+            stores.forEach(store => {
+                const storeCard = document.createElement('div');
+                storeCard.className = 'ecom-store-card';
+                storeCard.style.cssText = `
+                    background: linear-gradient(145deg, var(--bg-card), rgba(255,255,255,0.02));
+                    border: 1px solid var(--border-color);
+                    border-radius: 20px;
+                    padding: 0;
+                    display: flex;
+                    flex-direction: column;
+                    position: relative;
+                    overflow: hidden;
+                    transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+                    box-shadow: 0 4px 20px rgba(0,0,0,0.08);
+                `;
+                storeCard.onmouseover = function () {
+                    this.style.transform = 'translateY(-4px)';
+                    this.style.boxShadow = '0 12px 40px rgba(34, 197, 94, 0.15)';
+                    this.style.borderColor = 'rgba(34, 197, 94, 0.4)';
+                };
+                storeCard.onmouseout = function () {
+                    this.style.transform = 'translateY(0)';
+                    this.style.boxShadow = '0 4px 20px rgba(0,0,0,0.08)';
+                    this.style.borderColor = 'var(--border-color)';
+                };
+
+                const platformGradients = {
+                    shopify: 'linear-gradient(135deg, #96bf48, #5e8e3e)',
+                    woocommerce: 'linear-gradient(135deg, #9b5c8f, #7f3d7a)',
+                    salla: 'linear-gradient(135deg, #004165, #00638a)',
+                    zid: 'linear-gradient(135deg, #ff6b35, #e55320)',
+                    easyorder: 'linear-gradient(135deg, #FF6B35, #E55320)',
+                    custom: 'linear-gradient(135deg, #667eea, #764ba2)'
+                };
+
+                const platformLogos = {
+                    shopify: window.PLATFORM_LOGOS_SMALL?.shopify || '🛍️',
+                    woocommerce: window.PLATFORM_LOGOS_SMALL?.woocommerce || '🛒',
+                    salla: window.PLATFORM_LOGOS_SMALL?.salla || '📦',
+                    zid: window.PLATFORM_LOGOS_SMALL?.zid || '🏪',
+                    easyorder: window.PLATFORM_LOGOS_SMALL?.easyorder || '📋',
+                    custom: window.PLATFORM_LOGOS_SMALL?.custom || '🔗'
+                };
+
+                storeCard.innerHTML = `
+                    <!-- Header with Platform Icon -->
+                    <div style="
+                        background: ${platformGradients[store.platform] || platformGradients.custom};
+                        padding: 20px;
+                        display: flex;
+                        align-items: center;
+                        gap: 16px;
+                        position: relative;
+                    ">
+                        <div style="
+                            width: 56px;
+                            height: 56px;
+                            background: rgba(255,255,255,0.2);
+                            backdrop-filter: blur(10px);
+                            border-radius: 14px;
+                            display: flex;
+                            align-items: center;
+                            justify-content: center;
+                            box-shadow: 0 4px 15px rgba(0,0,0,0.1);
+                        ">
+                            ${platformLogos[store.platform] || platformLogos.custom}
+                        </div>
+                        <div style="flex:1;overflow:hidden;">
+                            <div style="font-weight:700;color:white;font-size:16px;margin-bottom:4px;text-overflow:ellipsis;overflow:hidden;white-space:nowrap;">
+                                ${store.storeName || store.platform}
+                            </div>
+                            <a href="${store.storeUrl}" target="_blank" style="
+                                font-size:12px;
+                                color:rgba(255,255,255,0.85);
+                                text-decoration:none;
+                                display:flex;
+                                align-items:center;
+                                gap:4px;
+                                overflow:hidden;
+                                text-overflow:ellipsis;
+                                white-space:nowrap;
+                            ">
+                                <i class="fas fa-external-link-alt" style="font-size:10px;"></i>
+                                ${store.storeUrl.replace(/^https?:\/\//, '')}
+                            </a>
+                        </div>
+                        <!-- Status Badge -->
+                        <div style="
+                            position: absolute;
+                            top: 12px;
+                            left: 12px;
+                            padding: 6px 12px;
+                            border-radius: 20px;
+                            font-size: 11px;
+                            font-weight: 600;
+                            display: flex;
+                            align-items: center;
+                            gap: 5px;
+                            background: ${store.isActive ? 'rgba(255,255,255,0.25)' : 'rgba(0,0,0,0.2)'};
+                            backdrop-filter: blur(10px);
+                            color: white;
+                        ">
+                            <span style="
+                                width: 8px;
+                                height: 8px;
+                                border-radius: 50%;
+                                background: ${store.isActive ? '#4ade80' : '#fbbf24'};
+                                box-shadow: 0 0 8px ${store.isActive ? '#4ade80' : '#fbbf24'};
+                            "></span>
+                            ${store.isActive ? 'متصل' : 'غير نشط'}
+                        </div>
+                    </div>
+
+                    <!-- Card Body -->
+                    <div style="padding: 20px; display: flex; flex-direction: column; gap: 16px;">
+                        <!-- Sync Info -->
+                        <div style="
+                            display: flex;
+                            align-items: center;
+                            gap: 8px;
+                            padding: 12px 14px;
+                            background: var(--bg-secondary);
+                            border-radius: 12px;
+                            border: 1px solid var(--border-color);
+                        ">
+                            <i class="fas fa-clock" style="color: var(--text-secondary); font-size: 14px;"></i>
+                            <span style="font-size: 13px; color: var(--text-secondary);">آخر مزامنة:</span>
+                            <span style="font-size: 13px; color: var(--text-primary); font-weight: 600; margin-right: auto;">
+                                ${store.lastSync ? new Date(store.lastSync).toLocaleDateString('ar-EG', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) : 'لم يتم بعد'}
+                            </span>
+                        </div>
+
+                        ${store.platform === 'easyorder' ? `
+                        <!-- Webhook URL Button -->
+                        <button onclick="app.showWebhookUrl(${store.id})" style="
+                            width: 100%;
+                            padding: 10px 14px;
+                            background: linear-gradient(135deg, #8b5cf6, #6d28d9);
+                            border: none;
+                            border-radius: 12px;
+                            color: white;
+                            font-size: 13px;
+                            font-weight: 600;
+                            cursor: pointer;
+                            display: flex;
+                            align-items: center;
+                            justify-content: center;
+                            gap: 8px;
+                            transition: all 0.2s ease;
+                            box-shadow: 0 4px 15px rgba(139, 92, 246, 0.3);
+                        " onmouseover="this.style.transform='scale(1.02)';this.style.boxShadow='0 6px 20px rgba(139, 92, 246, 0.4)';"
+                           onmouseout="this.style.transform='scale(1)';this.style.boxShadow='0 4px 15px rgba(139, 92, 246, 0.3)';">
+                            <i class="fas fa-link"></i>
+                            رابط استقبال الطلبات (Webhook)
+                        </button>
+                        ` : ''}
+
+                        <!-- Actions -->
+                        <div style="display: flex; gap: 10px;">
+                            <button onclick="app.syncStore(${store.id})" style="
+                                flex: 1;
+                                padding: 12px 16px;
+                                background: linear-gradient(135deg, #22c55e, #16a34a);
+                                border: none;
+                                border-radius: 12px;
+                                color: white;
+                                font-size: 14px;
+                                font-weight: 600;
+                                cursor: pointer;
+                                display: flex;
+                                align-items: center;
+                                justify-content: center;
+                                gap: 8px;
+                                transition: all 0.2s ease;
+                                box-shadow: 0 4px 15px rgba(34, 197, 94, 0.3);
+                            " onmouseover="this.style.transform='scale(1.02)';this.style.boxShadow='0 6px 20px rgba(34, 197, 94, 0.4)';"
+                               onmouseout="this.style.transform='scale(1)';this.style.boxShadow='0 4px 15px rgba(34, 197, 94, 0.3)';">
+                                <i class="fas fa-sync-alt${store.syncStatus === 'syncing' ? ' fa-spin' : ''}"></i>
+                                مزامنة
+                            </button>
+                            <button onclick="app.removeStore(${store.id})" style="
+                                padding: 12px 16px;
+                                background: rgba(239, 68, 68, 0.1);
+                                border: 1px solid rgba(239, 68, 68, 0.2);
+                                border-radius: 12px;
+                                color: #ef4444;
+                                font-size: 14px;
+                                cursor: pointer;
+                                display: flex;
+                                align-items: center;
+                                justify-content: center;
+                                transition: all 0.2s ease;
+                            " onmouseover="this.style.background='rgba(239, 68, 68, 0.2)';this.style.borderColor='rgba(239, 68, 68, 0.4)';"
+                               onmouseout="this.style.background='rgba(239, 68, 68, 0.1)';this.style.borderColor='rgba(239, 68, 68, 0.2)';">
+                                <i class="fas fa-trash-alt"></i>
+                            </button>
+                        </div>
+                    </div>
+                `;
+                grid.appendChild(storeCard);
+            });
+
+            // Re-add the add button
+            if (addCard) grid.appendChild(addCard);
+
+        } catch (err) {
+            console.error('[E-Commerce] Error loading stores:', err);
+        }
+    }
+
+    // Sync store data
+    async syncStore(storeId) {
+        this.showToast('جاري مزامنة المتجر...', 'info');
+
+        try {
+            const token = localStorage.getItem('octobot_token');
+            const response = await fetch(`${this.API_URL}/api/ecommerce/stores/${storeId}/sync`, {
+                method: 'POST',
+                headers: { 'Authorization': `Bearer ${token}` }
+            });
+            const data = await response.json();
+
+            if (data.success) {
+                if (data.syncStatus === 'syncing') {
+                    this.showToast('تم بدء المزامنة في الخلفية. ستظهر البيانات تدريجياً ⏳', 'success');
+                } else {
+                    this.showToast(`تم مزامنة ${data.syncedProducts} منتج و ${data.syncedOrders} طلب ✅`, 'success');
+                }
+                this.loadConnectedStores();
+                this.loadEcomStats();
+                this.loadEcomProducts();
+                this.loadEcomOrders();
+            } else {
+                this.showToast(`فشلت المزامنة: ${data.error}`, 'error');
+            }
+        } catch (err) {
+            console.error('[E-Commerce] Sync error:', err);
+            this.showToast('حدث خطأ أثناء المزامنة', 'error');
+        }
+    }
+
+    // Remove store
+    async removeStore(storeId) {
+        if (!confirm('هل أنت متأكد من حذف هذا المتجر؟ سيتم حذف جميع المنتجات والطلبات المرتبطة.')) return;
+
+        try {
+            const token = localStorage.getItem('octobot_token');
+            const response = await fetch(`${this.API_URL}/api/ecommerce/stores/${storeId}`, {
+                method: 'DELETE',
+                headers: { 'Authorization': `Bearer ${token}` }
+            });
+            const data = await response.json();
+
+            if (data.success) {
+                this.showToast('تم حذف المتجر بنجاح', 'success');
+                this.loadConnectedStores();
+                this.loadEcomStats();
+            } else {
+                this.showToast('فشل حذف المتجر', 'error');
+            }
+        } catch (err) {
+            console.error('[E-Commerce] Remove error:', err);
+            this.showToast('حدث خطأ', 'error');
+        }
+    }
+
+    // Show Webhook URL for EasyOrder stores
+    async showWebhookUrl(storeId) {
+        try {
+            const token = localStorage.getItem('octobot_token');
+            const response = await fetch(`${this.API_URL}/api/ecommerce/stores/${storeId}/webhook-url`, {
+                headers: { 'Authorization': `Bearer ${token}` }
+            });
+            const data = await response.json();
+
+            if (!data.success) {
+                this.showToast('فشل في جلب رابط الـ Webhook', 'error');
+                return;
+            }
+
+            // Create modal to show webhook URL
+            const modal = document.createElement('div');
+            modal.id = 'webhookModal';
+            modal.style.cssText = `
+                position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+                background: rgba(0,0,0,0.6); backdrop-filter: blur(8px);
+                display: flex; align-items: center; justify-content: center;
+                z-index: 10000; animation: fadeIn 0.3s ease;
+            `;
+            modal.innerHTML = `
+                <div style="
+                    background: var(--bg-primary, #1a1a2e);
+                    border-radius: 20px;
+                    padding: 30px;
+                    max-width: 600px;
+                    width: 90%;
+                    box-shadow: 0 25px 60px rgba(0,0,0,0.5);
+                    border: 1px solid rgba(139, 92, 246, 0.3);
+                ">
+                    <div style="display: flex; align-items: center; gap: 12px; margin-bottom: 20px;">
+                        <div style="
+                            width: 45px; height: 45px; border-radius: 12px;
+                            background: linear-gradient(135deg, #8b5cf6, #6d28d9);
+                            display: flex; align-items: center; justify-content: center;
+                        ">
+                            <i class="fas fa-link" style="color: white; font-size: 18px;"></i>
+                        </div>
+                        <div>
+                            <h3 style="margin: 0; color: var(--text-primary, white); font-size: 18px;">رابط استقبال الطلبات</h3>
+                            <p style="margin: 0; color: var(--text-secondary, #aaa); font-size: 13px;">Webhook URL - EasyOrder</p>
+                        </div>
+                        <button onclick="document.getElementById('webhookModal').remove()" style="
+                            margin-right: auto; background: none; border: none;
+                            color: var(--text-secondary, #aaa); font-size: 20px; cursor: pointer;
+                        ">✕</button>
+                    </div>
+
+                    <div style="
+                        background: var(--bg-secondary, #16213e);
+                        border: 1px solid rgba(139, 92, 246, 0.2);
+                        border-radius: 12px;
+                        padding: 16px;
+                        margin-bottom: 16px;
+                    ">
+                        <label style="color: var(--text-secondary, #aaa); font-size: 12px; margin-bottom: 8px; display: block;">الرابط الخاص بمتجرك:</label>
+                        <div style="display: flex; gap: 8px; align-items: center;">
+                            <input type="text" value="${data.webhookUrl}" readonly style="
+                                flex: 1; padding: 10px 14px;
+                                background: var(--bg-primary, #1a1a2e);
+                                border: 1px solid var(--border-color, #333);
+                                border-radius: 8px;
+                                color: var(--text-primary, white);
+                                font-size: 12px;
+                                font-family: monospace;
+                                direction: ltr;
+                            " id="webhookUrlInput">
+                            <button onclick="
+                                navigator.clipboard.writeText('${data.webhookUrl}');
+                                this.innerHTML='<i class=\\'fas fa-check\\'></i>';
+                                this.style.background='#22c55e';
+                                setTimeout(() => { this.innerHTML='<i class=\\'fas fa-copy\\'></i>'; this.style.background='linear-gradient(135deg, #8b5cf6, #6d28d9)'; }, 2000);
+                            " style="
+                                padding: 10px 14px;
+                                background: linear-gradient(135deg, #8b5cf6, #6d28d9);
+                                border: none; border-radius: 8px;
+                                color: white; cursor: pointer;
+                                font-size: 14px;
+                            "><i class="fas fa-copy"></i></button>
+                        </div>
+                    </div>
+
+                    <div style="
+                        background: rgba(34, 197, 94, 0.1);
+                        border: 1px solid rgba(34, 197, 94, 0.2);
+                        border-radius: 12px;
+                        padding: 16px;
+                    ">
+                        <h4 style="color: #22c55e; margin: 0 0 10px; font-size: 14px;">
+                            <i class="fas fa-info-circle"></i> طريقة الإعداد:
+                        </h4>
+                        <ol style="color: var(--text-secondary, #aaa); font-size: 13px; margin: 0; padding-right: 20px; line-height: 2;">
+                            <li>ادخل على لوحة تحكم EasyOrder</li>
+                            <li>اذهب إلى <b style="color: var(--text-primary, white);">التطبيقات → Public API → Webhooks</b></li>
+                            <li>اضغط <b style="color: var(--text-primary, white);">Create Webhook</b></li>
+                            <li>الصق الرابط أعلاه في حقل <b style="color: var(--text-primary, white);">URL</b></li>
+                            <li>اختر Type: <b style="color: var(--text-primary, white);">Orders</b></li>
+                            <li>اضغط <b style="color: #22c55e;">حفظ</b></li>
+                        </ol>
+                    </div>
+                </div>
+            `;
+            modal.addEventListener('click', (e) => {
+                if (e.target === modal) modal.remove();
+            });
+            document.body.appendChild(modal);
+
+        } catch (err) {
+            console.error('[Webhook] Error:', err);
+            this.showToast('حدث خطأ في جلب رابط الـ Webhook', 'error');
+        }
+    }
+
+    // Load E-Commerce stats
+    async loadEcomStats() {
+        try {
+            const token = localStorage.getItem('octobot_token');
+            const response = await fetch(`${this.API_URL}/api/ecommerce/stats`, {
+                headers: { 'Authorization': `Bearer ${token}` }
+            });
+            const data = await response.json();
+
+            document.getElementById('ecomTodayOrders').textContent = data.todayOrders || 0;
+            document.getElementById('ecomTotalProducts').textContent = data.totalProducts || 0;
+
+            // Top selling product display (TODAY's sales only)
+            const topProductEl = document.getElementById('ecomPendingOrders');
+            if (data.topSellingProduct) {
+                topProductEl.innerHTML = `
+                    <div style="font-size:13px;font-weight:600;color:var(--text-primary);line-height:1.4;">
+                        ${data.topSellingProduct.name}
+                    </div>
+                    <div style="font-size:12px;color:var(--text-secondary);margin-top:4px;">
+                        (${data.topSellingProduct.count} مبيعات اليوم)
+                    </div>
+                `;
+            } else {
+                topProductEl.innerHTML = '<span style="color:var(--text-secondary);font-size:14px;">لا توجد مبيعات اليوم</span>';
+            }
+
+            document.getElementById('ecomTodayRevenue').textContent = (data.todayRevenue || 0).toLocaleString('ar-EG');
+        } catch (err) {
+            console.error('[E-Commerce] Stats error:', err);
+        }
+    }
+
+    // Load orders
+    async loadEcomOrders(resetPage = false) {
+        const container = document.getElementById('ecomOrdersList');
+        if (!container) return;
+
+        // Initialize page tracking
+        if (!this.ecomOrdersPage || resetPage) {
+            this.ecomOrdersPage = 1;
+        }
+        const page = this.ecomOrdersPage;
+        const limit = 100;
+        const offset = (page - 1) * limit;
+
+        try {
+            // Add loading state
+            container.style.opacity = '0.5';
+
+            const token = localStorage.getItem('octobot_token');
+            const filter = document.getElementById('ecomOrderFilter')?.value || 'all';
+            const response = await fetch(`${this.API_URL}/api/ecommerce/orders?status=${filter}&limit=${limit}&offset=${offset}&today=true`, {
+                headers: { 'Authorization': `Bearer ${token}` }
+            });
+            const data = await response.json();
+            const orders = data.orders || [];
+            const total = data.total || 0;
+            const totalPages = Math.ceil(total / limit);
+
+            // Remove loading state
+            container.style.opacity = '1';
+
+            if (orders.length === 0 && page === 1) {
+                container.innerHTML = `
+                    <div style="text-align:center;padding:40px;color:var(--text-secondary);">
+                        <i class="fas fa-inbox" style="font-size:48px;margin-bottom:15px;opacity:0.3;"></i>
+                        <p>لا توجد طلبات اليوم</p>
+                    </div>
+                `;
+                return;
+            }
+
+            const statusColors = {
+                pending: '#f59e0b', processing: '#3b82f6', shipped: '#8b5cf6',
+                delivered: '#22c55e', completed: '#22c55e', cancelled: '#ef4444', refunded: '#ef4444'
+            };
+            const statusLabels = {
+                pending: 'في الانتظار', processing: 'قيد التنفيذ', shipped: 'تم الشحن',
+                delivered: 'تم التسليم', completed: 'مكتمل', cancelled: 'ملغي', refunded: 'مسترجع'
+            };
+
+            // Render orders
+            let html = orders.map(order => `
+                <div style="display:flex;align-items:center;gap:16px;padding:16px;background:var(--bg-secondary);border-radius:12px;margin-bottom:12px;">
+                    <div style="width:40px;height:40px;border-radius:50%;background:linear-gradient(135deg,var(--primary),var(--secondary));display:flex;align-items:center;justify-content:center;color:white;font-weight:600;">
+                        ${order.orderNumber?.slice(-2) || '#'}
+                    </div>
+                    <div style="flex:1;">
+                        <div style="font-weight:600;color:var(--text-primary);">#${order.orderNumber || order.externalId}</div>
+                        <div style="font-size:12px;color:var(--text-secondary);">${order.customerName || 'عميل'} - ${order.customerPhone || ''}</div>
+                    </div>
+                    <div style="text-align:left;">
+                        <div style="font-weight:600;color:var(--text-primary);">${parseFloat(order.totalPrice).toLocaleString('ar-EG')} ${order.currency || 'EGP'}</div>
+                        <span style="font-size:11px;padding:3px 8px;border-radius:12px;background:${statusColors[order.status]}20;color:${statusColors[order.status]};">
+                            ${statusLabels[order.status] || order.status}
+                        </span>
+                    </div>
+                </div>
+            `).join('');
+
+            // Add pagination controls
+            if (totalPages > 1) {
+                html += `
+                    <div style="display:flex;justify-content:center;align-items:center;gap:16px;margin-top:20px;padding:16px;">
+                        <button onclick="app.ecomOrdersPage--;app.loadEcomOrders();document.getElementById('ecomOrdersList').scrollIntoView({behavior:'smooth'})" 
+                            style="padding:10px 20px;border-radius:8px;background:var(--primary);color:white;border:none;cursor:pointer;${page <= 1 ? 'opacity:0.5;pointer-events:none;' : ''}"
+                            ${page <= 1 ? 'disabled' : ''}>
+                            <i class="fas fa-arrow-right"></i> السابق
+                        </button>
+                        <span style="color:var(--text-secondary);">صفحة ${page} من ${totalPages} (${total} طلب)</span>
+                        <button onclick="app.ecomOrdersPage++;app.loadEcomOrders();document.getElementById('ecomOrdersList').scrollIntoView({behavior:'smooth'})"
+                            style="padding:10px 20px;border-radius:8px;background:var(--primary);color:white;border:none;cursor:pointer;${page >= totalPages ? 'opacity:0.5;pointer-events:none;' : ''}"
+                            ${page >= totalPages ? 'disabled' : ''}>
+                            التالي <i class="fas fa-arrow-left"></i>
+                        </button>
+                    </div>
+                `;
+            }
+
+            container.innerHTML = html;
+
+        } catch (err) {
+            console.error('[E-Commerce] Orders error:', err);
+            container.style.opacity = '1';
+            container.innerHTML = '<div style="text-align:center;padding:20px;color:var(--text-secondary);">خطأ في تحميل الطلبات</div>';
+        }
+    }
+
+    // Refresh orders
+    refreshEcomOrders() {
+        this.loadEcomOrders();
+    }
+
+    // Load products
+    // Load products
+    async loadEcomProducts(resetPage = false) {
+        const container = document.getElementById('ecomProductsGrid');
+        if (!container) return;
+
+        // Initialize page state if not exists
+        if (!this.ecomProductsPage || resetPage) {
+            this.ecomProductsPage = 1;
+        }
+        const limit = 100;
+        const offset = (this.ecomProductsPage - 1) * limit;
+
+        try {
+            const token = localStorage.getItem('octobot_token');
+            const search = document.getElementById('ecomProductSearch')?.value || '';
+
+            // Show loading state if it's a page change
+            if (!resetPage && this.ecomProductsPage > 1) {
+                container.style.opacity = '0.5';
+            }
+
+            const response = await fetch(`${this.API_URL}/api/ecommerce/products?search=${encodeURIComponent(search)}&limit=${limit}&offset=${offset}`, {
+                headers: { 'Authorization': `Bearer ${token}` }
+            });
+            const data = await response.json();
+            const products = data.products || [];
+            const total = data.total || 0;
+            const totalPages = Math.ceil(total / limit);
+
+            if (products.length === 0) {
+                container.innerHTML = `
+                    <div style="text-align:center;padding:40px;color:var(--text-secondary);">
+                        <i class="fas fa-box-open" style="font-size:48px;margin-bottom:15px;opacity:0.3;"></i>
+                        <p>لا توجد منتجات</p>
+                    </div>
+                `;
+                container.style.opacity = '1';
+                return;
+            }
+
+            // Products Grid
+            let html = `<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:16px;margin-bottom:20px;">
+                ${products.map(p => `
+                    <div style="background:var(--bg-secondary);border-radius:12px;overflow:hidden;border:1px solid var(--border-color);">
+                        <div style="height:120px;background:var(--glass);display:flex;align-items:center;justify-content:center;">
+                            ${p.images?.[0] ? `<img src="${p.images[0]}" style="width:100%;height:100%;object-fit:cover;">` : '<i class="fas fa-image" style="font-size:32px;opacity:0.3;"></i>'}
+                        </div>
+                        <div style="padding:12px;">
+                            <div style="font-weight:600;color:var(--text-primary);margin-bottom:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${p.name}</div>
+                            <div style="font-size:14px;color:var(--primary);font-weight:600;">${parseFloat(p.price).toLocaleString('ar-EG')} ${p.currency || 'EGP'}</div>
+                            <div style="font-size:11px;color:var(--text-secondary);margin-top:4px;">
+                                <i class="fas fa-box"></i> ${p.inventory || 0} في المخزون
+                            </div>
+                        </div>
+                    </div>
+                `).join('')}
+            </div>`;
+
+            // Pagination Controls
+            if (totalPages > 1) {
+                html += `
+                    <div style="display:flex;justify-content:center;align-items:center;gap:15px;margin-top:20px;padding-top:20px;border-top:1px solid var(--border-color);">
+                        <button id="prevPageBtn" class="btn-secondary" ${this.ecomProductsPage === 1 ? 'disabled' : ''} style="padding:8px 16px;">
+                            <i class="fas fa-chevron-right"></i> السابق
+                        </button>
+                        <span style="color:var(--text-secondary);font-size:14px;">
+                            صفحة <span style="color:var(--text-primary);font-weight:bold;">${this.ecomProductsPage}</span> من ${totalPages}
+                        </span>
+                        <button id="nextPageBtn" class="btn-secondary" ${this.ecomProductsPage === totalPages ? 'disabled' : ''} style="padding:8px 16px;">
+                            التالي <i class="fas fa-chevron-left"></i>
+                        </button>
+                    </div>
+                `;
+            }
+
+            container.innerHTML = html;
+            container.style.opacity = '1';
+
+            // Add Event Listeners
+            if (totalPages > 1) {
+                document.getElementById('prevPageBtn')?.addEventListener('click', () => {
+                    if (this.ecomProductsPage > 1) {
+                        this.ecomProductsPage--;
+                        this.loadEcomProducts();
+                        container.scrollIntoView({ behavior: 'smooth' });
+                    }
+                });
+
+                document.getElementById('nextPageBtn')?.addEventListener('click', () => {
+                    if (this.ecomProductsPage < totalPages) {
+                        this.ecomProductsPage++;
+                        this.loadEcomProducts();
+                        container.scrollIntoView({ behavior: 'smooth' });
+                    }
+                });
+            }
+
+        } catch (err) {
+            console.error('[E-Commerce] Products error:', err);
+            container.innerHTML = '<div style="text-align:center;padding:20px;color:var(--text-secondary);">خطأ في تحميل المنتجات</div>';
+            container.style.opacity = '1';
+        }
+    }
+
+    // Sync products
+    syncEcomProducts() {
+        // Sync all stores
+        this.loadConnectedStores();
+        this.showToast('جاري مزامنة المنتجات من جميع المتاجر...', 'info');
+    }
+
+    // ============= CUSTOMERS FUNCTIONS =============
+
+    // Load customers
+    async loadEcomCustomers(resetPage = false) {
+        const container = document.getElementById('ecomCustomersList');
+        if (!container) return;
+
+        // Initialize page tracking
+        if (!this.ecomCustomersPage || resetPage) {
+            this.ecomCustomersPage = 1;
+        }
+        const page = this.ecomCustomersPage;
+        const limit = 50;
+        const offset = (page - 1) * limit;
+
+        try {
+            // Add loading state
+            container.innerHTML = `
+                <div style="text-align:center;padding:40px;">
+                    <i class="fas fa-spinner fa-spin" style="font-size:32px;color:var(--primary);"></i>
+                    <p style="margin-top:15px;color:var(--text-secondary);">جاري تحميل العملاء...</p>
+                </div>
+            `;
+
+            const token = localStorage.getItem('octobot_token');
+            const search = document.getElementById('ecomCustomerSearch')?.value || '';
+            const response = await fetch(`${this.API_URL}/api/ecommerce/customers?search=${encodeURIComponent(search)}&limit=${limit}&offset=${offset}`, {
+                headers: { 'Authorization': `Bearer ${token}` }
+            });
+            const data = await response.json();
+            const customers = data.customers || [];
+            const total = data.total || 0;
+            const totalPages = Math.ceil(total / limit);
+
+            if (customers.length === 0) {
+                container.innerHTML = `
+                    <div style="text-align:center;padding:40px;color:var(--text-secondary);">
+                        <i class="fas fa-user-tag" style="font-size:48px;margin-bottom:15px;opacity:0.3;"></i>
+                        <p>لا يوجد عملاء${search ? ' مطابقين للبحث' : ' حتى الآن'}</p>
+                        <p style="font-size:12px;margin-top:8px;">سيظهر العملاء هنا عند وجود طلبات</p>
+                    </div>
+                `;
+                return;
+            }
+
+            // Render customers grid with premium styling
+            let html = `
+                <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:20px;margin-bottom:24px;">
+                    ${customers.map(c => `
+                        <div onclick="app.viewCustomerDetails('${c.id}')" class="customer-card-premium" style="
+                            background: linear-gradient(145deg, rgba(255,255,255,0.95), rgba(248,250,252,0.9));
+                            border-radius:20px;
+                            padding:0;
+                            cursor:pointer;
+                            border:1px solid rgba(139,92,246,0.1);
+                            transition:all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+                            overflow:hidden;
+                            box-shadow: 0 4px 20px rgba(139,92,246,0.08);
+                        " onmouseover="this.style.transform='translateY(-6px) scale(1.01)';this.style.boxShadow='0 20px 40px rgba(139,92,246,0.2)';" 
+                           onmouseout="this.style.transform='translateY(0) scale(1)';this.style.boxShadow='0 4px 20px rgba(139,92,246,0.08)';">
+                            
+                            <!-- Header with gradient -->
+                            <div style="
+                                background: linear-gradient(135deg, #8b5cf6 0%, #6366f1 50%, #4f46e5 100%);
+                                padding:20px 20px 50px 20px;
+                                position:relative;
+                            ">
+                                <div style="display:flex;align-items:center;gap:16px;">
+                                    <div style="
+                                        width:56px;height:56px;border-radius:16px;
+                                        background:rgba(255,255,255,0.25);
+                                        backdrop-filter:blur(10px);
+                                        display:flex;align-items:center;justify-content:center;
+                                        color:white;font-weight:800;font-size:22px;
+                                        border:2px solid rgba(255,255,255,0.3);
+                                        box-shadow: 0 8px 20px rgba(0,0,0,0.15);
+                                    ">${(c.name?.charAt(0) || 'ع').toUpperCase()}</div>
+                                    <div style="flex:1;min-width:0;">
+                                        <div style="font-weight:700;color:white;font-size:17px;text-shadow:0 2px 4px rgba(0,0,0,0.1);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${c.name || 'عميل'}</div>
+                                        <div style="font-size:13px;color:rgba(255,255,255,0.9);margin-top:4px;display:flex;align-items:center;gap:6px;">
+                                            ${c.phone ? `<i class="fas fa-phone-alt"></i><span style="direction:ltr;">${c.phone}</span>` : ''}
+                                            ${c.email && !c.phone ? `<i class="fas fa-envelope"></i>${c.email}` : ''}
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                            
+                            <!-- Stats section -->
+                            <div style="padding:0 20px 20px;margin-top:-35px;position:relative;">
+                                <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+                                    <div style="
+                                        background:white;
+                                        padding:18px 16px;
+                                        border-radius:16px;
+                                        text-align:center;
+                                        box-shadow: 0 4px 15px rgba(0,0,0,0.05);
+                                        border:1px solid rgba(139,92,246,0.1);
+                                    ">
+                                        <div style="font-size:26px;font-weight:800;background:linear-gradient(135deg,#8b5cf6,#6366f1);-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;">${c.totalOrders}</div>
+                                        <div style="font-size:12px;color:#64748b;font-weight:500;margin-top:4px;">طلب</div>
+                                    </div>
+                                    <div style="
+                                        background:white;
+                                        padding:18px 16px;
+                                        border-radius:16px;
+                                        text-align:center;
+                                        box-shadow: 0 4px 15px rgba(0,0,0,0.05);
+                                        border:1px solid rgba(34,197,94,0.1);
+                                    ">
+                                        <div style="font-size:18px;font-weight:800;color:#16a34a;">${parseFloat(c.totalSpent).toLocaleString('ar-EG')}</div>
+                                        <div style="font-size:12px;color:#64748b;font-weight:500;margin-top:4px;">إجمالي الشراء</div>
+                                    </div>
+                                </div>
+                                
+                                <!-- Last order info -->
+                                <div style="
+                                    margin-top:16px;
+                                    padding:12px 16px;
+                                    background:linear-gradient(135deg, rgba(139,92,246,0.05), rgba(99,102,241,0.05));
+                                    border-radius:12px;
+                                    display:flex;
+                                    align-items:center;
+                                    justify-content:space-between;
+                                ">
+                                    <div style="display:flex;align-items:center;gap:8px;font-size:12px;color:#6366f1;font-weight:500;">
+                                        <i class="fas fa-clock"></i>
+                                        آخر طلب
+                                    </div>
+                                    <div style="font-size:13px;color:#4f46e5;font-weight:600;">
+                                        ${c.lastOrderDate ? new Date(c.lastOrderDate).toLocaleDateString('ar-EG') : 'غير معروف'}
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    `).join('')}
+                </div>
+            `;
+
+            // Pagination
+            if (totalPages > 1) {
+                html += `
+                    <div style="display:flex;justify-content:center;align-items:center;gap:16px;padding:16px;">
+                        <button onclick="app.ecomCustomersPage--;app.loadEcomCustomers()" 
+                            style="padding:10px 20px;border-radius:8px;background:var(--primary);color:white;border:none;cursor:pointer;${page <= 1 ? 'opacity:0.5;pointer-events:none;' : ''}"
+                            ${page <= 1 ? 'disabled' : ''}>
+                            <i class="fas fa-arrow-right"></i> السابق
+                        </button>
+                        <span style="color:var(--text-secondary);">صفحة ${page} من ${totalPages} (${total} عميل)</span>
+                        <button onclick="app.ecomCustomersPage++;app.loadEcomCustomers()"
+                            style="padding:10px 20px;border-radius:8px;background:var(--primary);color:white;border:none;cursor:pointer;${page >= totalPages ? 'opacity:0.5;pointer-events:none;' : ''}"
+                            ${page >= totalPages ? 'disabled' : ''}>
+                            التالي <i class="fas fa-arrow-left"></i>
+                        </button>
+                    </div>
+                `;
+            }
+
+            container.innerHTML = html;
+
+        } catch (err) {
+            console.error('[E-Commerce] Customers error:', err);
+            container.innerHTML = '<div style="text-align:center;padding:20px;color:var(--text-secondary);">خطأ في تحميل العملاء</div>';
+        }
+    }
+
+    // Search customers with debounce
+    searchEcomCustomers() {
+        clearTimeout(this._customerSearchTimeout);
+        this._customerSearchTimeout = setTimeout(() => {
+            this.loadEcomCustomers(true);
+        }, 300);
+    }
+
+    // View customer details modal
+    async viewCustomerDetails(identifier) {
+        const modal = document.createElement('div');
+        modal.id = 'customerDetailModal';
+        modal.style.cssText = `
+            position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+            background: rgba(0,0,0,0.6); backdrop-filter: blur(10px);
+            display: flex; align-items: center; justify-content: center;
+            z-index: 10000;
+        `;
+
+        const isDark = document.body.classList.contains('dark-mode');
+        const bgColor = isDark ? '#1e1e30' : '#ffffff';
+        const textColor = isDark ? '#fff' : '#1a1a2e';
+
+        modal.innerHTML = `
+            <div style="background:${bgColor};border-radius:20px;padding:24px;width:90%;max-width:700px;max-height:85vh;overflow:hidden;display:flex;flex-direction:column;">
+                <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px;">
+                    <h3 style="margin:0;color:${textColor};display:flex;align-items:center;gap:10px;">
+                        <i class="fas fa-user" style="color:#8b5cf6;"></i>
+                        تفاصيل العميل
+                    </h3>
+                    <button onclick="document.getElementById('customerDetailModal').remove()" style="background:none;border:none;font-size:24px;cursor:pointer;color:var(--text-secondary);">×</button>
+                </div>
+                <div id="customerDetailContent" style="flex:1;overflow-y:auto;">
+                    <div style="text-align:center;padding:40px;"><i class="fas fa-spinner fa-spin" style="font-size:32px;"></i></div>
+                </div>
+            </div>
+        `;
+
+        modal.onclick = (e) => { if (e.target === modal) modal.remove(); };
+        document.body.appendChild(modal);
+
+        try {
+            const token = localStorage.getItem('octobot_token');
+            const response = await fetch(`${this.API_URL}/api/ecommerce/customers/${encodeURIComponent(identifier)}/orders`, {
+                headers: { 'Authorization': `Bearer ${token}` }
+            });
+            const data = await response.json();
+
+            if (!data.customer) {
+                throw new Error('Customer not found');
+            }
+
+            const { customer, orders } = data;
+            const container = document.getElementById('customerDetailContent');
+
+            const statusColors = {
+                pending: '#f59e0b', processing: '#3b82f6', shipped: '#8b5cf6',
+                delivered: '#22c55e', completed: '#22c55e', cancelled: '#ef4444', refunded: '#ef4444'
+            };
+            const statusLabels = {
+                pending: 'في الانتظار', processing: 'قيد التنفيذ', shipped: 'تم الشحن',
+                delivered: 'تم التسليم', completed: 'مكتمل', cancelled: 'ملغي', refunded: 'مسترجع'
+            };
+
+            container.innerHTML = `
+                <!-- Premium Customer Info Header -->
+                <div style="
+                    background: linear-gradient(135deg, #667eea 0%, #764ba2 50%, #38BDF8 100%);
+                    border-radius:24px;
+                    padding:28px;
+                    color:white;
+                    margin-bottom:24px;
+                    position:relative;
+                    overflow:hidden;
+                    box-shadow: 0 20px 40px rgba(102,126,234,0.3);
+                ">
+                    <!-- Decorative circles -->
+                    <div style="position:absolute;top:-30px;right:-30px;width:120px;height:120px;background:rgba(255,255,255,0.1);border-radius:50%;"></div>
+                    <div style="position:absolute;bottom:-20px;left:-20px;width:80px;height:80px;background:rgba(255,255,255,0.08);border-radius:50%;"></div>
+                    
+                    <div style="display:flex;align-items:center;gap:20px;position:relative;z-index:1;">
+                        <div style="
+                            width:80px;height:80px;border-radius:20px;
+                            background:rgba(255,255,255,0.2);
+                            backdrop-filter:blur(10px);
+                            display:flex;align-items:center;justify-content:center;
+                            font-size:32px;font-weight:800;
+                            border:3px solid rgba(255,255,255,0.3);
+                            box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+                        ">
+                            ${(customer.name?.charAt(0) || 'ع').toUpperCase()}
+                        </div>
+                        <div style="flex:1;">
+                            <h3 style="margin:0 0 10px 0;font-size:24px;font-weight:700;text-shadow:0 2px 4px rgba(0,0,0,0.1);">${customer.name || 'عميل'}</h3>
+                            <div style="display:flex;flex-wrap:wrap;gap:12px;">
+                                ${customer.phone ? `
+                                    <div style="display:flex;align-items:center;gap:6px;background:rgba(255,255,255,0.2);padding:6px 14px;border-radius:20px;font-size:13px;">
+                                        <i class="fas fa-phone-alt"></i>
+                                        <span style="direction:ltr;">${customer.phone}</span>
+                                    </div>
+                                ` : ''}
+                                ${customer.email ? `
+                                    <div style="display:flex;align-items:center;gap:6px;background:rgba(255,255,255,0.2);padding:6px 14px;border-radius:20px;font-size:13px;">
+                                        <i class="fas fa-envelope"></i>
+                                        ${customer.email}
+                                    </div>
+                                ` : ''}
+                                ${customer.address ? `
+                                    <div style="display:flex;align-items:center;gap:6px;background:rgba(255,255,255,0.15);padding:6px 14px;border-radius:20px;font-size:12px;">
+                                        <i class="fas fa-map-marker-alt"></i>
+                                        ${customer.address}${customer.state ? ' - ' + customer.state : ''}
+                                    </div>
+                                ` : ''}
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <!-- Stats Cards -->
+                    <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:24px;position:relative;z-index:1;">
+                        <div style="
+                            background:rgba(255,255,255,0.2);
+                            backdrop-filter:blur(10px);
+                            padding:20px;
+                            border-radius:16px;
+                            text-align:center;
+                            border:1px solid rgba(255,255,255,0.2);
+                        ">
+                            <div style="font-size:36px;font-weight:800;text-shadow:0 2px 10px rgba(0,0,0,0.1);">${customer.totalOrders}</div>
+                            <div style="font-size:13px;opacity:0.9;font-weight:500;margin-top:4px;">إجمالي الطلبات</div>
+                        </div>
+                        <div style="
+                            background:rgba(255,255,255,0.2);
+                            backdrop-filter:blur(10px);
+                            padding:20px;
+                            border-radius:16px;
+                            text-align:center;
+                            border:1px solid rgba(255,255,255,0.2);
+                        ">
+                            <div style="font-size:24px;font-weight:800;text-shadow:0 2px 10px rgba(0,0,0,0.1);">${parseFloat(customer.totalSpent).toLocaleString('ar-EG')} <span style="font-size:14px;opacity:0.8;">EGP</span></div>
+                            <div style="font-size:13px;opacity:0.9;font-weight:500;margin-top:4px;">إجمالي المشتريات</div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Orders List -->
+                <div style="
+                    background:linear-gradient(135deg, rgba(34,197,94,0.05), rgba(22,163,74,0.02));
+                    border-radius:20px;
+                    padding:20px;
+                    border:1px solid rgba(34,197,94,0.1);
+                ">
+                    <h4 style="margin:0 0 20px 0;color:${textColor};display:flex;align-items:center;gap:10px;font-size:16px;">
+                        <div style="width:36px;height:36px;background:linear-gradient(135deg,#22c55e,#16a34a);border-radius:10px;display:flex;align-items:center;justify-content:center;">
+                            <i class="fas fa-receipt" style="color:white;font-size:14px;"></i>
+                        </div>
+                        سجل الطلبات (${orders.length})
+                    </h4>
+                    <div style="display:flex;flex-direction:column;gap:14px;">
+                        ${orders.map(order => `
+                            <div style="
+                                display:flex;align-items:center;gap:16px;
+                                padding:18px;
+                                background:white;
+                                border-radius:16px;
+                                border:1px solid rgba(0,0,0,0.05);
+                                box-shadow: 0 4px 15px rgba(0,0,0,0.03);
+                                transition: all 0.2s ease;
+                            " onmouseover="this.style.transform='translateX(-4px)';this.style.boxShadow='0 8px 25px rgba(0,0,0,0.08)';"
+                               onmouseout="this.style.transform='translateX(0)';this.style.boxShadow='0 4px 15px rgba(0,0,0,0.03)';">
+                                <div style="
+                                    width:50px;height:50px;border-radius:14px;
+                                    background:linear-gradient(135deg,${statusColors[order.status]}40,${statusColors[order.status]}20);
+                                    display:flex;align-items:center;justify-content:center;
+                                    color:${statusColors[order.status]};font-weight:700;font-size:16px;
+                                ">
+                                    ${order.orderNumber?.slice(-2) || '#'}
+                                </div>
+                                <div style="flex:1;">
+                                    <div style="font-weight:700;color:#1e293b;font-size:15px;">#${order.orderNumber || order.externalId}</div>
+                                    <div style="font-size:13px;color:#64748b;margin-top:3px;">
+                                        ${order.externalCreatedAt ? new Date(order.externalCreatedAt).toLocaleDateString('ar-EG', { day: 'numeric', month: 'short', year: 'numeric' }) : '-'}
+                                    </div>
+                                </div>
+                                <div style="text-align:left;">
+                                    <div style="font-weight:700;color:#1e293b;font-size:16px;">${parseFloat(order.totalPrice).toLocaleString('ar-EG')} <span style="font-size:12px;color:#64748b;">${order.currency || 'EGP'}</span></div>
+                                    <span style="
+                                        display:inline-block;
+                                        margin-top:6px;
+                                        font-size:11px;
+                                        padding:4px 12px;
+                                        border-radius:20px;
+                                        font-weight:600;
+                                        background:${statusColors[order.status]}15;
+                                        color:${statusColors[order.status]};
+                                    ">
+                                        ${statusLabels[order.status] || order.status}
+                                    </span>
+                                </div>
+                            </div>
+                        `).join('')}
+                    </div>
+                </div>
+            `;
+
+        } catch (err) {
+            console.error('[E-Commerce] Customer details error:', err);
+            document.getElementById('customerDetailContent').innerHTML = '<div style="text-align:center;padding:40px;color:#ef4444;"><i class="fas fa-exclamation-circle" style="font-size:32px;margin-bottom:10px;"></i><p>خطأ في تحميل بيانات العميل</p></div>';
+        }
+    }
+
+    // ============= SETTINGS FUNCTIONS =============
+
+    // Load settings tab content
+    async loadEcomSettings() {
+        const container = document.getElementById('ecomSettingsContent');
+        if (!container) return;
+
+        container.innerHTML = `
+            <div style="text-align:center;padding:40px;">
+                <i class="fas fa-spinner fa-spin" style="font-size:32px;color:var(--primary);"></i>
+                <p style="margin-top:15px;color:var(--text-secondary);">جاري تحميل الإعدادات...</p>
+            </div>
+        `;
+
+        try {
+            const token = localStorage.getItem('octobot_token');
+            const response = await fetch(`${this.API_URL}/api/ecommerce/stores`, {
+                headers: { 'Authorization': `Bearer ${token}` }
+            });
+            const data = await response.json();
+            const stores = data.stores || [];
+
+            const platformNames = {
+                shopify: 'Shopify',
+                woocommerce: 'WooCommerce',
+                salla: 'Salla (سلة)',
+                zid: 'Zid (زد)',
+                easyorder: 'EasyOrder',
+                custom: 'Custom API'
+            };
+
+            const platformColors = {
+                shopify: '#95bf47',
+                woocommerce: '#96588a',
+                salla: '#004dbc',
+                zid: '#1E88E5',
+                easyorder: '#FF6B35',
+                custom: '#8b5cf6'
+            };
+
+            container.innerHTML = `
+                <!-- Connected Stores Section -->
+                <div style="margin-bottom:32px;">
+                    <h4 style="margin:0 0 20px 0;display:flex;align-items:center;gap:10px;">
+                        <i class="fas fa-store" style="color:#22c55e;"></i>
+                        المتاجر المتصلة (${stores.length})
+                    </h4>
+                    
+                    ${stores.length === 0 ? `
+                        <div style="text-align:center;padding:40px;background:var(--bg-secondary);border-radius:16px;border:1px solid var(--border-color);">
+                            <i class="fas fa-store-slash" style="font-size:48px;color:var(--text-secondary);opacity:0.3;margin-bottom:15px;"></i>
+                            <p style="color:var(--text-secondary);margin-bottom:16px;">لم تقم بربط أي متجر بعد</p>
+                            <button onclick="app.showConnectStoreModal()" class="btn btn-primary">
+                                <i class="fas fa-plus"></i> ربط متجر جديد
+                            </button>
+                        </div>
+                    ` : `
+                        <div style="display:flex;flex-direction:column;gap:16px;">
+                            ${stores.map(store => `
+                                <div style="
+                                    background:var(--bg-secondary);
+                                    border-radius:16px;
+                                    padding:20px;
+                                    border:1px solid var(--border-color);
+                                    display:flex;
+                                    align-items:center;
+                                    gap:16px;
+                                ">
+                                    <div style="
+                                        width:50px;height:50px;border-radius:12px;
+                                        background:${platformColors[store.platform] || '#8b5cf6'}20;
+                                        display:flex;align-items:center;justify-content:center;
+                                        font-size:24px;
+                                    ">
+                                        ${store.platform === 'shopify' ? '<i class="fab fa-shopify" style="color:#95bf47;"></i>' :
+                    store.platform === 'woocommerce' ? '<i class="fab fa-wordpress" style="color:#96588a;"></i>' :
+                        '<i class="fas fa-store" style="color:' + (platformColors[store.platform] || '#8b5cf6') + ';"></i>'}
+                                    </div>
+                                    <div style="flex:1;">
+                                        <div style="font-weight:600;color:var(--text-primary);font-size:15px;">${store.storeName || 'متجر غير مسمى'}</div>
+                                        <div style="font-size:12px;color:var(--text-secondary);margin-top:2px;">
+                                            ${platformNames[store.platform] || store.platform} • 
+                                            <a href="${store.storeUrl}" target="_blank" style="color:var(--primary);text-decoration:none;">${store.storeUrl.replace(/^https?:\/\//, '').slice(0, 30)}${store.storeUrl.length > 30 ? '...' : ''}</a>
+                                        </div>
+                                        <div style="font-size:11px;color:var(--text-secondary);margin-top:4px;">
+                                            <i class="fas fa-clock"></i> آخر مزامنة: ${store.lastSync ? new Date(store.lastSync).toLocaleDateString('ar-EG', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) : 'لم يتم بعد'}
+                                        </div>
+                                    </div>
+                                    <div style="display:flex;align-items:center;gap:8px;">
+                                        <span style="
+                                            padding:6px 12px;
+                                            border-radius:20px;
+                                            font-size:11px;
+                                            font-weight:600;
+                                            background:${store.isActive ? 'rgba(34, 197, 94, 0.15)' : 'rgba(239, 68, 68, 0.15)'};
+                                            color:${store.isActive ? '#22c55e' : '#ef4444'};
+                                        ">
+                                            ${store.isActive ? '✓ متصل' : '✗ غير متصل'}
+                                        </span>
+                                    </div>
+                                    <div style="display:flex;gap:8px;">
+                                        <button onclick="app.syncStore(${store.id})" style="
+                                            padding:8px 14px;border-radius:8px;
+                                            background:linear-gradient(135deg,#22c55e,#16a34a);
+                                            border:none;color:white;cursor:pointer;
+                                            font-size:12px;font-weight:600;
+                                        " title="مزامنة">
+                                            <i class="fas fa-sync${store.syncStatus === 'syncing' ? ' fa-spin' : ''}"></i>
+                                        </button>
+                                        <button onclick="app.removeStore(${store.id})" style="
+                                            padding:8px 14px;border-radius:8px;
+                                            background:rgba(239, 68, 68, 0.1);
+                                            border:1px solid rgba(239, 68, 68, 0.2);
+                                            color:#ef4444;cursor:pointer;font-size:12px;
+                                        " title="حذف">
+                                            <i class="fas fa-trash"></i>
+                                        </button>
+                                    </div>
+                                </div>
+                            `).join('')}
+                        </div>
+                        <button onclick="app.showConnectStoreModal()" class="btn btn-secondary" style="margin-top:16px;">
+                            <i class="fas fa-plus"></i> ربط متجر إضافي
+                        </button>
+                    `}
+                </div>
+
+                <!-- Quick Actions -->
+                <div>
+                    <h4 style="margin:0 0 20px 0;display:flex;align-items:center;gap:10px;">
+                        <i class="fas fa-bolt" style="color:#f59e0b;"></i>
+                        إجراءات سريعة
+                    </h4>
+                    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:12px;">
+                        <button onclick="app.syncAllStores()" class="btn btn-secondary" style="padding:16px;display:flex;flex-direction:column;align-items:center;gap:8px;">
+                            <i class="fas fa-sync" style="font-size:24px;color:#22c55e;"></i>
+                            <span>مزامنة جميع المتاجر</span>
+                        </button>
+                        <button onclick="app.loadEcomStats();app.loadEcomOrders();app.loadEcomProducts()" class="btn btn-secondary" style="padding:16px;display:flex;flex-direction:column;align-items:center;gap:8px;">
+                            <i class="fas fa-redo" style="font-size:24px;color:#3b82f6;"></i>
+                            <span>تحديث البيانات</span>
+                        </button>
+                    </div>
+                </div>
+            `;
+
+        } catch (err) {
+            console.error('[E-Commerce] Settings error:', err);
+            container.innerHTML = '<div style="text-align:center;padding:40px;color:var(--text-secondary);"><i class="fas fa-exclamation-circle" style="font-size:32px;margin-bottom:10px;"></i><p>خطأ في تحميل الإعدادات</p></div>';
+        }
+    }
+
+    // Sync all stores
+    async syncAllStores() {
+        try {
+            const token = localStorage.getItem('octobot_token');
+            const response = await fetch(`${this.API_URL}/api/ecommerce/stores`, {
+                headers: { 'Authorization': `Bearer ${token}` }
+            });
+            const data = await response.json();
+            const stores = data.stores || [];
+
+            if (stores.length === 0) {
+                this.showToast('لا توجد متاجر للمزامنة', 'warning');
+                return;
+            }
+
+            this.showToast(`جاري مزامنة ${stores.length} متجر...`, 'info');
+
+            for (const store of stores) {
+                await this.syncStore(store.id);
+            }
+
+            this.loadEcomSettings();
+        } catch (err) {
+            console.error('[E-Commerce] Sync all error:', err);
+            this.showToast('حدث خطأ أثناء المزامنة', 'error');
+        }
+    }
+
+    // ============= PRODUCT PICKER FOR CHAT =============
+
+    // Show product picker modal (called from chat)
+    async showProductPicker() {
+        // Initialize selected products array
+        this.selectedProducts = [];
+
+        const modal = document.createElement('div');
+        modal.id = 'productPickerModal';
+        modal.style.cssText = `
+            position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+            background: rgba(0,0,0,0.6); backdrop-filter: blur(10px);
+            display: flex; align-items: center; justify-content: center;
+            z-index: 10000;
+        `;
+
+        modal.innerHTML = `
+            <div style="background:var(--bg-card);border-radius:20px;padding:24px;width:90%;max-width:600px;max-height:80vh;overflow:hidden;display:flex;flex-direction:column;border:1px solid var(--border-color);box-shadow:0 25px 50px -12px rgba(0,0,0,0.25);">
+                <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;">
+                    <h3 style="margin:0;color:var(--text-primary);display:flex;align-items:center;gap:10px;">
+                        <i class="fas fa-shopping-bag" style="color:#22c55e;"></i>
+                        اختر المنتجات للإرسال
+                    </h3>
+                    <button onclick="document.getElementById('productPickerModal').remove()" style="background:none;border:none;font-size:20px;cursor:pointer;color:var(--text-secondary);">×</button>
+                </div>
+                <input type="text" id="productPickerSearch" placeholder="🔍 بحث عن منتج..." style="width:100%;padding:12px 16px;border-radius:10px;border:1px solid var(--border-color);background:var(--bg-secondary);color:var(--text-primary);margin-bottom:12px;" oninput="app.searchProductsForPicker(this.value)">
+                
+                <!-- Selected count and send button -->
+                <div id="productPickerActions" style="display:none;margin-bottom:12px;padding:12px 16px;background:linear-gradient(135deg,#22c55e,#16a34a);border-radius:12px;align-items:center;justify-content:space-between;">
+                    <span style="color:white;font-weight:600;"><i class="fas fa-check-circle"></i> تم اختيار <span id="pickerSelectedCount">0</span> منتج</span>
+                    <button onclick="app.sendSelectedProducts()" style="background:white;color:#22c55e;border:none;padding:10px 20px;border-radius:8px;font-weight:600;cursor:pointer;display:flex;align-items:center;gap:8px;">
+                        <i class="fas fa-paper-plane"></i>
+                        إرسال للعميل
+                    </button>
+                </div>
+                
+                <div id="productPickerList" style="flex:1;overflow-y:auto;"></div>
+            </div>
+        `;
+
+        modal.onclick = (e) => { if (e.target === modal) modal.remove(); };
+        document.body.appendChild(modal);
+
+        // Load products
+        await this.loadProductsForPicker();
+    }
+
+    // Load products for picker
+    async loadProductsForPicker(search = '') {
+        const container = document.getElementById('productPickerList');
+        if (!container) return;
+
+        container.innerHTML = '<div style="text-align:center;padding:20px;"><i class="fas fa-spinner fa-spin"></i> جاري التحميل...</div>';
+
+        try {
+            const token = localStorage.getItem('octobot_token');
+            const response = await fetch(`${this.API_URL}/api/ecommerce/products?search=${encodeURIComponent(search)}&limit=50`, {
+                headers: { 'Authorization': `Bearer ${token}` }
+            });
+            const data = await response.json();
+            const products = data.products || [];
+
+            if (products.length === 0) {
+                container.innerHTML = '<div style="text-align:center;padding:40px;color:var(--text-secondary);"><i class="fas fa-box-open" style="font-size:32px;margin-bottom:10px;"></i><p>لا توجد منتجات</p></div>';
+                return;
+            }
+
+            container.innerHTML = products.map(p => {
+                const isSelected = this.selectedProducts?.some(sp => sp.id === p.id);
+                return `
+                <div class="product-picker-item" data-product-id="${p.id}" onclick="app.toggleProductSelection(${p.id})" style="display:flex;align-items:center;gap:12px;padding:12px;border-radius:12px;cursor:pointer;transition:all 0.2s;border:2px solid ${isSelected ? '#22c55e' : 'var(--border-color)'};margin-bottom:8px;background:${isSelected ? 'rgba(34,197,94,0.1)' : 'transparent'};" onmouseover="this.style.background=this.dataset.selected==='true'?'rgba(34,197,94,0.15)':'var(--bg-secondary)'" onmouseout="this.style.background=this.dataset.selected==='true'?'rgba(34,197,94,0.1)':'transparent'" data-selected="${isSelected}">
+                    <div style="width:24px;height:24px;border-radius:6px;border:2px solid ${isSelected ? '#22c55e' : 'var(--border-color)'};background:${isSelected ? '#22c55e' : 'transparent'};display:flex;align-items:center;justify-content:center;flex-shrink:0;transition:all 0.2s;">
+                        ${isSelected ? '<i class="fas fa-check" style="color:white;font-size:12px;"></i>' : ''}
+                    </div>
+                    <div style="width:60px;height:60px;border-radius:8px;background:var(--bg-secondary);overflow:hidden;flex-shrink:0;">
+                        ${p.images?.[0] ? `<img src="${p.images[0]}" style="width:100%;height:100%;object-fit:cover;">` : '<div style="width:100%;height:100%;display:flex;align-items:center;justify-content:center;"><i class="fas fa-image" style="opacity:0.3;"></i></div>'}
+                    </div>
+                    <div style="flex:1;min-width:0;">
+                        <div style="font-weight:600;color:var(--text-primary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${p.name}</div>
+                        <div style="font-size:14px;color:var(--primary);font-weight:600;">${parseFloat(p.price).toLocaleString('ar-EG')} ${p.currency || 'EGP'}</div>
+                        <div style="font-size:11px;color:var(--text-secondary);"><i class="fas fa-box"></i> ${p.inventory || 0} متاح</div>
+                    </div>
+                </div>
+            `}).join('');
+
+            // Store products data for later use
+            this._pickerProducts = products;
+
+        } catch (err) {
+            console.error('[E-Commerce] Error loading products for picker:', err);
+            container.innerHTML = '<div style="text-align:center;padding:20px;color:#ef4444;">خطأ في تحميل المنتجات</div>';
+        }
+    }
+
+    // Search products for picker
+    searchProductsForPicker(query) {
+        clearTimeout(this._productSearchTimeout);
+        this._productSearchTimeout = setTimeout(() => {
+            this.loadProductsForPicker(query);
+        }, 300);
+    }
+
+    // Toggle product selection
+    toggleProductSelection(productId) {
+        if (!this.selectedProducts) this.selectedProducts = [];
+
+        const product = this._pickerProducts?.find(p => p.id === productId);
+        if (!product) return;
+
+        const existingIndex = this.selectedProducts.findIndex(p => p.id === productId);
+
+        if (existingIndex >= 0) {
+            // Remove from selection
+            this.selectedProducts.splice(existingIndex, 1);
+        } else {
+            // Add to selection
+            this.selectedProducts.push(product);
+        }
+
+        // Update UI
+        this.updateProductPickerUI();
+    }
+
+    // Update product picker UI
+    updateProductPickerUI() {
+        const actionsDiv = document.getElementById('productPickerActions');
+        const countSpan = document.getElementById('pickerSelectedCount');
+
+        if (this.selectedProducts?.length > 0) {
+            actionsDiv.style.display = 'flex';
+            countSpan.textContent = this.selectedProducts.length;
+        } else {
+            actionsDiv.style.display = 'none';
+        }
+
+        // Update item styling
+        document.querySelectorAll('.product-picker-item').forEach(item => {
+            const productId = parseInt(item.dataset.productId);
+            const isSelected = this.selectedProducts?.some(p => p.id === productId);
+
+            item.dataset.selected = isSelected;
+            item.style.borderColor = isSelected ? '#22c55e' : 'var(--border-color)';
+            item.style.background = isSelected ? 'rgba(34,197,94,0.1)' : 'transparent';
+
+            // Update checkbox
+            const checkbox = item.querySelector('div:first-child');
+            if (checkbox) {
+                checkbox.style.borderColor = isSelected ? '#22c55e' : 'var(--border-color)';
+                checkbox.style.background = isSelected ? '#22c55e' : 'transparent';
+                checkbox.innerHTML = isSelected ? '<i class="fas fa-check" style="color:white;font-size:12px;"></i>' : '';
+            }
+        });
+    }
+
+    // Send selected products to customer
+    async sendSelectedProducts() {
+        if (!this.selectedProducts || this.selectedProducts.length === 0) {
+            this.showToast('اختر منتج واحد على الأقل', 'warning');
+            return;
+        }
+
+        if (!this.currentConversation) {
+            this.showToast('لا توجد محادثة نشطة', 'error');
+            return;
+        }
+
+        // Close modal
+        document.getElementById('productPickerModal')?.remove();
+
+        // Show sending progress
+        this.showToast(`جاري إرسال ${this.selectedProducts.length} منتج...`, 'info');
+
+        let successCount = 0;
+        let failCount = 0;
+
+        for (const product of this.selectedProducts) {
+            try {
+                // Send product image first if available
+                if (product.images?.[0]) {
+                    await this.sendProductWithImage(product);
+                } else {
+                    // Send text only if no image
+                    const message = this.createProductCardMessage(product);
+                    const pageId = this.selectedPage || this.fbPages[0]?.id;
+                    const participantId = this.currentConversation?.participantId || this.currentConversation;
+                    await window.fbIntegration.sendReply(pageId, participantId, message);
+                }
+                successCount++;
+
+                // Small delay between products to avoid rate limiting
+                if (this.selectedProducts.indexOf(product) < this.selectedProducts.length - 1) {
+                    await new Promise(r => setTimeout(r, 1000));
+                }
+            } catch (err) {
+                console.error('[E-Commerce] Error sending product:', err);
+                failCount++;
+            }
+        }
+
+        // Show result
+        if (failCount === 0) {
+            this.showToast(`تم إرسال ${successCount} منتج ✅`, 'success');
+        } else {
+            this.showToast(`تم إرسال ${successCount} من ${this.selectedProducts.length} منتج`, 'warning');
+        }
+
+        // Clear selection
+        this.selectedProducts = [];
+
+        // Refresh chat
+        setTimeout(() => this.refreshCurrentChat(), 1500);
+    }
+
+    // Send product with image attachment
+    async sendProductWithImage(product) {
+        // Create product message text
+        const price = parseFloat(product.price).toLocaleString('ar-EG');
+        const currency = product.currency || 'EGP';
+
+        let message = `🛍️ *${product.name}*\n\n`;
+        message += `💰 السعر: ${price} ${currency}\n`;
+
+        if (product.description) {
+            // Show FULL description without truncation
+            const desc = product.description.replace(/<[^>]*>/g, '');
+            message += `\n📝 ${desc}\n`;
+        }
+
+        const imageUrl = product.images?.[0];
+        console.log('[E-Commerce] Product message built:', { name: product.name, messageLength: message.length, hasImage: !!imageUrl });
+
+        // Use server API to send product with image
+        const token = localStorage.getItem('octobot_token');
+        const recipientId = this.currentConversation?.participantId || this.currentConversation;
+
+        const fbUserId = window.fbIntegration?.userId;
+        const pageId = this.selectedPage || this.fbPages[0]?.id;
+
+        if (!fbUserId || !pageId) {
+            console.error('[E-Commerce] Missing fbUserId or pageId');
+            throw new Error('Missing Facebook user ID or page ID');
+        }
+
+        // OPTIMISTIC UPDATE: Show text and image immediately on RIGHT side (flex-start in RTL)
+        const container = document.getElementById('chatMessages');
+        let tempMsgId = null;
+        if (container) {
+            tempMsgId = 'temp-product-msg-' + Date.now();
+            const msgDiv = document.createElement('div');
+            msgDiv.id = tempMsgId;
+            msgDiv.style.cssText = 'display:flex;flex-direction:column;align-items:flex-start;margin-bottom:12px;animation:fadeIn 0.3s ease;';
+
+            // Build HTML with text bubble and image
+            let html = '';
+
+            // Text bubble first
+            html += `
+                <div class="page-bubble" style="opacity:0.8;margin-bottom:8px;">
+                    <p style="margin:0;white-space:pre-wrap;">${message.replace(/\n/g, '<br>')}</p>
+                    <small style="font-size:10px;opacity:0.7;"><i class="fas fa-spinner fa-spin"></i> جاري الإرسال...</small>
+                </div>
+            `;
+
+            // Image below (if exists)
+            if (imageUrl) {
+                html += `
+                    <img src="${imageUrl}" 
+                        style="max-width:250px;max-height:250px;border-radius:12px;cursor:pointer;display:block;box-shadow:0 2px 8px rgba(0,0,0,0.15);opacity:0.8;margin-top:4px;" 
+                        onclick="window.open('${imageUrl}', '_blank')"
+                        onerror="this.style.display='none'">
+                `;
+            }
+
+            msgDiv.innerHTML = html;
+            container.appendChild(msgDiv);
+            container.scrollTop = container.scrollHeight;
+        }
+
+        try {
+            console.log('[E-Commerce] 📤 Sending to API:', { recipientId, messagePreview: message.substring(0, 100), hasImage: !!imageUrl });
+            // Send via server API that has access to page tokens
+            const response = await fetch(`${this.API_URL}/api/inbox/${fbUserId}/${pageId}/send-product`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${token}`
+                },
+                body: JSON.stringify({
+                    recipientId: recipientId,
+                    message: message,
+                    imageUrl: imageUrl
+                })
+            });
+
+            const result = await response.json();
+
+            if (!result.success) {
+                // Remove temp message on failure
+                if (tempMsgId) {
+                    const tempEl = document.getElementById(tempMsgId);
+                    if (tempEl) tempEl.remove();
+                }
+                throw new Error(result.error || 'Failed to send product');
+            }
+
+            // Update temp message to show sent status
+            if (tempMsgId) {
+                const tempEl = document.getElementById(tempMsgId);
+                if (tempEl) {
+                    // Update text bubble to show sent
+                    const bubble = tempEl.querySelector('.page-bubble');
+                    if (bubble) {
+                        bubble.style.opacity = '1';
+                        const small = bubble.querySelector('small');
+                        if (small) small.innerHTML = 'الآن ✓';
+                    }
+                    // Update image opacity
+                    const img = tempEl.querySelector('img');
+                    if (img) img.style.opacity = '1';
+                    // Remove temp ID to prevent duplicate removal
+                    tempEl.removeAttribute('id');
+                }
+            }
+
+            // Check if TEXT was sent successfully
+            if (!result.textSent) {
+                console.error('[E-Commerce] ❌ TEXT FAILED TO SEND!');
+                this.showToast(`❌ فشل إرسال النص! جرب تاني`, 'error');
+            }
+
+            // Check if image was sent successfully
+            if (imageUrl && !result.imageSent) {
+                console.warn('[E-Commerce] Image failed to send:', result.imageError);
+                // Show warning but don't throw - text was sent successfully
+                this.showToast(`⚠️ النص اتبعت لكن الصورة فشلت`, 'warning');
+            }
+
+            // Success case
+            if (result.textSent && result.imageSent) {
+                console.log('[E-Commerce] ✅ Product sent successfully (text + image)');
+            } else if (result.textSent) {
+                console.log('[E-Commerce] ✅ Text sent, image skipped or failed');
+            }
+
+        } catch (err) {
+            console.error('[E-Commerce] Error sending product via API:', err);
+
+            // Fallback: send text only via existing method
+            const textMessage = message + (imageUrl ? `\n🖼️ ${imageUrl}` : '');
+            const participantId = this.currentConversation?.participantId || this.currentConversation;
+            await window.fbIntegration.sendReply(pageId, participantId, textMessage);
+        }
+    }
+
+
+    // Create product card message text
+    createProductCardMessage(product) {
+        const price = parseFloat(product.price).toLocaleString('ar-EG');
+        const currency = product.currency || 'EGP';
+
+        let message = `🛍️ *${product.name}*\n\n`;
+        message += `💰 السعر: ${price} ${currency}\n`;
+
+        if (product.description) {
+            // Send FULL description without truncation
+            const desc = product.description.replace(/<[^>]*>/g, '');
+            message += `\n📝 ${desc}\n`;
+        }
+
+        if (product.images?.[0]) {
+            message += `\n🖼️ ${product.images[0]}`;
+        }
+
+        return message;
+    }
+
+    // ============= CUSTOMER ORDER LOOKUP =============
+
+    // Show customer orders (called from chat header)
+    async showCustomerOrders(customerId) {
+        if (!customerId) {
+            this.showToast('لا يوجد عميل محدد', 'warning');
+            return;
+        }
+
+        const modal = document.createElement('div');
+        modal.id = 'customerOrdersModal';
+        modal.style.cssText = `
+            position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+            background: rgba(0,0,0,0.6); backdrop-filter: blur(10px);
+            display: flex; align-items: center; justify-content: center;
+            z-index: 10000;
+        `;
+
+        const isDark = document.body.classList.contains('dark-mode');
+        const bgColor = isDark ? '#1e1e30' : '#ffffff';
+        const textColor = isDark ? '#fff' : '#1a1a2e';
+
+        modal.innerHTML = `
+            <div style="background:${bgColor};border-radius:20px;padding:24px;width:90%;max-width:500px;max-height:80vh;overflow:hidden;display:flex;flex-direction:column;">
+                <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;">
+                    <h3 style="margin:0;color:${textColor};display:flex;align-items:center;gap:10px;">
+                        <i class="fas fa-receipt" style="color:#22c55e;"></i>
+                        طلبات العميل
+                    </h3>
+                    <button onclick="document.getElementById('customerOrdersModal').remove()" style="background:none;border:none;font-size:20px;cursor:pointer;color:var(--text-secondary);">×</button>
+                </div>
+                <div id="customerOrdersList" style="flex:1;overflow-y:auto;"></div>
+                <button onclick="app.linkOrderToCustomer('${customerId}')" class="btn btn-primary" style="margin-top:16px;width:100%;">
+                    <i class="fas fa-link"></i> ربط طلب بهذا العميل
+                </button>
+            </div>
+        `;
+
+        modal.onclick = (e) => { if (e.target === modal) modal.remove(); };
+        document.body.appendChild(modal);
+
+        // Load orders
+        await this.loadCustomerOrders(customerId);
+    }
+
+    // Load customer orders
+    async loadCustomerOrders(psid) {
+        const container = document.getElementById('customerOrdersList');
+        if (!container) return;
+
+        container.innerHTML = '<div style="text-align:center;padding:20px;"><i class="fas fa-spinner fa-spin"></i></div>';
+
+        try {
+            const token = localStorage.getItem('octobot_token');
+            const response = await fetch(`${this.API_URL}/api/ecommerce/orders/customer/${psid}`, {
+                headers: { 'Authorization': `Bearer ${token}` }
+            });
+            const data = await response.json();
+            const orders = data.orders || [];
+
+            if (orders.length === 0) {
+                container.innerHTML = `
+                    <div style="text-align:center;padding:40px;color:var(--text-secondary);">
+                        <i class="fas fa-inbox" style="font-size:32px;margin-bottom:10px;opacity:0.5;"></i>
+                        <p>لا توجد طلبات مرتبطة بهذا العميل</p>
+                    </div>
+                `;
+                return;
+            }
+
+            const statusColors = {
+                pending: '#f59e0b', processing: '#3b82f6', shipped: '#8b5cf6',
+                delivered: '#22c55e', completed: '#22c55e', cancelled: '#ef4444'
+            };
+            const statusLabels = {
+                pending: 'في الانتظار', processing: 'قيد التنفيذ', shipped: 'تم الشحن',
+                delivered: 'تم التسليم', completed: 'مكتمل', cancelled: 'ملغي'
+            };
+
+            container.innerHTML = orders.map(order => `
+                <div style="padding:16px;border:1px solid var(--border-color);border-radius:12px;margin-bottom:12px;">
+                    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+                        <span style="font-weight:600;color:var(--text-primary);">#${order.orderNumber || order.externalId}</span>
+                        <span style="padding:4px 10px;border-radius:12px;font-size:11px;background:${statusColors[order.status]}20;color:${statusColors[order.status]};">
+                            ${statusLabels[order.status] || order.status}
+                        </span>
+                    </div>
+                    <div style="font-size:18px;font-weight:600;color:var(--primary);margin-bottom:4px;">${parseFloat(order.totalPrice).toLocaleString('ar-EG')} ${order.currency || 'EGP'}</div>
+                    <div style="font-size:12px;color:var(--text-secondary);">${new Date(order.createdAt).toLocaleDateString('ar-EG')}</div>
+                </div>
+            `).join('');
+
+        } catch (err) {
+            console.error('[E-Commerce] Error loading customer orders:', err);
+            container.innerHTML = '<div style="text-align:center;padding:20px;color:#ef4444;">خطأ في تحميل الطلبات</div>';
+        }
+    }
+
+    // Link order to customer modal
+    async linkOrderToCustomer(psid) {
+        const modal = document.getElementById('customerOrdersModal');
+        const container = document.getElementById('customerOrdersList');
+        if (!container) return;
+
+        container.innerHTML = '<div style="text-align:center;padding:20px;"><i class="fas fa-spinner fa-spin"></i> جاري تحميل الطلبات...</div>';
+
+        try {
+            const token = localStorage.getItem('octobot_token');
+            const response = await fetch(`${this.API_URL}/api/ecommerce/orders?limit=20`, {
+                headers: { 'Authorization': `Bearer ${token}` }
+            });
+            const data = await response.json();
+            const orders = data.orders || [];
+
+            container.innerHTML = `
+                <p style="margin-bottom:12px;color:var(--text-secondary);">اختر طلب لربطه بهذا العميل:</p>
+                ${orders.map(order => `
+                    <div onclick="app.confirmLinkOrder(${order.id}, '${psid}')" style="padding:12px;border:1px solid var(--border-color);border-radius:10px;margin-bottom:8px;cursor:pointer;transition:all 0.2s;" onmouseover="this.style.borderColor='#22c55e'" onmouseout="this.style.borderColor='var(--border-color)'">
+                        <div style="display:flex;justify-content:space-between;">
+                            <span style="font-weight:600;">#${order.orderNumber || order.externalId}</span>
+                            <span style="color:var(--primary);font-weight:600;">${parseFloat(order.totalPrice).toLocaleString('ar-EG')}</span>
+                        </div>
+                        <div style="font-size:12px;color:var(--text-secondary);">${order.customerName || 'بدون اسم'} - ${order.customerPhone || ''}</div>
+                    </div>
+                `).join('')}
+            `;
+
+        } catch (err) {
+            console.error('[E-Commerce] Error:', err);
+            container.innerHTML = '<div style="color:#ef4444;">خطأ في تحميل الطلبات</div>';
+        }
+    }
+
+    // Confirm link order to customer
+    async confirmLinkOrder(orderId, psid) {
+        try {
+            const token = localStorage.getItem('octobot_token');
+            const response = await fetch(`${this.API_URL}/api/ecommerce/orders/${orderId}/link-customer`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${token}`
+                },
+                body: JSON.stringify({ facebookPsid: psid })
+            });
+            const data = await response.json();
+
+            if (data.success) {
+                this.showToast('تم ربط الطلب بالعميل ✅', 'success');
+                document.getElementById('customerOrdersModal')?.remove();
+            } else {
+                this.showToast('فشل ربط الطلب', 'error');
+            }
+        } catch (err) {
+            console.error('[E-Commerce] Link error:', err);
+            this.showToast('حدث خطأ', 'error');
+        }
+    }
+
+    // ============= ORDER NOTIFICATIONS =============
+
+    // Initialize order notification listener
+    initOrderNotifications() {
+        if (!this.socket) return;
+
+        this.socket.on('new-ecommerce-order', (order) => {
+            console.log('[E-Commerce] New order notification:', order);
+            this.showOrderNotification(order);
+            this.loadEcomStats();
+            this.loadEcomOrders();
+        });
+    }
+
+    // Show order notification toast
+    showOrderNotification(order) {
+        const toast = document.createElement('div');
+        toast.style.cssText = `
+            position: fixed;
+            top: 80px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: linear-gradient(135deg, #22c55e, #16a34a);
+            color: white;
+            padding: 16px 24px;
+            border-radius: 16px;
+            box-shadow: 0 10px 40px rgba(34, 197, 94, 0.4);
+            z-index: 10001;
+            display: flex;
+            align-items: center;
+            gap: 16px;
+            animation: slideDown 0.4s ease;
+            cursor: pointer;
+        `;
+
+        toast.innerHTML = `
+            <div style="width:45px;height:45px;background:rgba(255,255,255,0.2);border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:22px;">
+                🛒
+            </div>
+            <div>
+                <div style="font-weight:700;font-size:16px;">طلب جديد! 🎉</div>
+                <div style="font-size:14px;opacity:0.9;">#${order.orderNumber || order.id} - ${order.totalPrice} ${order.currency || 'EGP'}</div>
+            </div>
+        `;
+
+        toast.onclick = () => {
+            toast.remove();
+            this.switchPage('ecommerce');
+            this.switchEcomTab('orders');
+        };
+
+        document.body.appendChild(toast);
+
+        // Play notification sound
+        this.playNotificationSound();
+
+        // Auto remove after 8 seconds
+        setTimeout(() => {
+            toast.style.animation = 'slideUp 0.3s ease';
+            setTimeout(() => toast.remove(), 300);
+        }, 8000);
+    }
+
+    // ============= AI AD CONTENT GENERATOR =============
+
+    aiSelectedProducts = [];
+    aiChatHistory = [];
+
+    async initEcommerceAI() {
+        // Load products for selection if not already loaded
+        if (this.allAIProducts && this.allAIProducts.length > 0) return;
+        this.loadAIProducts();
+    }
+
+    async loadAIProducts(query = '') {
+        try {
+            const list = document.getElementById('aiProductsList');
+            if (list) {
+                list.innerHTML = `<div style="text-align:center;padding:40px;color:var(--text-secondary);">
+                    <i class="fas fa-spinner fa-spin" style="font-size:32px;"></i>
+                    <p>جاري تحميل المنتجات...</p>
+                </div>`;
+            }
+
+            const token = localStorage.getItem('octobot_token');
+            const url = query ?
+                `${this.API_URL}/api/ecommerce/ai/products?search=${encodeURIComponent(query)}` :
+                `${this.API_URL}/api/ecommerce/ai/products`;
+
+            const response = await fetch(url, {
+                headers: { 'Authorization': `Bearer ${token}` }
+            });
+            const data = await response.json();
+
+            this.allAIProducts = data.products || [];
+            this.renderAIProductsList(this.allAIProducts);
+
+        } catch (err) {
+            console.error('[AI] Error loading products:', err);
+            const list = document.getElementById('aiProductsList');
+            if (list) {
+                list.innerHTML = `<div style="text-align:center;padding:40px;color:var(--danger);">
+                    <i class="fas fa-exclamation-circle" style="font-size:32px;"></i>
+                    <p>فشل تحميل المنتجات</p>
+                </div>`;
+            }
+        }
+    }
+
+    renderAIProductsList(products) {
+        const list = document.getElementById('aiProductsList');
+        if (!list) return;
+
+        if (products.length === 0) {
+            list.innerHTML = `<div style="text-align:center;padding:40px;color:var(--text-secondary);">
+                <i class="fas fa-box-open" style="font-size:32px;"></i>
+                <p>لا توجد منتجات</p>
+            </div>`;
+            return;
+        }
+
+        list.innerHTML = products.map(p => {
+            const isSelected = this.aiSelectedProducts.some(sp => sp.id === p.id);
+            const image = p.images?.[0] || '';
+            return `
+                <div onclick="app.toggleAIProduct(${p.id})" 
+                    style="display:flex;align-items:center;gap:12px;padding:12px;border-radius:10px;cursor:pointer;margin-bottom:8px;
+                    background:${isSelected ? 'linear-gradient(135deg, rgba(var(--primary-rgb), 0.15), rgba(var(--primary-rgb), 0.05))' : 'var(--glass)'};
+                    border:1px solid ${isSelected ? 'var(--primary)' : 'transparent'};
+                    transition:all 0.2s;">
+                    <div style="width:50px;height:50px;border-radius:8px;background:var(--bg-primary);overflow:hidden;flex-shrink:0;">
+                        ${image ? `<img src="${image}" style="width:100%;height:100%;object-fit:cover;">` :
+                    '<div style="width:100%;height:100%;display:flex;align-items:center;justify-content:center;color:var(--text-secondary);"><i class="fas fa-image"></i></div>'}
+                    </div>
+                    <div style="flex:1;min-width:0;">
+                        <div style="font-weight:600;color:var(--text-primary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${p.name}</div>
+                        <div style="font-size:13px;color:var(--primary);font-weight:600;">${p.price || 0} ج.م</div>
+                    </div>
+                    <div style="width:24px;height:24px;border-radius:50%;border:2px solid ${isSelected ? 'var(--primary)' : 'var(--border-color)'};
+                        display:flex;align-items:center;justify-content:center;background:${isSelected ? 'var(--primary)' : 'transparent'};">
+                        ${isSelected ? '<i class="fas fa-check" style="color:white;font-size:12px;"></i>' : ''}
+                    </div>
+                </div>
+            `;
+        }).join('');
+    }
+
+    toggleAIProduct(productId) {
+        const product = this.allAIProducts.find(p => p.id === productId);
+        if (!product) return;
+
+        const index = this.aiSelectedProducts.findIndex(p => p.id === productId);
+        if (index > -1) {
+            this.aiSelectedProducts.splice(index, 1);
+        } else {
+            this.aiSelectedProducts.push(product);
+        }
+
+        this.renderAIProductsList(this.allAIProducts);
+        document.getElementById('selectedProductCount').textContent = this.aiSelectedProducts.length;
+    }
+
+    searchAIProducts(query) {
+        // Debounce search
+        if (this.aiSearchTimeout) clearTimeout(this.aiSearchTimeout);
+        this.aiSearchTimeout = setTimeout(() => {
+            this.loadAIProducts(query);
+        }, 500);
+    }
+
+    useQuickPrompt(prompt) {
+        document.getElementById('aiMessageInput').value = prompt;
+        this.sendAIMessage();
+    }
+
+    async sendAIMessage() {
+        const input = document.getElementById('aiMessageInput');
+        const message = input.value.trim();
+        if (!message) return;
+
+        if (this.aiSelectedProducts.length === 0) {
+            this.showToast('الرجاء اختيار منتج واحد على الأقل', 'error');
+            return;
+        }
+
+        // Add user message to chat
+        this.addAIChatMessage('user', message);
+        input.value = '';
+
+        // Show typing indicator
+        this.addAIChatMessage('ai', '<i class="fas fa-spinner fa-spin"></i> جاري التفكير...', true);
+
+        try {
+            const token = localStorage.getItem('octobot_token');
+            const response = await fetch(`${this.API_URL}/api/ecommerce/ai/generate`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${token}`
+                },
+                body: JSON.stringify({
+                    productIds: this.aiSelectedProducts.map(p => p.id),
+                    message: message,
+                    newConversation: this.aiChatHistory.length === 0
+                })
+            });
+
+            const data = await response.json();
+
+            // Remove typing indicator
+            this.removeAITypingIndicator();
+
+            if (data.success) {
+                this.addAIChatMessage('ai', data.content);
+                document.getElementById('aiOutputBox').value = data.content;
+            } else {
+                this.addAIChatMessage('ai', `❌ ${data.error || 'حدث خطأ'}`);
+            }
+
+        } catch (err) {
+            console.error('[AI] Error:', err);
+            this.removeAITypingIndicator();
+            this.addAIChatMessage('ai', '❌ حدث خطأ في الاتصال');
+        }
+    }
+
+    addAIChatMessage(role, content, isTyping = false) {
+        const container = document.getElementById('aiChatMessages');
+        if (!container) return;
+
+        // Clear welcome message if first message
+        if (container.querySelector('[style*="text-align:center"]')) {
+            container.innerHTML = '';
+        }
+
+        const messageDiv = document.createElement('div');
+        messageDiv.className = isTyping ? 'ai-typing-indicator' : '';
+        messageDiv.style.cssText = `
+            display:flex;gap:12px;margin-bottom:16px;
+            ${role === 'user' ? 'flex-direction:row-reverse;' : ''}
+        `;
+
+        messageDiv.innerHTML = `
+            <div style="width:36px;height:36px;border-radius:50%;flex-shrink:0;display:flex;align-items:center;justify-content:center;
+                background:${role === 'user' ? 'var(--primary)' : 'linear-gradient(135deg, #6366f1, #8b5cf6)'};">
+                <i class="fas ${role === 'user' ? 'fa-user' : 'fa-robot'}" style="color:white;font-size:16px;"></i>
+            </div>
+            <div style="max-width:80%;padding:14px 18px;border-radius:16px;line-height:1.7;
+                background:${role === 'user' ? 'var(--primary)' : 'var(--glass)'};
+                color:${role === 'user' ? 'white' : 'var(--text-primary)'};
+                border-bottom-${role === 'user' ? 'right' : 'left'}-radius:4px;">
+                ${content}
+            </div>
+        `;
+
+        container.appendChild(messageDiv);
+        container.scrollTop = container.scrollHeight;
+
+        if (!isTyping) {
+            this.aiChatHistory.push({ role, content });
+        }
+    }
+
+    removeAITypingIndicator() {
+        const indicator = document.querySelector('.ai-typing-indicator');
+        if (indicator) indicator.remove();
+    }
+
+    clearAIChat() {
+        const container = document.getElementById('aiChatMessages');
+        if (container) {
+            container.innerHTML = `
+                <div style="text-align:center;padding:60px 20px;color:var(--text-secondary);">
+                    <i class="fas fa-robot" style="font-size:48px;color:var(--primary);margin-bottom:16px;display:block;"></i>
+                    <h3 style="margin:0 0 8px;color:var(--text-primary);">مرحباً! أنا مساعد المحتوى الإعلاني 🎯</h3>
+                    <p>اختر منتجات من القائمة، ثم اكتب ما تريده وسأنشئ لك محتوى إعلاني احترافي!</p>
+                </div>
+            `;
+        }
+        this.aiChatHistory = [];
+        document.getElementById('aiOutputBox').value = '';
+
+        // Clear on server too
+        const token = localStorage.getItem('octobot_token');
+        fetch(`${this.API_URL}/api/ecommerce/ai/clear`, {
+            method: 'POST',
+            headers: { 'Authorization': `Bearer ${token}` }
+        });
+    }
+
+    copyAIOutput() {
+        const output = document.getElementById('aiOutputBox');
+        if (output && output.value) {
+            navigator.clipboard.writeText(output.value);
+            this.showToast('تم نسخ المحتوى! 📋', 'success');
+        }
+    }
+
+    async transferToPublish() {
+        console.log('transferToPublish started');
+        try {
+            const content = document.getElementById('aiOutputBox').value;
+            if (!content) return this.showToast('لا يوجد محتوى للنشر', 'warning');
+
+            // Check Pages
+            if (!this.fbPages || this.fbPages.length === 0) {
+                console.log('Pages missing, trying to fetch...');
+                this.showToast('جاري تحميل الصفحات...', 'info');
+                try {
+                    this.fbPages = await window.fbIntegration.getPages();
+                } catch (err) {
+                    console.error('Failed to fetch pages', err);
+                }
+            }
+
+            if (!this.fbPages || this.fbPages.length === 0) {
+                alert('عفواً، لا توجد صفحات فيسبوك متصلة. يرجى التأكد من ربط حسابك في قسم الإعدادات.');
+                return;
+            }
+
+            // Reset Media
+            this.mediaFiles = [];
+            this.updateMediaPreview();
+
+            // Store ALL product info from selected products array
+            this.tempProductLinks = [];
+            this.tempProductImageUrls = [];
+
+            // Get product info from aiSelectedProducts array
+            if (this.aiSelectedProducts && this.aiSelectedProducts.length > 0) {
+                for (const product of this.aiSelectedProducts) {
+                    // Get product link (try different possible field names)
+                    const productUrl = product.url || product.permalink || product.link || '';
+                    if (productUrl) this.tempProductLinks.push(productUrl);
+
+                    // Get product image (first image from images array)
+                    const productImage = product.images?.[0] || product.image || '';
+                    if (productImage) this.tempProductImageUrls.push(productImage);
+                }
+                console.log('Product data collected:', this.tempProductImageUrls.length, 'images,', this.tempProductLinks.length, 'links');
+            }
+
+            // Open Modal
+            console.log('Opening modal for page:', this.fbPages[0].id);
+            this.openPublishModal(this.fbPages[0].id);
+
+            // Fill Data after modal opens
+            setTimeout(() => {
+                const textarea = document.getElementById('publishContent');
+                if (textarea) {
+                    textarea.value = document.getElementById('aiOutputBox').value;
+                    textarea.dispatchEvent(new Event('input'));
+                }
+
+                // Set first product link (Facebook only supports one link)
+                const linkInput = document.getElementById('publishLink');
+                if (linkInput && this.tempProductLinks.length > 0) {
+                    linkInput.value = this.tempProductLinks[0];
+                    linkInput.dispatchEvent(new Event('input'));
+                }
+
+                // Show ALL product images preview
+                if (this.tempProductImageUrls.length > 0) {
+                    const mediaPreview = document.getElementById('mediaPreview');
+                    if (mediaPreview) {
+                        let imagesHtml = this.tempProductImageUrls.map((url, idx) => `
+                            <div class="media-preview-item" style="position:relative;">
+                                <img src="${url}" alt="صورة المنتج ${idx + 1}" style="width:100px;height:100px;object-fit:cover;border-radius:10px;">
+                                <div style="position:absolute;bottom:5px;left:5px;background:rgba(0,0,0,0.7);color:#fff;padding:2px 6px;border-radius:4px;font-size:10px;">
+                                    <i class="fas fa-store"></i> ${idx + 1}
+                                </div>
+                            </div>
+                        `).join('');
+
+                        mediaPreview.innerHTML = `
+                            <div class="media-preview-grid">${imagesHtml}</div>
+                            <div class="media-count-badge"><i class="fas fa-images"></i> ${this.tempProductImageUrls.length} صور منتجات</div>
+                        `;
+                    }
+                }
+            }, 300);
+
+        } catch (fatalErr) {
+            console.error('Fatal error in transferToPublish:', fatalErr);
+            alert('حدث خطأ غير متوقع: ' + fatalErr.message);
+        }
+    }
+
+    transferToBroadcast() {
+        const content = document.getElementById('aiOutputBox').value;
+        if (!content) return this.showToast('لا يوجد محتوى للإرسال', 'warning');
+
+        // Collect product images from selected products
+        const productImages = [];
+        if (this.aiSelectedProducts && this.aiSelectedProducts.length > 0) {
+            for (const product of this.aiSelectedProducts) {
+                if (product.images && product.images.length > 0) {
+                    // Add first image from each product (max 5 total)
+                    if (productImages.length < 5) {
+                        productImages.push({
+                            url: product.images[0],
+                            type: 'image',
+                            isRemote: true,
+                            productName: product.name
+                        });
+                    }
+                }
+            }
+        }
+
+        this.navigateTo('broadcast');
+
+        setTimeout(() => {
+            const textarea = document.getElementById('broadcastMessage');
+            if (textarea) {
+                textarea.value = content;
+                if (typeof this.previewSpintax === 'function') {
+                    this.previewSpintax();
+                }
+            }
+
+            // Add product images to broadcast media files
+            if (productImages.length > 0) {
+                // Clear existing media files first
+                this.broadcastMediaFiles = [];
+
+                // Add product images
+                this.broadcastMediaFiles = productImages;
+
+                // Render the previews
+                this.renderBroadcastMediaPreviews();
+
+                this.showToast(`تم إضافة ${productImages.length} صورة منتج`, 'success');
+            }
+        }, 300);
+    }
+
+    regenerateAI() {
+        this.useQuickPrompt('أعد كتابة الإعلان بأسلوب مختلف');
+    }
+
+    // ============= GOOGLE SHEETS =============
+
+    renderSheetsSection() {
+        const savedSheetId = localStorage.getItem('octobot_sheet_id');
+        if (savedSheetId) {
+            document.getElementById('sheetIdInput').value = savedSheetId;
+            // Show connected state
+            // Show connected state
+            document.getElementById('sheetConnectBtn').style.display = 'none';
+            document.getElementById('sheetStatusArea').style.display = 'flex';
+            document.getElementById('sheetSearchArea').style.display = 'block';
+            document.getElementById('sheetIdInput').disabled = true;
+            this.loadSheetData(savedSheetId);
+            this.startSheetPolling();
+        }
+    }
+
+    async loadSheetData(id = null) {
+        const sheetId = id || document.getElementById('sheetIdInput').value.trim();
+        if (!sheetId) return this.showToast('يرجى إدخال معرف الملف (Sheet ID)', 'warning');
+
+        localStorage.setItem('octobot_sheet_id', sheetId);
+        this.currentSheetId = sheetId;
+        const container = document.getElementById('sheetsDataContainer');
+        container.innerHTML = '<div style="text-align:center;padding:40px;"><i class="fas fa-spinner fa-spin fa-2x"></i></div>';
+
+        try {
+            const token = localStorage.getItem('octobot_token');
+            const response = await fetch(`${this.API_URL}/api/sheets/${sheetId}`, {
+                headers: { 'Authorization': `Bearer ${token}` }
+            });
+            const data = await response.json();
+
+            if (data.error) throw new Error(data.error);
+
+            this.renderSheetGrid(data.values, sheetId);
+
+            // Show connected state
+            document.getElementById('sheetConnectBtn').style.display = 'none';
+            document.getElementById('sheetStatusArea').style.display = 'flex';
+            document.getElementById('sheetSearchArea').style.display = 'block';
+            document.getElementById('sheetIdInput').disabled = true;
+            this.startSheetPolling();
+        } catch (err) {
+            console.error('Failed to load sheet:', err);
+            container.innerHTML = `<div class="empty-state"><i class="fas fa-exclamation-circle" style="color:red"></i><p>فشل تحميل البيانات: ${err.message}</p></div>`;
+            this.showToast('فشل تحميل البيانات', 'error');
+        }
+    }
+
+
+    renderSheetGrid(values, sheetId) {
+        if (!values || values.length === 0) {
+            document.getElementById('sheetsDataContainer').innerHTML = '<div class="empty-state"><p>الملف فارغ</p></div>';
+            return;
+        }
+
+        // Helper function to convert column index to letter (0=A, 25=Z, 26=AA, etc.)
+        const getColLetter = (index) => {
+            let letter = '';
+            while (index >= 0) {
+                letter = String.fromCharCode(65 + (index % 26)) + letter;
+                index = Math.floor(index / 26) - 1;
+            }
+            return letter;
+        };
+
+        const maxCols = Math.max(...values.map(r => r.length));
+
+        let html = `<table style="width:max-content; border-collapse:separate; border-spacing:0;">`;
+
+        // Header row (A, B, C... AA, AB...)
+        html += '<thead><tr>';
+        html += `<th style="position:sticky; left:0; top:0; z-index:3; background:linear-gradient(135deg, var(--primary) 0%, var(--primary-dark) 100%); color:white; width:50px; min-width:50px; padding:10px; border:1px solid var(--border-color); text-align:center; font-weight:600;">#</th>`;
+        for (let i = 0; i < maxCols; i++) {
+            html += `<th style="position:sticky; top:0; z-index:2; background:linear-gradient(135deg, var(--primary) 0%, var(--primary-dark) 100%); color:white; padding:10px 15px; border:1px solid var(--border-color); text-align:center; font-weight:600; min-width:120px;">${getColLetter(i)}</th>`;
+        }
+        html += '</tr></thead><tbody>';
+
+        values.forEach((row, rowIndex) => {
+            const isFirstRow = rowIndex === 0;
+            const rowBg = isFirstRow ? 'background:var(--bg-tertiary); font-weight:600;' : '';
+            html += '<tr>';
+            // Row number - sticky left
+            html += `<td style="position:sticky; left:0; z-index:1; background:var(--bg-secondary); color:var(--text-primary); padding:8px; text-align:center; border:1px solid var(--border-color); font-size:12px; font-weight:600;">${rowIndex + 1}</td>`;
+            for (let i = 0; i < maxCols; i++) {
+                const cellValue = row[i] || '';
+                html += `<td contenteditable="true" 
+                    data-row="${rowIndex}" data-col="${i}"
+                    onblur="app.updateSheetCell('${sheetId}', ${rowIndex}, ${i}, this.innerText)"
+                    style="padding:8px 12px; border:1px solid var(--border-color); min-width:120px; outline:none; background:var(--bg-card); color:var(--text-primary); ${rowBg}"
+                    onfocus="this.style.background='var(--bg-hover)'; this.style.boxShadow='inset 0 0 0 2px var(--primary)'"
+                    onblur="this.style.background='var(--bg-card)'; this.style.boxShadow=''">${cellValue}</td>`;
+            }
+            html += '</tr>';
+        });
+
+        html += '</tbody></table>';
+        document.getElementById('sheetsDataContainer').innerHTML = html;
+    }
+
+
+    async updateSheetCell(sheetId, row, col, newValue) {
+        // Helper function to convert column index to letter (0=A, 25=Z, 26=AA, etc.)
+        const getColLetter = (index) => {
+            let letter = '';
+            while (index >= 0) {
+                letter = String.fromCharCode(65 + (index % 26)) + letter;
+                index = Math.floor(index / 26) - 1;
+            }
+            return letter;
+        };
+
+        const colLetter = getColLetter(col);
+        const rowNumber = row + 1;
+        const range = `Sheet1!${colLetter}${rowNumber}`;
+
+        try {
+            const token = localStorage.getItem('octobot_token');
+            await fetch(`${this.API_URL}/api/sheets/${sheetId}/update`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${token}`
+                },
+                body: JSON.stringify({
+                    range,
+                    values: [[newValue]]
+                })
+            });
+            // Emit via socket for real-time sync
+            if (this.socket) {
+                this.socket.emit('sheet-update', { sheetId, range, value: newValue });
+            }
+        } catch (err) {
+            console.error('Update failed:', err);
+            this.showToast('فشل حفظ التعديل', 'error');
+        }
+    }
+
+    refreshSheet() {
+        const sheetId = localStorage.getItem('octobot_sheet_id');
+        if (sheetId) {
+            this.loadSheetData(sheetId);
+        }
+    }
+
+    disconnectSheet() {
+        // Stop polling
+        this.stopSheetPolling();
+        // Clear storage
+        localStorage.removeItem('octobot_sheet_id');
+        this.currentSheetId = null;
+        this.sheetData = null;
+        // Reset UI
+        document.getElementById('sheetIdInput').value = '';
+        document.getElementById('sheetIdInput').disabled = false;
+        document.getElementById('sheetConnectBtn').style.display = 'inline-flex';
+        document.getElementById('sheetStatusArea').style.display = 'none';
+        document.getElementById('sheetSearchArea').style.display = 'none';
+        document.getElementById('sheetSearchInput').value = '';
+        document.getElementById('sheetsDataContainer').innerHTML = '<div class="empty-state" style="padding:40px;"><i class="fas fa-table" style="font-size:48px; opacity:0.3; margin-bottom:16px;"></i><p>أدخل معرف الملف لعرض البيانات</p></div>';
+        this.showToast('تم فصل الشيت', 'info');
+    }
+
+    startSheetPolling() {
+        // Clear any existing polling
+        this.stopSheetPolling();
+        // Poll every 10 seconds for updates from Google Sheets
+        this.sheetPollingInterval = setInterval(() => {
+            const sheetId = localStorage.getItem('octobot_sheet_id');
+            if (sheetId && document.getElementById('sheets').classList.contains('active')) {
+                this.silentRefreshSheet(sheetId);
+            }
+        }, 10000);
+        console.log('[Sheets] Started polling for updates every 10 seconds');
+    }
+
+    stopSheetPolling() {
+        if (this.sheetPollingInterval) {
+            clearInterval(this.sheetPollingInterval);
+            this.sheetPollingInterval = null;
+            console.log('[Sheets] Stopped polling');
+        }
+    }
+
+    async silentRefreshSheet(sheetId) {
+        try {
+            const token = localStorage.getItem('octobot_token');
+            const response = await fetch(`${this.API_URL}/api/sheets/${sheetId}`, {
+                headers: { 'Authorization': `Bearer ${token}` }
+            });
+            const data = await response.json();
+            if (data.success && data.values) {
+                this.sheetData = data.values;
+                this.renderSheetGrid(data.values, sheetId);
+            }
+        } catch (err) {
+            console.error('[Sheets] Silent refresh failed:', err);
+        }
+    }
+
+    searchInSheet(query) {
+        const container = document.getElementById('sheetsDataContainer');
+        const resultsSpan = document.getElementById('sheetSearchResults');
+        const cells = container.querySelectorAll('td[contenteditable]');
+
+        // Clear previous highlights
+        cells.forEach(cell => {
+            cell.style.background = '';
+            cell.style.boxShadow = '';
+            cell.classList.remove('search-highlight');
+        });
+
+        if (!query || query.trim() === '') {
+            resultsSpan.textContent = '';
+            this.sheetSearchResults = [];
+            this.sheetSearchCurrentIndex = -1;
+            return;
+        }
+
+        const searchTerm = query.toLowerCase().trim();
+        this.sheetSearchResults = [];
+
+        cells.forEach(cell => {
+            const text = cell.innerText.toLowerCase();
+            if (text.includes(searchTerm)) {
+                cell.style.background = 'rgba(234, 179, 8, 0.3)';
+                cell.classList.add('search-highlight');
+                this.sheetSearchResults.push(cell);
+            }
+        });
+
+        this.sheetSearchCurrentIndex = -1;
+        const matchCount = this.sheetSearchResults.length;
+
+        resultsSpan.textContent = matchCount > 0
+            ? `تم العثور على ${matchCount} نتيجة (Enter للتنقل)`
+            : 'لا توجد نتائج';
+        resultsSpan.style.color = matchCount > 0 ? 'var(--success)' : 'var(--text-secondary)';
+    }
+
+    jumpToNextSearchResult() {
+        // Re-search if results are stale (grid was reloaded)
+        const searchInput = document.getElementById('sheetSearchInput');
+        const query = searchInput ? searchInput.value : '';
+
+        if (!this.sheetSearchResults || this.sheetSearchResults.length === 0) {
+            if (query) {
+                this.searchInSheet(query);
+            }
+            if (!this.sheetSearchResults || this.sheetSearchResults.length === 0) {
+                return;
+            }
+        }
+
+        // Check if results are still in DOM (not stale)
+        const firstResult = this.sheetSearchResults[0];
+        if (!firstResult || !document.body.contains(firstResult)) {
+            // Results are stale, re-search
+            this.searchInSheet(query);
+            if (!this.sheetSearchResults || this.sheetSearchResults.length === 0) {
+                return;
+            }
+        }
+
+        // Ensure index is within bounds
+        if (this.sheetSearchCurrentIndex >= this.sheetSearchResults.length) {
+            this.sheetSearchCurrentIndex = -1;
+        }
+
+        // Remove strong highlight from current
+        if (this.sheetSearchCurrentIndex >= 0 && this.sheetSearchResults[this.sheetSearchCurrentIndex]) {
+            this.sheetSearchResults[this.sheetSearchCurrentIndex].style.background = 'rgba(234, 179, 8, 0.3)';
+            this.sheetSearchResults[this.sheetSearchCurrentIndex].style.boxShadow = '';
+        }
+
+        // Move to next
+        this.sheetSearchCurrentIndex = (this.sheetSearchCurrentIndex + 1) % this.sheetSearchResults.length;
+        const currentCell = this.sheetSearchResults[this.sheetSearchCurrentIndex];
+
+        if (!currentCell) return;
+
+        // Highlight current strongly
+        currentCell.style.background = 'rgba(234, 179, 8, 0.7)';
+        currentCell.style.boxShadow = '0 0 0 3px var(--primary)';
+
+        // Scroll to it
+        currentCell.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'center' });
+
+        // Update counter
+        const resultsSpan = document.getElementById('sheetSearchResults');
+        resultsSpan.textContent = `${this.sheetSearchCurrentIndex + 1} / ${this.sheetSearchResults.length}`;
+    }
+
+    // ============= MEDIA UPLOAD HANDLERS =============
+
+    handleFileSelect(event) {
+        const file = event.target.files[0];
+        if (!file) return;
+
+        const previewContainer = document.getElementById('chatMediaPreview');
+        const imgPreview = document.getElementById('imagePreview');
+        const videoPreview = document.getElementById('videoPreview');
+        const fileName = document.getElementById('fileName');
+
+        if (previewContainer) previewContainer.style.display = 'block';
+        if (fileName) fileName.textContent = file.name;
+
+        const objectUrl = URL.createObjectURL(file);
+
+        if (file.type.startsWith('image/')) {
+            if (imgPreview) {
+                imgPreview.src = objectUrl;
+                imgPreview.style.display = 'block';
+            }
+            if (videoPreview) videoPreview.style.display = 'none';
+        } else if (file.type.startsWith('video/')) {
+            if (videoPreview) {
+                videoPreview.src = objectUrl;
+                videoPreview.style.display = 'block';
+            }
+            if (imgPreview) imgPreview.style.display = 'none';
+        }
+    }
+
+    clearFileSelection() {
+        const fileInput = document.getElementById('chatMediaInput');
+        if (fileInput) fileInput.value = '';
+
+        const previewContainer = document.getElementById('chatMediaPreview');
+        if (previewContainer) previewContainer.style.display = 'none';
+
+        const img = document.getElementById('imagePreview');
+        if (img) img.src = '';
+
+        const vid = document.getElementById('videoPreview');
+        if (vid) vid.src = '';
+    }
+
+    async sendReply() {
+        const messageInput = document.getElementById('replyMessage');
+        if (!messageInput) return;
+
+        const message = messageInput.value.trim();
+        const fileInput = document.getElementById('chatMediaInput');
+        const file = fileInput?.files[0];
+
+        if (!message && !file) return;
+
+        const pageId = this.currentConversation?.pageId;
+        const recipientId = this.currentConversation?.participantId || this.currentConversation;
+        // Sometimes currentConversation is just the ID (if legacy code), but usually it's an object now.
+        // Let's be safe.
+        // Also check if currentConversation has 'participantId' or is the ID itself.
+        // Based on showCustomerClassification, it has participantId.
+
+        if (!pageId || !recipientId) {
+            this.showToast('لا توجد محادثة مفتوحة', 'warning');
+            return;
+        }
+
+        // Clear UI immediately
+        messageInput.value = '';
+        this.clearFileSelection();
+
+        // Show sending toast
+        this.showToast('جاري الإرسال...', 'info');
+
+        try {
+            let result;
+            if (file) {
+                const mediaType = file.type.startsWith('video/') ? 'video' : 'image';
+                result = await window.fbIntegration.sendReplyWithMedia(pageId, recipientId, message, file, mediaType);
+            } else {
+                result = await window.fbIntegration.sendReply(pageId, recipientId, message);
+            }
+
+            if (result.error) {
+                throw new Error(result.error);
+            }
+
+            // Success - refresh chat
+            setTimeout(() => this.refreshCurrentChat(), 1000);
+
+        } catch (err) {
+            console.error('Send reply failed:', err);
+            this.showToast('فشل الإرسال: ' + err.message, 'error');
+        }
+    }
+
+}
+
+
+
+
+const app = new SocialMediaHub();
+// Initialize theme on load
+app.initTheme();
+// Update logo if custom
+if (app.customLogo) app.updateLogo();
