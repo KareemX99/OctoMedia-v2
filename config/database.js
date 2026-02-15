@@ -7,8 +7,13 @@ const sequelize = new Sequelize('octobot_social_saas', 'postgres', 'Eng.OctoBot-
     port: 10034,
     dialect: 'postgres',
     logging: false, // Set to console.log for debugging
-    // SSL disabled for localhost connection
-    dialectOptions: {},
+    // SSL required for remote PostgreSQL connection
+    dialectOptions: {
+        ssl: {
+            require: true,
+            rejectUnauthorized: false
+        }
+    },
     pool: {
         max: 5,
         min: 0,
