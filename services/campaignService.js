@@ -117,7 +117,7 @@ class CampaignService {
                 pageId,
                 pageName,
                 messageTemplate,
-                messageTag: messageTag || 'POST_PURCHASE_UPDATE',
+                messageTag: 'POST_PURCHASE_UPDATE', // Default for shipping/order updates
                 delay: delay || 3000,
                 recipients,
                 totalRecipients: recipients.length,
@@ -360,29 +360,17 @@ class CampaignService {
         }
     }
 
-    // Send single message with multi-tag fallback
+    // Send single message using POST_PURCHASE_UPDATE tag
     async sendMessage(pageToken, recipient, message, messageTag, mediaFiles, imageUrls = []) {
-        // Policy-safe tag chain for transactional updates (no HUMAN_AGENT fallback)
-        const tagChain = [
-            'POST_PURCHASE_UPDATE',
-            'ACCOUNT_UPDATE',
-            'CONFIRMED_EVENT_UPDATE'
-        ];
+        const TAG = 'POST_PURCHASE_UPDATE'; // Default for shipping/order updates
 
-        // Put the preferred tag first in the chain
-        if (messageTag && tagChain.includes(messageTag)) {
-            const idx = tagChain.indexOf(messageTag);
-            tagChain.splice(idx, 1);
-            tagChain.unshift(messageTag);
-        }
-
-        // Helper to send a single API call with a specific tag
-        const sendWithTag = async (payload, tag) => {
+        // Helper to send a single API call
+        const sendWithTag = async (payload) => {
             return axios.post(`${this.FB_GRAPH_URL}/me/messages`, {
                 ...payload,
                 recipient: { id: recipient.id },
                 messaging_type: 'MESSAGE_TAG',
-                tag: tag
+                tag: TAG
             }, { params: { access_token: pageToken } });
         };
 
@@ -392,40 +380,20 @@ class CampaignService {
                 const encodedUrl = encodeURI(decodeURI(imageUrl));
                 console.log(`[Campaign] Sending remote image: ${encodedUrl}`);
 
-                let imageSent = false;
-                for (const tag of tagChain) {
-                    try {
-                        await sendWithTag({
-                            message: {
-                                attachment: {
-                                    type: 'image',
-                                    payload: { url: encodedUrl, is_reusable: true }
-                                }
+                try {
+                    await sendWithTag({
+                        message: {
+                            attachment: {
+                                type: 'image',
+                                payload: { url: encodedUrl, is_reusable: true }
                             }
-                        }, tag);
-                        console.log(`[Campaign] ✅ Remote image sent (tag: ${tag})`);
-                        imageSent = true;
-                        break;
-                    } catch (tagErr) {
-                        const fbErr = tagErr.response?.data?.error;
-                        const errCode = fbErr?.code;
-                        const errSubcode = fbErr?.error_subcode;
-                        // If outside window, try next tag
-                        if (errCode === 10 || errSubcode === 2018278 || errSubcode === 2018108) {
-                            console.log(`[Campaign] ⚠️ Tag ${tag} failed (outside window), trying next...`);
-                            continue;
                         }
-                        // If user not available (551) or other fatal error, stop trying
-                        if (errCode === 551) {
-                            throw tagErr;
-                        }
-                        console.log(`[Campaign] ⚠️ Tag ${tag} failed: ${fbErr?.message || tagErr.message}`);
-                        continue;
-                    }
-                }
-
-                if (!imageSent) {
-                    console.error(`[Campaign] ❌ All tags failed for remote image`);
+                    });
+                    console.log(`[Campaign] ✅ Remote image sent (tag: ${TAG})`);
+                } catch (tagErr) {
+                    const fbErr = tagErr.response?.data?.error;
+                    if (fbErr?.code === 551) throw tagErr;
+                    console.error(`[Campaign] ❌ Failed to send remote image (tag: ${TAG}): ${fbErr?.message || tagErr.message}`);
                 }
             } catch (imgErr) {
                 const imgFbErr = imgErr.response?.data?.error;
@@ -456,106 +424,77 @@ class CampaignService {
 
                 const attachmentId = uploadRes.data.attachment_id;
 
-                // Try all tags for media
-                let mediaSent = false;
-                for (const tag of tagChain) {
-                    try {
-                        await sendWithTag({
-                            message: {
-                                attachment: {
-                                    type: 'image',
-                                    payload: { attachment_id: attachmentId }
-                                }
+                try {
+                    await sendWithTag({
+                        message: {
+                            attachment: {
+                                type: 'image',
+                                payload: { attachment_id: attachmentId }
                             }
-                        }, tag);
-                        console.log(`[Campaign] ✅ Media sent (tag: ${tag})`);
-                        mediaSent = true;
-                        break;
-                    } catch (tagErr) {
-                        const fbErr = tagErr.response?.data?.error;
-                        if (fbErr?.code === 10 || fbErr?.error_subcode === 2018278 || fbErr?.error_subcode === 2018108) {
-                            console.log(`[Campaign] ⚠️ Media tag ${tag} failed (outside window), trying next...`);
-                            continue;
                         }
-                        if (fbErr?.code === 551) throw tagErr;
-                        continue;
-                    }
-                }
+                    });
+                    console.log(`[Campaign] ✅ Media sent (tag: ${TAG})`);
+                } catch (tagErr) {
+                    const fbErr = tagErr.response?.data?.error;
+                    if (fbErr?.code === 551) throw tagErr;
 
-                // All tags failed for media → try Puppeteer fallback
-                if (!mediaSent && this.messengerBot && this.messengerBot.isLoggedIn) {
-                    try {
-                        console.log(`[Campaign] 🤖 All tags failed → Trying Puppeteer for media...`);
-                        const result = await this.messengerBot.sendMessage(recipient.id, null, mediaPath);
-                        if (result.success) {
-                            console.log(`[Campaign] 🤖 ✅ Media sent via Puppeteer`);
-                            mediaSent = true;
+                    // Tag failed → try Puppeteer fallback
+                    if (this.messengerBot && this.messengerBot.isLoggedIn) {
+                        try {
+                            console.log(`[Campaign] 🤖 Tag failed → Trying Puppeteer for media...`);
+                            const result = await this.messengerBot.sendMessage(recipient.id, null, mediaPath);
+                            if (result.success) {
+                                console.log(`[Campaign] 🤖 ✅ Media sent via Puppeteer`);
+                            } else {
+                                throw new Error('خارج نافذة المراسلة - فشل الإرسال (Tag + Puppeteer)');
+                            }
+                        } catch (autoErr) {
+                            console.error(`[Campaign] 🤖 ❌ Puppeteer media failed: ${autoErr.message}`);
+                            throw new Error('خارج نافذة المراسلة - فشل الإرسال (Tag + Puppeteer)');
                         }
-                    } catch (autoErr) {
-                        console.error(`[Campaign] 🤖 ❌ Puppeteer media failed: ${autoErr.message}`);
+                    } else {
+                        throw new Error(`خارج نافذة المراسلة (${fbErr?.message || tagErr.message})`);
                     }
-                }
-
-                if (!mediaSent) {
-                    throw new Error('خارج نافذة المراسلة - كل الطرق فشلت (Tags + Puppeteer)');
                 }
             }
         }
 
-        // Send text message with multi-tag fallback
+        // Send text message using POST_PURCHASE_UPDATE
         if (message) {
-            let lastError = null;
+            try {
+                await sendWithTag({ message: { text: message } });
+                console.log(`[Campaign] ✅ Text sent (tag: ${TAG})`);
+                return; // Success!
+            } catch (tagErr) {
+                const fbError = tagErr.response?.data?.error;
+                const errorCode = fbError?.code;
 
-            // Try each tag in the chain
-            for (const tag of tagChain) {
-                try {
-                    await sendWithTag({ message: { text: message } }, tag);
-                    console.log(`[Campaign] ✅ Text sent (tag: ${tag})`);
-                    return; // Success!
-                } catch (tagErr) {
-                    const fbError = tagErr.response?.data?.error;
-                    const errorCode = fbError?.code;
-                    const errorSubcode = fbError?.error_subcode;
-
-                    // User not available (deleted/blocked) - no point trying other tags
-                    if (errorCode === 551) {
-                        throw new Error('المستخدم غير متاح (حساب محذوف أو محظور)');
-                    }
-
-                    // Outside window - try next tag
-                    if (errorCode === 10 || errorSubcode === 2018278 || errorSubcode === 2018108) {
-                        console.log(`[Campaign] ⚠️ Tag ${tag} → outside window, trying next...`);
-                        lastError = fbError;
-                        continue;
-                    }
-
-                    // Other error - try next tag
-                    console.log(`[Campaign] ⚠️ Tag ${tag} failed: ${fbError?.message || tagErr.message}`);
-                    lastError = fbError || { message: tagErr.message };
-                    continue;
+                // User not available (deleted/blocked)
+                if (errorCode === 551) {
+                    throw new Error('المستخدم غير متاح (حساب محذوف أو محظور)');
                 }
-            }
 
-            // All Message Tags failed → try Puppeteer as final fallback
-            if (this.messengerBot && this.messengerBot.isLoggedIn) {
-                try {
-                    console.log(`[Campaign] 🤖 All tags failed → Trying Puppeteer for ${recipient.name}...`);
-                    const result = await this.messengerBot.sendMessage(recipient.id, message);
-                    if (result.success) {
-                        console.log(`[Campaign] 🤖 ✅ Sent via Puppeteer to ${recipient.name}`);
-                        return; // Success via automation!
-                    } else {
-                        throw new Error(result.error || 'Puppeteer send failed');
+                // Tag failed → try Puppeteer as fallback
+                if (this.messengerBot && this.messengerBot.isLoggedIn) {
+                    try {
+                        console.log(`[Campaign] 🤖 Tag failed → Trying Puppeteer for ${recipient.name}...`);
+                        const result = await this.messengerBot.sendMessage(recipient.id, message);
+                        if (result.success) {
+                            console.log(`[Campaign] 🤖 ✅ Sent via Puppeteer to ${recipient.name}`);
+                            return; // Success via automation!
+                        } else {
+                            throw new Error(result.error || 'Puppeteer send failed');
+                        }
+                    } catch (autoErr) {
+                        console.error(`[Campaign] 🤖 ❌ Puppeteer also failed: ${autoErr.message}`);
+                        throw new Error(`فشل الإرسال بكل الطرق (POST_PURCHASE_UPDATE + Puppeteer)`);
                     }
-                } catch (autoErr) {
-                    console.error(`[Campaign] 🤖 ❌ Puppeteer also failed: ${autoErr.message}`);
-                    throw new Error(`فشل الإرسال بكل الطرق (Message Tags + Puppeteer)`);
                 }
-            }
 
-            // No Puppeteer available
-            const finalErr = lastError?.message || 'فشل الإرسال';
-            throw new Error(`خارج نافذة المراسلة - جميع الـ Message Tags فشلت (${finalErr})`);
+                // No Puppeteer available
+                const finalErr = fbError?.message || 'فشل الإرسال';
+                throw new Error(`خارج نافذة المراسلة - POST_PURCHASE_UPDATE فشل (${finalErr})`);
+            }
         }
     }
 

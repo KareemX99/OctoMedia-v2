@@ -26,7 +26,7 @@ module.exports = (sequelize) => {
         },
         messageTag: {
             type: DataTypes.STRING,
-            defaultValue: 'CONFIRMED_EVENT_UPDATE'
+            defaultValue: 'POST_PURCHASE_UPDATE' // Default for shipping/order updates
         },
         delay: {
             type: DataTypes.INTEGER,
