@@ -9,6 +9,8 @@ class WhatsAppService {
         this.clients = {}; // Store clients by userId
         this.qrCodes = {}; // Store QR codes for each user
         this.readyStates = {}; // Track which users have fully loaded WA Web stores
+        this.mediaCache = {}; // In-memory media cache: { [messageId]: { mimetype, data, filename, cachedAt } }
+        this.mediaCacheMax = 500; // Max cache entries before pruning oldest
         this.sessionDir = path.join(__dirname, '..', '.wwebjs_auth');
 
         // Create session directory if not exists
@@ -217,6 +219,12 @@ class WhatsAppService {
             const chat = await client.getChatById(chatId);
             const messages = await chat.fetchMessages({ limit });
 
+            // Proactively cache media in background (non-blocking)
+            const mediaMessages = messages.filter(m => m.hasMedia && !this.mediaCache[m.id._serialized]);
+            if (mediaMessages.length > 0) {
+                this._cacheMediaInBackground(mediaMessages);
+            }
+
             return messages.map(msg => ({
                 id: msg.id._serialized,
                 body: msg.body,
@@ -236,6 +244,44 @@ class WhatsAppService {
             console.error('[WA] Get messages error:', err.message);
             return [];
         }
+    }
+
+    // Background media caching — downloads media and stores in memory
+    async _cacheMediaInBackground(messages) {
+        for (const msg of messages) {
+            const msgId = msg.id._serialized;
+            if (this.mediaCache[msgId]) continue; // Already cached
+            try {
+                const media = await msg.downloadMedia();
+                if (media && media.data) {
+                    this.mediaCache[msgId] = {
+                        mimetype: media.mimetype,
+                        data: media.data,
+                        filename: media.filename || `media.${media.mimetype.split('/')[1] || 'bin'}`,
+                        cachedAt: Date.now()
+                    };
+                    console.log(`[WA Media Cache] Cached ${msgId} (${media.mimetype}, ${media.data.length} chars)`);
+                }
+            } catch (e) {
+                // Silently skip — media may be expired or unavailable
+                console.log(`[WA Media Cache] Skip ${msgId}: ${e.message}`);
+            }
+        }
+        // Prune cache if over limit
+        this._pruneMediaCache();
+    }
+
+    // Prune oldest cache entries if over max limit
+    _pruneMediaCache() {
+        const keys = Object.keys(this.mediaCache);
+        if (keys.length <= this.mediaCacheMax) return;
+        // Sort by cachedAt ascending, remove oldest
+        const sorted = keys.sort((a, b) => this.mediaCache[a].cachedAt - this.mediaCache[b].cachedAt);
+        const toRemove = sorted.slice(0, keys.length - this.mediaCacheMax);
+        for (const key of toRemove) {
+            delete this.mediaCache[key];
+        }
+        console.log(`[WA Media Cache] Pruned ${toRemove.length} entries`);
     }
 
     // Send text message
@@ -457,6 +503,14 @@ class WhatsAppService {
     // Download media from a specific message
     async getMediaFromMessage(userId, chatId, messageId) {
         console.log(`[WA Media] === START === userId=${userId}, chatId=${chatId}, messageId=${messageId}`);
+
+        // ① Check in-memory cache first (instant)
+        if (this.mediaCache[messageId]) {
+            const cached = this.mediaCache[messageId];
+            console.log(`[WA Media] ✅ CACHE HIT — ${cached.mimetype}, ${cached.data.length} chars`);
+            return cached;
+        }
+
         try {
             const client = await this.getClient(userId);
             if (!this.readyStates[userId]) {
@@ -466,7 +520,7 @@ class WhatsAppService {
 
             let msg = null;
 
-            // Try direct message lookup first (most efficient)
+            // ② Try direct message lookup first (most efficient)
             try {
                 console.log('[WA Media] Trying direct getMessageById...');
                 msg = await client.getMessageById(messageId);
@@ -479,7 +533,7 @@ class WhatsAppService {
                 console.log('[WA Media] Direct lookup FAILED:', e.message);
             }
 
-            // Fallback: scan chat messages with larger limit
+            // ③ Fallback: scan chat messages with larger limit
             if (!msg) {
                 console.log('[WA Media] Falling back to chat scan (limit: 500)...');
                 try {
@@ -491,12 +545,6 @@ class WhatsAppService {
                         console.log(`[WA Media] Chat scan found message — type: ${msg.type}, hasMedia: ${msg.hasMedia}`);
                     } else {
                         console.log(`[WA Media] Chat scan did NOT find message ${messageId}`);
-                        // Log all message IDs for debugging
-                        const mediaMessages = messages.filter(m => m.hasMedia);
-                        console.log(`[WA Media] Media messages in chat: ${mediaMessages.length}`);
-                        if (mediaMessages.length > 0) {
-                            console.log(`[WA Media] Sample media msg IDs: ${mediaMessages.slice(0, 3).map(m => m.id._serialized).join(', ')}`);
-                        }
                     }
                 } catch (chatErr) {
                     console.error('[WA Media] Chat scan FAILED:', chatErr.message);
@@ -513,7 +561,7 @@ class WhatsAppService {
                 return null;
             }
 
-            // Retry downloadMedia up to 3 times (can fail due to timeout/network)
+            // ④ Retry downloadMedia up to 3 times (can fail due to timeout/network)
             let media = null;
             for (let attempt = 1; attempt <= 3; attempt++) {
                 try {
@@ -539,11 +587,17 @@ class WhatsAppService {
                 return null;
             }
 
-            return {
+            const result = {
                 mimetype: media.mimetype,
                 data: media.data,
                 filename: media.filename || `media.${media.mimetype.split('/')[1] || 'bin'}`
             };
+
+            // ⑤ Cache for future requests
+            this.mediaCache[messageId] = { ...result, cachedAt: Date.now() };
+            this._pruneMediaCache();
+
+            return result;
         } catch (err) {
             console.error('[WA Media] CRITICAL error:', err.message);
             return null;

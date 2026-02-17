@@ -785,16 +785,34 @@ class SocialMediaHub {
                 if (container.innerHTML.includes('fa-spinner') || container.innerHTML.trim() === '') {
                     container.innerHTML = `<div style="text-align:center;color:var(--text-secondary);padding:40px;"><i class="fas fa-comments" style="font-size:48px;opacity:0.3;margin-bottom:16px;"></i><p>ابدأ المحادثة!</p></div>`;
                 }
+                this._teamChatLastHash = null;
                 return;
             }
 
+            // --- Change Detection: count + lastID + content hash of first/last 3 msgs ---
+            const msgs = data.messages;
+            const msgCount = msgs.length;
+            const lastMsgId = msgs[msgs.length - 1]?.id || msgs[msgs.length - 1]?.createdAt;
+            const sampleMsgs = [...msgs.slice(0, 3), ...msgs.slice(-3)];
+            const contentHash = msgCount + '|' + lastMsgId + '|' + sampleMsgs.map(m => (m.id || '') + ':' + (m.message || '').substring(0, 30) + ':' + (m.updatedAt || m.createdAt || '')).join(',');
+
+            if (this._teamChatLastHash === contentHash) {
+                // No changes detected — skip DOM update entirely
+                return;
+            }
+            this._teamChatLastHash = contentHash;
+
             const userData = JSON.parse(localStorage.getItem('octobot_user') || '{}');
 
-            // Scroll management
+            // Scroll management — save position BEFORE touching DOM
             const isAtBottom = container.scrollHeight - container.scrollTop <= container.clientHeight + 100;
             const wasEmpty = container.innerHTML.trim() === '' || container.innerHTML.includes('fa-spinner');
+            const savedScrollTop = container.scrollTop;
 
-            container.innerHTML = data.messages.map(msg => {
+            // Add scroll anchoring CSS inline
+            container.style.overflowAnchor = 'auto';
+
+            container.innerHTML = msgs.map(msg => {
                 const isMe = msg.senderId === userData.id;
                 const time = new Date(msg.createdAt).toLocaleTimeString('ar-EG', { hour: '2-digit', minute: '2-digit' });
                 return `
@@ -817,7 +835,11 @@ class SocialMediaHub {
             }).join('');
 
             if (wasEmpty || isAtBottom) {
-                container.scrollTop = container.scrollHeight;
+                // Scroll to bottom instantly (no smooth animation)
+                container.scrollTo({ top: container.scrollHeight, behavior: 'auto' });
+            } else {
+                // User is reading history — restore exact position
+                container.scrollTo({ top: savedScrollTop, behavior: 'auto' });
             }
 
             // Mark as read and refresh badge count
@@ -1650,6 +1672,7 @@ class SocialMediaHub {
                     display: flex; align-items: center; gap: 12px; padding: 14px;
                     border-radius: 14px; cursor: pointer; transition: all 0.2s ease;
                     margin-bottom: 6px; border: 1px solid transparent;
+                    position: relative;
                 }
                 .msg-conv:hover { background: var(--bg-secondary); border-color: var(--border-color); }
                 .msg-conv.active { background: linear-gradient(135deg, rgba(0,132,255,0.1), rgba(0,198,255,0.05)); border-color: rgba(0,132,255,0.3); }
@@ -1670,15 +1693,17 @@ class SocialMediaHub {
                 .msg-conv-preview { font-size: 13px; color: var(--text-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-bottom: 4px; }
                 .msg-conv-id { font-size: 10px; color: var(--text-secondary); cursor: pointer; opacity: 0.7; transition: all 0.2s; }
                 .msg-conv-id:hover { opacity: 1; color: var(--primary); }
-                .msg-conv-meta { text-align: left; flex-shrink: 0; }
+                .msg-conv-meta { text-align: left; flex-shrink: 0; position: relative; }
                 .msg-conv-time { font-size: 11px; color: var(--text-secondary); margin-bottom: 6px; }
                 .msg-conv-badge {
-                    min-width: 22px; height: 22px; padding: 0 6px; border-radius: 11px;
-                    background: linear-gradient(135deg, #0EA5E9, #2563EB);
+                    min-width: 20px; height: 20px; padding: 0 5px; border-radius: 50%;
+                    background-color: #25d366;
                     color: white; font-size: 11px; font-weight: 700;
                     display: flex; align-items: center; justify-content: center;
                     animation: pulse 2s ease-in-out infinite;
+                    box-shadow: 0 2px 8px rgba(37,211,102,0.4);
                 }
+                .msg-conv-badge.hidden { display: none; }
                 
                 /* Animations */
                 @keyframes pulse {
@@ -5064,12 +5089,16 @@ class SocialMediaHub {
 
         // Render conversations list (needsReply = customer sent last message, page hasn't replied)
         let html = this.inboxConversations.map(c => {
-            // Check if page hasn't replied (based on backend needsReply) AND we haven't opened it locally
+            // Check unread count (considering local read state)
+            const unreadCount = this.getEffectiveUnreadCount(c);
+            // Also check needsReply for conversations where unreadCount isn't available
             const needsReply = c.needsReply && !this.isConversationReadLocally(c.id, c.updatedTime);
+            const showBadge = (unreadCount > 0 || needsReply) && this.currentConversation?.conversationId !== c.id;
+            const badgeText = unreadCount > 0 ? unreadCount : (needsReply ? '!' : '');
             const initials = c.participant ? c.participant.charAt(0).toUpperCase() : '?';
             const shortId = c.participantId?.substring(0, 10) || '';
             return `
-            <div class="msg-conv ${needsReply ? 'active' : ''}" onclick="app.loadMessages('${pageId}', '${c.id}', '${c.participant}', '${c.participantId}')">
+            <div class="msg-conv ${showBadge ? 'active' : ''}" data-conv-id="${c.id}" onclick="app.loadMessages('${pageId}', '${c.id}', '${c.participant}', '${c.participantId}')">
                 <div class="msg-conv-avatar">${initials}</div>
                 <div class="msg-conv-info">
                     <div class="msg-conv-name">${c.participant}</div>
@@ -5080,7 +5109,7 @@ class SocialMediaHub {
                 </div>
                 <div class="msg-conv-meta">
                     <div class="msg-conv-time">${new Date(c.updatedTime).toLocaleString('ar-EG', { hour: '2-digit', minute: '2-digit' })}</div>
-                    ${needsReply ? '<div class="msg-conv-badge">جديد</div>' : ''}
+                    ${showBadge ? `<div class="msg-conv-badge">${badgeText}</div>` : ''}
                 </div>
             </div>
         `}).join('');
@@ -5167,16 +5196,14 @@ class SocialMediaHub {
 
             // Save to localStorage for persistence
             this.markConversationAsRead(conversationId);
+        }
 
-            // Update the conversation item UI to remove highlight and badge
-            const convItems = document.querySelectorAll('.conversation-item');
-            if (convItems[convIndex]) {
-                convItems[convIndex].style.background = '';
-                convItems[convIndex].onmouseout = function () { this.style.background = ''; };
-                // Remove badge
-                const badge = convItems[convIndex].querySelector('span[style*="background:var(--primary)"]');
-                if (badge) badge.remove();
-            }
+        // Instant UI badge removal — find the conversation element and remove badge immediately
+        const convEl = document.querySelector(`.msg-conv[data-conv-id="${conversationId}"]`);
+        if (convEl) {
+            convEl.classList.remove('active');
+            const badge = convEl.querySelector('.msg-conv-badge');
+            if (badge) badge.remove();
         }
 
         document.getElementById('chatHeader').style.display = 'flex';
@@ -5462,13 +5489,14 @@ class SocialMediaHub {
             `;
         }).join('');
 
-        // Scroll to bottom - multiple attempts to handle image loading
-        container.scrollTop = container.scrollHeight;
+        // Add scroll anchoring CSS inline
+        container.style.overflowAnchor = 'auto';
 
-        // Additional scroll attempts after images might have loaded
-        setTimeout(() => { if (container) container.scrollTop = container.scrollHeight; }, 100);
-        setTimeout(() => { if (container) container.scrollTop = container.scrollHeight; }, 300);
-        setTimeout(() => { if (container) container.scrollTop = container.scrollHeight; }, 600);
+        // Scroll to bottom instantly (behavior: auto to avoid visible smooth scroll)
+        container.scrollTo({ top: container.scrollHeight, behavior: 'auto' });
+
+        // One delayed scroll to handle image loading layout shifts
+        setTimeout(() => { if (container) container.scrollTo({ top: container.scrollHeight, behavior: 'auto' }); }, 500);
 
         // Start polling for new messages
         this.startFbMessagePolling();
@@ -6148,7 +6176,7 @@ class SocialMediaHub {
 
         console.log('[FB Message Polling] Starting polling for:', this.currentConversation?.participantId);
 
-        // Poll every 1 second for real-time updates
+        // Poll every 10 seconds for real-time updates
         this.fbMessagePollingInterval = setInterval(async () => {
             if (!this.currentConversation) {
                 this.stopFbMessagePolling();
@@ -6164,24 +6192,29 @@ class SocialMediaHub {
                 const container = document.getElementById('chatMessages');
                 if (!container) return;
 
-                // Check if LAST message changed (more reliable than count)
-                if (!this.lastPolledMessageId) this.lastPolledMessageId = {};
-                const lastMsgInData = data.messages[0]; // Most recent message
+                // --- Refined Change Detection: count + lastID + content hash ---
+                if (!this._fbPollingHash) this._fbPollingHash = {};
+                const msgs = data.messages;
+                const msgCount = msgs.length;
+                const lastMsgInData = msgs[0]; // Most recent message
                 const lastMsgId = lastMsgInData?.id || lastMsgInData?.created_time;
+                // Content hash: sample first/last 3 messages for edit detection
+                const sampleMsgs = [...msgs.slice(0, 3), ...msgs.slice(-3)];
+                const contentHash = msgCount + '|' + lastMsgId + '|' + sampleMsgs.map(m => (m.id || '') + ':' + (m.message || '').substring(0, 30) + ':' + (m.created_time || '')).join(',');
 
-                if (this.lastPolledMessageId[conversationId] === lastMsgId) {
-                    return; // Same last message, no update needed
+                if (this._fbPollingHash[conversationId] === contentHash) {
+                    return; // No changes at all — skip DOM update
                 }
-
-                this.lastPolledMessageId[conversationId] = lastMsgId;
-                // console.log('[FB Polling] ✅ New message detected! Last msg:', lastMsgId?.substring(0, 20));
+                this._fbPollingHash[conversationId] = contentHash;
 
                 // Save current scroll position before update
-                this.lastScrollPos = container.scrollTop;
+                const savedScrollPos = container.scrollTop;
 
                 // Check if we're already at bottom (to auto-scroll after update)
-                // Increased threshold to 250px to better detect "user is at bottom"
                 const wasAtBottom = container.scrollHeight - container.scrollTop <= container.clientHeight + 250;
+
+                // Add scroll anchoring CSS inline
+                container.style.overflowAnchor = 'auto';
 
                 // Page messages on RIGHT, Customer messages on LEFT
                 // Load stored orders for matching
@@ -6392,21 +6425,17 @@ class SocialMediaHub {
                     `;
                 }).join('');
 
-                // Auto-scroll logic (Smart Scroll)
+                // Auto-scroll logic (Smart Scroll) — behavior: 'auto' to prevent visible smooth scrolling
                 if (wasAtBottom) {
-                    // Force scroll to bottom immediately
-                    container.scrollTop = container.scrollHeight;
+                    container.scrollTo({ top: container.scrollHeight, behavior: 'auto' });
 
-                    // Force again after a tiny delay to handle image layout shifts
+                    // One delayed scroll to handle image layout shifts
                     setTimeout(() => {
-                        if (container) container.scrollTop = container.scrollHeight;
-                    }, 100);
+                        if (container) container.scrollTo({ top: container.scrollHeight, behavior: 'auto' });
+                    }, 300);
                 } else {
-                    // User is reading history - STRICTLY maintain position
-                    // Only restore if valid, otherwise don't touch
-                    if (this.lastScrollPos !== undefined && this.lastScrollPos !== null) {
-                        container.scrollTop = this.lastScrollPos;
-                    }
+                    // User is reading history — restore exact position instantly
+                    container.scrollTo({ top: savedScrollPos, behavior: 'auto' });
                 }
             } catch (err) {
                 console.log('[FB Polling] Error:', err.message);
@@ -6493,11 +6522,14 @@ class SocialMediaHub {
                     const pageId = currentPageId;
                     if (container) {
                         container.innerHTML = newConversations.map(c => {
+                            const unreadCount = this.getEffectiveUnreadCount(c);
                             const needsReply = c.needsReply && !this.isConversationReadLocally(c.id, c.updatedTime);
+                            const showBadge = (unreadCount > 0 || needsReply) && this.currentConversation?.conversationId !== c.id;
+                            const badgeText = unreadCount > 0 ? unreadCount : (needsReply ? '!' : '');
                             const initials = c.participant ? c.participant.charAt(0).toUpperCase() : '?';
                             const shortId = c.participantId?.substring(0, 10) || '';
                             return `
-                            <div class="msg-conv ${needsReply ? 'active' : ''}" onclick="app.loadMessages('${pageId}', '${c.id}', '${c.participant}', '${c.participantId}')">
+                            <div class="msg-conv ${showBadge ? 'active' : ''}" data-conv-id="${c.id}" onclick="app.loadMessages('${pageId}', '${c.id}', '${c.participant}', '${c.participantId}')">
                                 <div class="msg-conv-avatar">${initials}</div>
                                 <div class="msg-conv-info">
                                     <div class="msg-conv-name">${c.participant}</div>
@@ -6508,7 +6540,7 @@ class SocialMediaHub {
                                 </div>
                                 <div class="msg-conv-meta">
                                     <div class="msg-conv-time">${new Date(c.updatedTime).toLocaleString('ar-EG', { hour: '2-digit', minute: '2-digit' })}</div>
-                                    ${needsReply ? '<div class="msg-conv-badge">جديد</div>' : ''}
+                                    ${showBadge ? `<div class="msg-conv-badge">${badgeText}</div>` : ''}
                                 </div>
                             </div>
                         `}).join('');
@@ -6584,6 +6616,10 @@ class SocialMediaHub {
         });
 
         if (foundConv) {
+            // Skip badge update if this is the currently active/viewed conversation
+            const convId = foundConv.getAttribute('data-conv-id');
+            const isActiveChat = this.currentConversation?.conversationId === convId;
+
             // Update snippet
             const preview = foundConv.querySelector('.msg-conv-preview');
             if (preview) {
@@ -6596,24 +6632,31 @@ class SocialMediaHub {
                 time.textContent = 'الآن';
             }
 
-            // Add new badge
-            let badge = foundConv.querySelector('.msg-conv-badge');
-            if (!badge) {
-                const meta = foundConv.querySelector('.msg-conv-meta');
-                if (meta) {
-                    const newBadge = document.createElement('div');
-                    newBadge.className = 'msg-conv-badge';
-                    newBadge.textContent = 'جديد';
-                    meta.appendChild(newBadge);
+            // Numeric badge — only show if NOT the active chat
+            if (!isActiveChat) {
+                let badge = foundConv.querySelector('.msg-conv-badge');
+                if (badge) {
+                    // Increment existing badge count (handle "!" fallback or empty)
+                    let currentCount = parseInt(badge.textContent);
+                    badge.textContent = (isNaN(currentCount) ? 0 : currentCount) + 1;
+                } else {
+                    // Create new badge with count 1
+                    const meta = foundConv.querySelector('.msg-conv-meta');
+                    if (meta) {
+                        const newBadge = document.createElement('div');
+                        newBadge.className = 'msg-conv-badge';
+                        newBadge.textContent = '1';
+                        meta.appendChild(newBadge);
+                    }
                 }
+
+                // Add highlight animation
+                foundConv.classList.add('active');
+                foundConv.style.animation = 'slideIn 0.3s ease';
             }
 
             // Move to top
             container.insertBefore(foundConv, container.firstChild);
-
-            // Add highlight animation
-            foundConv.classList.add('active');
-            foundConv.style.animation = 'slideIn 0.3s ease';
         }
     }
 
