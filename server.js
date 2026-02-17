@@ -170,6 +170,288 @@ app.use('/api/auth', authRouter);
 const ecommerceRouter = require('./routes/ecommerce');
 app.use('/api/ecommerce', ecommerceRouter);
 
+// ============= WHATSAPP API ROUTES =============
+
+// Helper to attach Socket.IO listeners to WA Client
+const attachWaListeners = (client, userId) => {
+    if (client._socketAttached) return; // Already attached
+
+    console.log(`[WA API] Attaching Socket.IO listeners for user ${userId}`);
+
+    // Use named functions so we can track them without removeAllListeners
+    // (removeAllListeners('message') would break whatsapp-web.js internals)
+    const onMessage = async (msg) => {
+        if (!global.io) return;
+        console.log(`[WA API] 📩 Incoming message from ${msg.from} | fromMe: ${msg.fromMe} | type: ${msg.type}`);
+        try {
+            const chat = await msg.getChat();
+            const contact = await msg.getContact();
+            global.io.to(`wa-${userId}`).emit('wa-new-message', {
+                chatId: chat.id._serialized,
+                message: {
+                    id: msg.id._serialized,
+                    body: msg.body,
+                    from: msg.from,
+                    to: msg.to,
+                    type: msg.type,
+                    hasMedia: msg.hasMedia,
+                    timestamp: msg.timestamp,
+                    fromMe: msg.fromMe,
+                    ack: msg.ack
+                },
+                chat: {
+                    id: chat.id._serialized,
+                    name: chat.name || contact.pushname || chat.id.user,
+                    isGroup: chat.isGroup,
+                    unreadCount: chat.unreadCount,
+                    pinned: chat.pinned || false
+                }
+            });
+        } catch (e) {
+            console.error('[WA API] Error in message listener:', e.message);
+        }
+    };
+
+    const onMessageCreate = async (msg) => {
+        if (!msg.fromMe || !global.io) return;
+        try {
+            const chat = await msg.getChat();
+            global.io.to(`wa-${userId}`).emit('wa-new-message', {
+                chatId: chat.id._serialized,
+                message: {
+                    id: msg.id._serialized,
+                    body: msg.body,
+                    from: msg.from,
+                    to: msg.to,
+                    type: msg.type,
+                    hasMedia: msg.hasMedia,
+                    timestamp: msg.timestamp,
+                    fromMe: true,
+                    ack: msg.ack
+                },
+                chat: {
+                    id: chat.id._serialized,
+                    name: chat.name || chat.id.user,
+                    isGroup: chat.isGroup,
+                    unreadCount: 0,
+                    pinned: chat.pinned || false
+                }
+            });
+        } catch (e) {
+            console.error('[WA API] Error in message_create listener:', e.message);
+        }
+    };
+
+    const onMessageAck = (msg, ack) => {
+        if (!global.io) return;
+        global.io.to(`wa-${userId}`).emit('wa-message-ack', {
+            messageId: msg.id._serialized,
+            ack: ack
+        });
+    };
+
+    // Attach listeners (do NOT removeAllListeners — it breaks wwebjs internals)
+    client.on('message', onMessage);
+    client.on('message_create', onMessageCreate);
+    client.on('message_ack', onMessageAck);
+
+    client._socketAttached = true;
+};
+
+// Get WhatsApp connection status
+app.get('/api/whatsapp/status', authMiddleware, async (req, res) => {
+    try {
+        const userId = req.user.id;
+        const status = await whatsappService.getStatus(userId);
+
+        // Ensure socket listeners are attached if connected
+        if (status.status === 'connected' || status.status === 'authenticating') {
+            try {
+                const client = await whatsappService.getClient(userId);
+                attachWaListeners(client, userId);
+            } catch (e) {
+                console.error('[WA API] Failed to attach listeners on status check:', e.message);
+            }
+        }
+
+        const accountInfo = await whatsappService.getAccountInfo(userId);
+        res.json({ ...status, account: accountInfo });
+    } catch (err) {
+        console.error('[WA API] Status error:', err.message);
+        res.json({ status: 'disconnected', authenticated: false, ready: false, qrCode: null, account: null });
+    }
+});
+
+// Connect WhatsApp (initialize client + start QR flow)
+app.post('/api/whatsapp/connect', authMiddleware, async (req, res) => {
+    try {
+        const userId = req.user.id;
+        console.log(`[WA API] Connecting for user ${userId}...`);
+
+        // Set up message listener for real-time forwarding via Socket.IO
+        const client = await whatsappService.getClient(userId);
+
+        // Attach standard listeners
+        attachWaListeners(client, userId);
+
+        // Additional connect-specific listeners (ready, qr)
+        client.removeAllListeners('ready');
+
+        // Notify when ready + set readyStates flag (important: removeAllListeners above removes the service's handler)
+        client.on('ready', () => {
+            console.log(`[WA API] Client ready for user ${userId}`);
+            whatsappService.readyStates[userId] = true;
+            if (global.io) {
+                global.io.to(`wa-${userId}`).emit('wa-ready', { status: 'connected' });
+            }
+        });
+
+        // Notify when QR refreshes
+        const origQrHandler = client.listeners('qr');
+        client.on('qr', (qr) => {
+            if (global.io) {
+                global.io.to(`wa-${userId}`).emit('wa-qr', { qrCode: whatsappService.getQrCode(userId) });
+            }
+        });
+
+        const result = await whatsappService.initialize(userId);
+        res.json(result);
+    } catch (err) {
+        console.error('[WA API] Connect error:', err.message);
+        res.status(500).json({ success: false, error: err.message });
+    }
+});
+
+// Disconnect WhatsApp
+app.post('/api/whatsapp/disconnect', authMiddleware, async (req, res) => {
+    try {
+        const userId = req.user.id;
+        const result = await whatsappService.logout(userId);
+        res.json(result);
+    } catch (err) {
+        console.error('[WA API] Disconnect error:', err.message);
+        res.status(500).json({ success: false, error: err.message });
+    }
+});
+
+// Get all WhatsApp chats (with pinned support)
+app.get('/api/whatsapp/chats', authMiddleware, async (req, res) => {
+    try {
+        const userId = req.user.id;
+        console.log(`[WA API] Getting chats for user ${userId}...`);
+        const chats = await whatsappService.getChats(userId);
+        console.log(`[WA API] Got ${chats.length} chats for user ${userId}`);
+        // Sort: Pinned first, then by timestamp descending
+        chats.sort((a, b) => {
+            if (a.pinned && !b.pinned) return -1;
+            if (!a.pinned && b.pinned) return 1;
+            return (b.timestamp || 0) - (a.timestamp || 0);
+        });
+        res.json({ chats });
+    } catch (err) {
+        console.error('[WA API] Get chats error:', err.message);
+        res.status(500).json({ chats: [], error: err.message });
+    }
+});
+
+// Get messages for a specific chat
+app.get('/api/whatsapp/chats/:chatId/messages', authMiddleware, async (req, res) => {
+    try {
+        const userId = req.user.id;
+        const chatId = decodeURIComponent(req.params.chatId);
+        const limit = parseInt(req.query.limit) || 50;
+        const messages = await whatsappService.getMessages(userId, chatId, limit);
+        res.json({ messages });
+    } catch (err) {
+        console.error('[WA API] Get messages error:', err.message);
+        res.status(500).json({ messages: [], error: err.message });
+    }
+});
+
+// Send text message
+app.post('/api/whatsapp/chats/:chatId/send', authMiddleware, async (req, res) => {
+    try {
+        const userId = req.user.id;
+        const chatId = decodeURIComponent(req.params.chatId);
+        const { message } = req.body;
+        if (!message) return res.status(400).json({ success: false, error: 'Message is required' });
+        const result = await whatsappService.sendMessage(userId, chatId, message);
+        res.json(result);
+    } catch (err) {
+        console.error('[WA API] Send message error:', err.message);
+        res.status(500).json({ success: false, error: err.message });
+    }
+});
+
+// Send media message
+app.post('/api/whatsapp/chats/:chatId/send-media', authMiddleware, upload.single('media'), async (req, res) => {
+    try {
+        const userId = req.user.id;
+        const chatId = decodeURIComponent(req.params.chatId);
+        const caption = req.body.caption || '';
+        if (!req.file) return res.status(400).json({ success: false, error: 'Media file is required' });
+        const result = await whatsappService.sendMedia(userId, chatId, req.file.path, caption);
+        res.json(result);
+    } catch (err) {
+        console.error('[WA API] Send media error:', err.message);
+        res.status(500).json({ success: false, error: err.message });
+    }
+});
+
+// Get WhatsApp QR code (polling endpoint)
+app.get('/api/whatsapp/qr', authMiddleware, async (req, res) => {
+    try {
+        const userId = req.user.id;
+        const qrCode = whatsappService.getQrCode(userId);
+        res.json({ qrCode });
+    } catch (err) {
+        res.json({ qrCode: null });
+    }
+});
+
+// Download media from a message (supports query token for <img>/<video>/<audio> src)
+app.get('/api/whatsapp/media/:chatId/:messageId', async (req, res) => {
+    try {
+        // Auth: accept Bearer header OR ?token= query param
+        const headerToken = req.headers.authorization?.replace('Bearer ', '');
+        const queryToken = req.query.token;
+        const token = headerToken || queryToken;
+
+        if (!token) {
+            console.log('[WA Media Route] No token provided');
+            return res.status(401).json({ error: 'No token provided' });
+        }
+
+        let decoded;
+        try {
+            const jwt = require('jsonwebtoken');
+            decoded = jwt.verify(token, process.env.JWT_SECRET || 'octobot-saas-secret-key-2024');
+        } catch (e) {
+            console.log('[WA Media Route] Invalid token:', e.message);
+            return res.status(401).json({ error: 'Invalid token' });
+        }
+
+        const userId = decoded.id;
+        const chatId = decodeURIComponent(req.params.chatId);
+        const messageId = decodeURIComponent(req.params.messageId);
+        console.log(`[WA Media Route] Request — userId: ${userId}, chatId: ${chatId}, messageId: ${messageId}`);
+
+        const media = await whatsappService.getMediaFromMessage(userId, chatId, messageId);
+        if (!media) {
+            console.log(`[WA Media Route] 404 — media not found for messageId: ${messageId}`);
+            return res.status(404).json({ error: 'Media not found' });
+        }
+        console.log(`[WA Media Route] 200 — sending ${media.mimetype}, ${media.data.length} bytes`);
+        res.set('Content-Type', media.mimetype);
+        res.set('Content-Disposition', `inline; filename="${media.filename || 'media'}"`);
+        res.set('Cache-Control', 'private, max-age=3600');
+        res.send(Buffer.from(media.data, 'base64'));
+    } catch (err) {
+        console.error('[WA Media Route] Server error:', err.message);
+        res.status(500).json({ error: err.message });
+    }
+});
+
 // Data storage (in production, use a database)
 const DATA_FILE = path.join(__dirname, 'data.json');
 let appData = {
@@ -5504,188 +5786,7 @@ app.post('/api/ig/:userId/logout', async (req, res) => {
     }
 });
 
-// ============= WHATSAPP API =============
-
-// Initialize WhatsApp connection
-app.post('/api/whatsapp/:userId/init', async (req, res) => {
-    const { userId } = req.params;
-
-    console.log(`[Server] WhatsApp init request: userId=${userId}`);
-
-    try {
-        const result = await whatsappService.initialize(userId);
-        res.json(result);
-    } catch (err) {
-        console.error('[Server] WhatsApp init error:', err);
-        res.status(500).json({ success: false, error: err.message });
-    }
-});
-
-// Get WhatsApp connection status
-app.get('/api/whatsapp/:userId/status', async (req, res) => {
-    const { userId } = req.params;
-
-    try {
-        const status = await whatsappService.getStatus(userId);
-        res.json(status);
-    } catch (err) {
-        console.error('[Server] WhatsApp status error:', err);
-        res.status(500).json({ success: false, error: err.message });
-    }
-});
-
-// Get WhatsApp account info
-app.get('/api/whatsapp/:userId/info', async (req, res) => {
-    const { userId } = req.params;
-
-    try {
-        const info = await whatsappService.getAccountInfo(userId);
-        if (!info) {
-            return res.status(404).json({ error: 'Account not connected' });
-        }
-        res.json(info);
-    } catch (err) {
-        console.error('[Server] WhatsApp info error:', err);
-        res.status(500).json({ success: false, error: err.message });
-    }
-});
-
-// Get all chats
-app.get('/api/whatsapp/:userId/chats', async (req, res) => {
-    const { userId } = req.params;
-    const { limit } = req.query;
-
-    try {
-        const chats = await whatsappService.getChats(userId, limit ? parseInt(limit) : 50);
-        res.json(chats);
-    } catch (err) {
-        console.error('[Server] WhatsApp chats error:', err);
-        res.status(500).json({ success: false, error: err.message });
-    }
-});
-
-// Get chat info
-app.get('/api/whatsapp/:userId/chat-info/:chatId', async (req, res) => {
-    const { userId, chatId } = req.params;
-
-    try {
-        const chat = await whatsappService.getChat(userId, chatId);
-        if (!chat) {
-            return res.status(404).json({ error: 'Chat not found' });
-        }
-        res.json(chat);
-    } catch (err) {
-        console.error('[Server] WhatsApp chat info error:', err);
-        res.status(500).json({ success: false, error: err.message });
-    }
-});
-
-// Get messages from chat
-app.get('/api/whatsapp/:userId/messages/:chatId', async (req, res) => {
-    const { userId, chatId } = req.params;
-    const { limit, before } = req.query;
-
-    try {
-        const messages = await whatsappService.getMessages(userId, chatId, limit ? parseInt(limit) : 50);
-        res.json(messages);
-    } catch (err) {
-        console.error('[Server] WhatsApp messages error:', err);
-        res.status(500).json({ success: false, error: err.message });
-    }
-});
-
-// Send message
-app.post('/api/whatsapp/:userId/send', async (req, res) => {
-    const { userId } = req.params;
-    const { chatId, message, mediaUrl, mediaCaption, mediaType } = req.body;
-
-    console.log(`[Server] WhatsApp send message: userId=${userId}, chatId=${chatId}`);
-
-    if (!chatId || (!message && !mediaUrl)) {
-        return res.status(400).json({ success: false, error: 'Chat ID and message or media required' });
-    }
-
-    try {
-        let result;
-
-        if (mediaUrl) {
-            const mimeType = mediaType || 'image/jpeg';
-            result = await whatsappService.sendMediaFromUrl(userId, chatId, mediaUrl, mediaCaption || '', mimeType);
-        } else {
-            result = await whatsappService.sendMessage(userId, chatId, message);
-        }
-
-        res.json(result);
-    } catch (err) {
-        console.error('[Server] WhatsApp send error:', err);
-        res.status(500).json({ success: false, error: err.message });
-    }
-});
-
-// Send media (file upload)
-app.post('/api/whatsapp/:userId/send-media', async (req, res) => {
-    const { userId } = req.params;
-    const { chatId, caption } = req.body;
-
-    // Handle file upload with multer
-    if (!req.files || !req.files.media) {
-        return res.status(400).json({ success: false, error: 'Media file required' });
-    }
-
-    const mediaPath = req.files.media[0].path;
-
-    try {
-        const result = await whatsappService.sendMedia(userId, chatId, mediaPath, caption || '');
-        res.json(result);
-    } catch (err) {
-        console.error('[Server] WhatsApp send media error:', err);
-        res.status(500).json({ success: false, error: err.message });
-    }
-});
-
-// Get profile picture
-app.get('/api/whatsapp/:userId/profile-pic/:contactId', async (req, res) => {
-    const { userId, contactId } = req.params;
-
-    try {
-        const picUrl = await whatsappService.getProfilePic(userId, contactId);
-        res.json({ url: picUrl });
-    } catch (err) {
-        console.error('[Server] WhatsApp profile pic error:', err);
-        res.status(500).json({ success: false, error: err.message });
-    }
-});
-
-// Create group
-app.post('/api/whatsapp/:userId/create-group', async (req, res) => {
-    const { userId } = req.params;
-    const { groupName, participants } = req.body;
-
-    if (!groupName || !participants || !Array.isArray(participants)) {
-        return res.status(400).json({ success: false, error: 'Group name and participants required' });
-    }
-
-    try {
-        const result = await whatsappService.createGroup(userId, groupName, participants);
-        res.json(result);
-    } catch (err) {
-        console.error('[Server] WhatsApp create group error:', err);
-        res.status(500).json({ success: false, error: err.message });
-    }
-});
-
-// Logout WhatsApp
-app.post('/api/whatsapp/:userId/logout', async (req, res) => {
-    const { userId } = req.params;
-
-    try {
-        const result = await whatsappService.logout(userId);
-        res.json(result);
-    } catch (err) {
-        console.error('[Server] WhatsApp logout error:', err);
-        res.status(500).json({ success: false, error: err.message });
-    }
-});
+// ============= (Legacy WhatsApp routes removed — use /api/whatsapp/* with authMiddleware) =============
 
 // ============= TELEGRAM API =============
 
@@ -6519,6 +6620,12 @@ async function startServer() {
         socket.on('join-campaign', (campaignId) => {
             socket.join(`campaign-${campaignId}`);
             console.log(`[Socket.IO] Client ${socket.id} joined campaign-${campaignId}`);
+        });
+
+        // Join generic room (used by WhatsApp for wa-{userId} rooms)
+        socket.on('join-room', (roomName) => {
+            socket.join(roomName);
+            console.log(`[Socket.IO] Client ${socket.id} joined room ${roomName}`);
         });
 
         socket.on('disconnect', () => {

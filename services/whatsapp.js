@@ -8,6 +8,7 @@ class WhatsAppService {
     constructor() {
         this.clients = {}; // Store clients by userId
         this.qrCodes = {}; // Store QR codes for each user
+        this.readyStates = {}; // Track which users have fully loaded WA Web stores
         this.sessionDir = path.join(__dirname, '..', '.wwebjs_auth');
 
         // Create session directory if not exists
@@ -61,6 +62,11 @@ class WhatsAppService {
         client.on('authenticated', () => {
             console.log(`[WA] User ${userId} authenticated successfully`);
             this.qrCodes[userId] = null;
+            // Mark as ready after short delay to let stores load
+            setTimeout(() => {
+                this.readyStates[userId] = true;
+                console.log(`[WA] User ${userId} readyState set to true (post-auth)`);
+            }, 5000);
         });
 
         client.on('auth_failure', (msg) => {
@@ -70,10 +76,12 @@ class WhatsAppService {
         client.on('disconnected', (reason) => {
             console.log(`[WA] User ${userId} disconnected:`, reason);
             delete this.clients[userId];
+            delete this.readyStates[userId];
         });
 
         client.on('ready', () => {
-            console.log(`[WA] User ${userId} is ready`);
+            console.log(`[WA] User ${userId} is ready — stores loaded`);
+            this.readyStates[userId] = true;
         });
 
         this.clients[userId] = client;
@@ -137,17 +145,39 @@ class WhatsAppService {
     async getChats(userId) {
         try {
             const client = await this.getClient(userId);
-            const chats = await client.getChats();
 
-            return chats.map(chat => ({
-                id: chat.id._serialized,
-                name: chat.name || chat.id.user,
-                isGroup: chat.isGroup,
-                isArchived: chat.archived,
-                unreadCount: chat.unreadCount,
-                lastMessage: chat.lastMessage?.body || '',
-                timestamp: chat.lastMessage?._timestamp || 0
-            }));
+            // Guard: don't try to get chats if stores aren't ready
+            if (!this.readyStates[userId]) {
+                console.log('[WA] getChats skipped - client not ready yet (stores not loaded)');
+                return [];
+            }
+
+            // Try up to 3 times with 5s delay (stores may still be loading)
+            let lastError = null;
+            for (let attempt = 1; attempt <= 3; attempt++) {
+                try {
+                    const chats = await client.getChats();
+                    console.log(`[WA] getChats success: ${chats.length} chats (attempt ${attempt})`);
+                    return chats.map(chat => ({
+                        id: chat.id._serialized,
+                        name: chat.name || chat.id.user,
+                        isGroup: chat.isGroup,
+                        isArchived: chat.archived,
+                        pinned: chat.pinned || false,
+                        unreadCount: chat.unreadCount,
+                        lastMessage: chat.lastMessage?.body || '',
+                        timestamp: chat.lastMessage?.timestamp || chat.lastMessage?._timestamp || 0
+                    }));
+                } catch (innerErr) {
+                    lastError = innerErr;
+                    console.log(`[WA] getChats attempt ${attempt}/3 failed: ${innerErr.message}`);
+                    if (attempt < 3) {
+                        await new Promise(resolve => setTimeout(resolve, 5000));
+                    }
+                }
+            }
+            console.error('[WA] getChats all attempts failed:', lastError?.message);
+            return [];
         } catch (err) {
             console.error('[WA] Get chats error:', err.message);
             return [];
@@ -190,13 +220,16 @@ class WhatsAppService {
             return messages.map(msg => ({
                 id: msg.id._serialized,
                 body: msg.body,
-                from: msg.from._serialized,
-                to: msg.to._serialized,
-                author: msg.author?._serialized || '',
+                from: typeof msg.from === 'string' ? msg.from : msg.from?._serialized || '',
+                to: typeof msg.to === 'string' ? msg.to : msg.to?._serialized || '',
+                author: typeof msg.author === 'string' ? msg.author : msg.author?._serialized || '',
+                senderName: msg._data?.notifyName || '',
                 type: msg.type,
                 hasMedia: msg.hasMedia,
                 timestamp: msg.timestamp,
-                isGroup: msg.from.includes('@g.us'),
+                fromMe: msg.fromMe,
+                ack: msg.ack,
+                isGroup: (typeof msg.from === 'string' ? msg.from : '').includes('@g.us'),
                 isStatus: msg.id.fromMe === false && msg.type === 'status'
             }));
         } catch (err) {
@@ -209,7 +242,7 @@ class WhatsAppService {
     async sendMessage(userId, chatId, message) {
         try {
             const client = await this.getClient(userId);
-            const result = await client.sendMessage(chatId, message);
+            const result = await client.sendMessage(chatId, message, { sendSeen: false });
 
             return {
                 success: true,
@@ -401,11 +434,14 @@ class WhatsAppService {
         }
 
         const authenticated = client.info?.wid !== undefined;
-        const ready = client.pupPage !== null;
+        // ready = the 'ready' event has fired (stores are loaded)
+        const ready = this.readyStates[userId] === true;
         let status = 'initializing';
 
         if (authenticated && ready) {
             status = 'connected';
+        } else if (authenticated && !ready) {
+            status = 'authenticating'; // authenticated but stores still loading
         } else if (this.getQrCode(userId)) {
             status = 'waiting_qr';
         }
@@ -416,6 +452,102 @@ class WhatsAppService {
             ready: ready,
             qrCode: this.getQrCode(userId)
         };
+    }
+
+    // Download media from a specific message
+    async getMediaFromMessage(userId, chatId, messageId) {
+        console.log(`[WA Media] === START === userId=${userId}, chatId=${chatId}, messageId=${messageId}`);
+        try {
+            const client = await this.getClient(userId);
+            if (!this.readyStates[userId]) {
+                console.log('[WA Media] Client not ready — skipping');
+                throw new Error('Client not ready');
+            }
+
+            let msg = null;
+
+            // Try direct message lookup first (most efficient)
+            try {
+                console.log('[WA Media] Trying direct getMessageById...');
+                msg = await client.getMessageById(messageId);
+                if (msg) {
+                    console.log(`[WA Media] Direct lookup SUCCESS — type: ${msg.type}, hasMedia: ${msg.hasMedia}`);
+                } else {
+                    console.log('[WA Media] Direct lookup returned null');
+                }
+            } catch (e) {
+                console.log('[WA Media] Direct lookup FAILED:', e.message);
+            }
+
+            // Fallback: scan chat messages with larger limit
+            if (!msg) {
+                console.log('[WA Media] Falling back to chat scan (limit: 500)...');
+                try {
+                    const chat = await client.getChatById(chatId);
+                    const messages = await chat.fetchMessages({ limit: 500 });
+                    console.log(`[WA Media] Fetched ${messages.length} messages from chat`);
+                    msg = messages.find(m => m.id._serialized === messageId);
+                    if (msg) {
+                        console.log(`[WA Media] Chat scan found message — type: ${msg.type}, hasMedia: ${msg.hasMedia}`);
+                    } else {
+                        console.log(`[WA Media] Chat scan did NOT find message ${messageId}`);
+                        // Log all message IDs for debugging
+                        const mediaMessages = messages.filter(m => m.hasMedia);
+                        console.log(`[WA Media] Media messages in chat: ${mediaMessages.length}`);
+                        if (mediaMessages.length > 0) {
+                            console.log(`[WA Media] Sample media msg IDs: ${mediaMessages.slice(0, 3).map(m => m.id._serialized).join(', ')}`);
+                        }
+                    }
+                } catch (chatErr) {
+                    console.error('[WA Media] Chat scan FAILED:', chatErr.message);
+                }
+            }
+
+            if (!msg) {
+                console.log(`[WA Media] Message not found at all for ID: ${messageId}`);
+                return null;
+            }
+
+            if (!msg.hasMedia) {
+                console.log(`[WA Media] Message found but hasMedia is false (type: ${msg.type})`);
+                return null;
+            }
+
+            // Retry downloadMedia up to 3 times (can fail due to timeout/network)
+            let media = null;
+            for (let attempt = 1; attempt <= 3; attempt++) {
+                try {
+                    console.log(`[WA Media] Downloading media (attempt ${attempt}/3)...`);
+                    media = await msg.downloadMedia();
+                    if (media && media.data) {
+                        console.log(`[WA Media] Download SUCCESS — mimetype: ${media.mimetype}, data size: ${media.data.length} chars`);
+                        break;
+                    } else {
+                        console.log(`[WA Media] Download returned ${media ? 'empty media' : 'null'} (attempt ${attempt})`);
+                        media = null;
+                    }
+                } catch (dlErr) {
+                    console.error(`[WA Media] Download FAILED (attempt ${attempt}):`, dlErr.message);
+                    if (attempt < 3) {
+                        await new Promise(resolve => setTimeout(resolve, 1000 * attempt));
+                    }
+                }
+            }
+
+            if (!media) {
+                console.log('[WA Media] All download attempts failed');
+                return null;
+            }
+
+            return {
+                mimetype: media.mimetype,
+                data: media.data,
+                filename: media.filename || `media.${media.mimetype.split('/')[1] || 'bin'}`
+            };
+        } catch (err) {
+            console.error('[WA Media] CRITICAL error:', err.message);
+            return null;
+        }
     }
 }
 

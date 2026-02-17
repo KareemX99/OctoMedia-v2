@@ -2291,70 +2291,105 @@ class SocialMediaHub {
                 </div>
             </div>`;
 
-        // WhatsApp Section
-        const userData = JSON.parse(localStorage.getItem('octobot_user') || '{}');
-        const userId = userData.id || '';
+        // WhatsApp Section - Professional Chat UI
         document.getElementById('whatsapp').innerHTML = `
-            <header class="page-header">
-                <div class="header-content"><h1><i class="fab fa-whatsapp" style="color:#25D366;"></i> واتساب</h1><p class="subtitle">إدارة محادثاتك على واتساب</p></div>
-            </header>
-            
-            <!-- WhatsApp Status Section -->
-            <div id="whatsappQrSection" style="padding:20px;text-align:center;">
-                <div id="whatsappStatus" style="margin-bottom:20px;"></div>
-                <div id="whatsappQrCode" style="margin:20px auto;max-width:300px;"></div>
-                <button id="whatsappConnectBtn" onclick="app.connectWhatsApp()" class="btn btn-primary" style="padding:15px 40px;font-size:16px;">
-                    <i class="fab fa-whatsapp"></i> ربط واتساب
-                </button>
-            </div>
-            
-            <div class="whatsapp-container" style="display:grid;grid-template-columns:300px 1fr;gap:20px;padding:20px;height:calc(100vh - 250px);">
-                <!-- Chat List -->
-                <div id="whatsappInbox" class="wa-chat-list" style="background:var(--bg-secondary);border-radius:12px;overflow:hidden;display:none;flex-direction:column;">
-                    <div style="padding:16px;border-bottom:1px solid var(--border-color);display:flex;justify-content:space-between;align-items:center;">
-                        <h3><i class="fab fa-whatsapp" style="color:#25D366;"></i> المحادثات</h3>
-                        <button onclick="app.logoutWhatsApp('${userId}')" class="btn btn-secondary" style="font-size:12px;padding:8px 12px;">
-                            <i class="fas fa-sign-out-alt"></i> تسجيل خروج
+            <div class="wa-container">
+                <!-- Status Bar -->
+                <div class="wa-status-bar">
+                    <div class="wa-status-info">
+                        <div class="wa-status-dot" id="waStatusDot"></div>
+                        <span class="wa-status-text" id="waStatusText">غير متصل</span>
+                        <span class="wa-account-name" id="waAccountName"></span>
+                    </div>
+                    <div id="waStatusActions">
+                        <button class="wa-btn wa-btn-connect" id="waConnectBtn" onclick="app.waConnect()">
+                            <i class="fab fa-whatsapp"></i> ربط واتساب
                         </button>
                     </div>
-                    <div id="whatsappChatsList" style="flex:1;overflow-y:auto;">
-                        <div class="loading-spinner"><div class="spinner"></div></div>
+                </div>
+
+                <!-- QR Code Screen (shown when disconnected) -->
+                <div class="wa-qr-screen" id="waQrScreen">
+                    <div class="wa-qr-icon">
+                        <i class="fab fa-whatsapp"></i>
+                    </div>
+                    <h2>ربط واتساب ويب</h2>
+                    <p>امسح رمز QR من تطبيق واتساب على هاتفك لبدء المراسلة</p>
+                    <div class="wa-qr-box" id="waQrBox" style="display:none;">
+                        <div class="wa-qr-loading" id="waQrLoading">
+                            <div class="wa-spinner"></div>
+                            <span style="color:#666;">جاري تحميل رمز QR...</span>
+                        </div>
+                        <img id="waQrImg" style="display:none;" alt="QR Code">
+                    </div>
+                    <div class="wa-qr-steps">
+                        <div class="wa-step"><span class="wa-step-num">1</span> افتح واتساب على هاتفك</div>
+                        <div class="wa-step"><span class="wa-step-num">2</span> اضغط على ⋮ ثم "الأجهزة المرتبطة"</div>
+                        <div class="wa-step"><span class="wa-step-num">3</span> امسح رمز QR الظاهر هنا</div>
                     </div>
                 </div>
-                
-                <!-- Chat View -->
-                <div class="wa-chat-view" style="background:var(--bg-secondary);border-radius:12px;overflow:hidden;display:flex;flex-direction:column;">
-                    <div id="whatsappChatHeader" style="padding:16px;border-bottom:1px solid var(--border-color);display:none;">
-                        <div style="display:flex;align-items:center;gap:12px;">
-                            <div id="waChatAvatar" style="width:45px;height:45px;border-radius:50%;background:var(--bg-primary);display:flex;align-items:center;justify-content:center;">
-                                <i class="fab fa-whatsapp" style="color:#25D366;font-size:24px;"></i>
+
+                <!-- Chat Layout (shown when connected) -->
+                <div class="wa-chat-layout" id="waChatLayout" style="display:none;">
+                    <!-- Chat Area (right panel) -->
+                    <div class="wa-chat-area" id="waChatArea">
+                        <div class="wa-empty-chat" id="waEmptyChat">
+                            <i class="fab fa-whatsapp"></i>
+                            <h3>واتساب ويب</h3>
+                            <p>اختر محادثة من القائمة للبدء</p>
+                        </div>
+                        <!-- Chat Header (hidden until chat selected) -->
+                        <div class="wa-chat-header" id="waChatHeader" style="display:none;">
+                            <button class="wa-back-btn" onclick="app.waBackToList()"><i class="fas fa-arrow-right"></i></button>
+                            <div class="wa-chat-header-avatar" id="waChatHeaderAvatar"></div>
+                            <div class="wa-chat-header-info">
+                                <div class="wa-chat-header-name" id="waChatHeaderName"></div>
+                                <div class="wa-chat-header-status" id="waChatHeaderStatus"></div>
                             </div>
-                            <div>
-                                <h3 id="waChatName" style="font-size:16px;font-weight:600;"></h3>
-                                <span id="waChatStatus" style="font-size:12px;color:var(--text-secondary);"></span>
+                            <div class="wa-chat-header-actions">
+                                <button onclick="app.waRefreshMessages()" title="تحديث"><i class="fas fa-sync-alt"></i></button>
                             </div>
                         </div>
+                        <!-- Messages Container (hidden until chat selected) -->
+                        <div class="wa-messages" id="waMessagesContainer" style="display:none;"></div>
+                        <!-- Input Area (hidden until chat selected) -->
+                        <div class="wa-input-area" id="waInputArea" style="display:none;">
+                            <button class="wa-attach-btn" title="إرفاق"><i class="fas fa-paperclip"></i></button>
+                            <div class="wa-input-wrap">
+                                <input type="text" id="waMessageInput" placeholder="اكتب رسالة..." 
+                                    onkeypress="if(event.key==='Enter'){event.preventDefault();app.waSendMessage();}">
+                            </div>
+                            <button class="wa-send-btn" onclick="app.waSendMessage()" title="إرسال"><i class="fas fa-paper-plane"></i></button>
+                        </div>
                     </div>
-                    <div id="whatsappMessages" style="flex:1;overflow-y:auto;padding:16px;display:none;">
-                    </div>
-                    <div id="whatsappEmptyState" style="flex:1;display:flex;align-items:center;justify-content:center;flex-direction:column;color:var(--text-secondary);">
-                        <i class="fab fa-whatsapp" style="font-size:80px;color:#25D366;opacity:0.3;"></i>
-                        <h3 style="margin-top:20px;">اختر محادثة للبدء</h3>
-                    </div>
-                    <div id="whatsappInputArea" style="padding:16px;border-top:1px solid var(--border-color);display:none;">
-                        <div style="display:flex;gap:10px;">
-                            <input type="text" id="waMessageInput" placeholder="اكتب رسالة..." 
-                                style="flex:1;padding:12px;border-radius:25px;border:1px solid var(--border-color);background:var(--bg-primary);color:var(--text-primary);"
-                                onkeypress="if(event.key==='Enter')app.sendWhatsAppMessage()">
-                            <button onclick="app.sendWhatsAppMessage()" class="btn btn-primary" style="border-radius:50%;width:45px;height:45px;padding:0;display:flex;align-items:center;justify-content:center;">
-                                <i class="fas fa-paper-plane"></i>
-                            </button>
+                    <!-- Sidebar (left panel = chat list) -->
+                    <div class="wa-sidebar">
+                        <div class="wa-sidebar-header">
+                            <div class="wa-search-box">
+                                <i class="fas fa-search"></i>
+                                <input type="text" id="waSearchInput" placeholder="بحث في المحادثات..." oninput="app.waFilterChats(this.value)">
+                            </div>
+                        </div>
+                        <div class="wa-chat-list" id="waChatList">
+                            <div class="wa-loading-chats" id="waChatsLoading">
+                                ${[1, 2, 3, 4, 5].map(() => `
+                                <div class="wa-chat-skeleton">
+                                    <div class="wa-skeleton-avatar"></div>
+                                    <div class="wa-skeleton-lines">
+                                        <div class="wa-skeleton-line short"></div>
+                                        <div class="wa-skeleton-line long"></div>
+                                    </div>
+                                </div>`).join('')}
+                            </div>
                         </div>
                     </div>
                 </div>
             </div>`;
 
-        // Note: WhatsApp chats will be loaded via checkWhatsAppStatus()
+        // Auto-check WhatsApp status on page load
+        this.waCheckStatus();
+
+        // Note: WhatsApp chats will be loaded via waCheckStatus()
 
         // Team Management Section (Admin Only)
 
@@ -9367,7 +9402,7 @@ class SocialMediaHub {
         } else if (page === 'instagram') {
             this.checkIgLoginStatus();
         } else if (page === 'whatsapp') {
-            await this.checkWhatsAppStatus();
+            await this.waCheckStatus();
         } else if (page === 'telegram') {
             this.checkTelegramStatus();
         } else if (page === 'team') {
@@ -10526,905 +10561,858 @@ class SocialMediaHub {
         }
     }
 
-    // ============= WHATSAPP METHODS =============
-    async initWhatsApp() {
-        const userData = JSON.parse(localStorage.getItem('octobot_user') || '{}');
-        const userId = userData.id;
-        if (!userId) return;
+    // ============= WHATSAPP METHODS (Professional UI) =============
 
-        const statusDiv = document.getElementById('whatsappStatus');
-        const qrDiv = document.getElementById('whatsappQrCode');
-        const btn = document.getElementById('whatsappConnectBtn');
-
-        btn.disabled = true;
-        btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> جاري الاتصال...';
-        statusDiv.innerHTML = '';
-
-        try {
-            await fetch(`${this.API_URL}/api/whatsapp/${userId}/init`, { method: 'POST' });
-            this.pollWhatsAppStatus(userId);
-        } catch (err) {
-            statusDiv.innerHTML = '<p style="color:var(--error);">فشل في بدء الاتصال</p>';
-            btn.disabled = false;
-            btn.innerHTML = '<i class="fab fa-whatsapp"></i> ربط واتساب';
-        }
-    }
-
-    async connectWhatsApp() {
-        const userData = JSON.parse(localStorage.getItem('octobot_user') || '{}');
-        const userId = userData.id;
-        if (!userId) return;
-
-        const btn = document.getElementById('whatsappConnectBtn');
-        const statusDiv = document.getElementById('whatsappStatus');
-
-        btn.disabled = true;
-        btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> جاري الاتصال...';
-        statusDiv.innerHTML = '';
-
-        try {
-            await fetch(`${this.API_URL}/api/whatsapp/${userId}/init`, { method: 'POST' });
-            this.pollWhatsAppStatus(userId);
-        } catch (err) {
-            statusDiv.innerHTML = '<p style="color:var(--error);">فشل في بدء الاتصال</p>';
-            btn.disabled = false;
-            btn.innerHTML = '<i class="fab fa-whatsapp"></i> ربط واتساب';
-        }
-    }
-
-    async pollWhatsAppStatus(userId) {
-        const statusDiv = document.getElementById('whatsappStatus');
-        const qrDiv = document.getElementById('whatsappQrCode');
-        const qrSection = document.getElementById('whatsappQrSection');
-        const inboxSection = document.getElementById('whatsappInbox');
-        const btn = document.getElementById('whatsappConnectBtn');
-
-        const check = async () => {
-            try {
-                const response = await fetch(`${this.API_URL}/api/whatsapp/${userId}/status`);
-                const data = await response.json();
-
-                if (data.status === 'connected') {
-                    qrSection.style.display = 'none';
-                    inboxSection.style.display = 'block';
-                    this.loadWhatsAppChats(userId);
-                    return; // Stop polling
-                } else if (data.qrCode) {
-                    qrDiv.innerHTML = `<img src="${data.qrCode}" style="max-width:256px;border-radius:8px;">`;
-                    statusDiv.innerHTML = '<p style="color:var(--warning);">📱 امسح الكود بواتساب</p>';
-                } else if (data.status === 'initializing') {
-                    statusDiv.innerHTML = '<p>⏳ جاري التهيئة...</p>';
-                }
-
-                setTimeout(check, 2000);
-            } catch (err) {
-                statusDiv.innerHTML = '<p style="color:var(--error);">خطأ في التحقق</p>';
-            }
+    // Get auth headers for API calls
+    _waHeaders() {
+        const token = localStorage.getItem('octobot_token');
+        return {
+            'Authorization': `Bearer ${token}`,
+            'Content-Type': 'application/json'
         };
-
-        check();
     }
 
-    async checkWhatsAppStatus() {
-        const userData = JSON.parse(localStorage.getItem('octobot_user') || '{}');
-        const userId = userData.id;
-        if (!userId) return;
-
-        const statusDiv = document.getElementById('whatsappStatus');
-        const qrSection = document.getElementById('whatsappQrSection');
-        const inboxSection = document.getElementById('whatsappInbox');
-        const btn = document.getElementById('whatsappConnectBtn');
-
-        // Show loading state while checking
-        statusDiv.innerHTML = '<p>⏳ جاري التحقق من حالة الاتصال...</p>';
-
-        // Clear any cached data to ensure fresh messages from WhatsApp
-        this.waCachedChats = null;
-        this.waMessagesData = [];
-
+    // Check WhatsApp connection status on page load
+    async waCheckStatus() {
         try {
-            const response = await fetch(`${this.API_URL}/api/whatsapp/${userId}/status`);
-            const data = await response.json();
+            console.log('[WA UI] Checking status...');
+            const res = await fetch(`${this.API_URL}/api/whatsapp/status`, { headers: this._waHeaders() });
+            const data = await res.json();
+            console.log('[WA UI] Status response:', JSON.stringify(data));
 
             if (data.status === 'connected') {
-                // Already connected - show inbox immediately
-                qrSection.style.display = 'none';
-                inboxSection.style.display = 'block';
-                this.loadWhatsAppChats(userId);
+                console.log('[WA UI] Connected! Showing connected state and loading chats...');
+                this._waShowConnected(data.account);
+                this.waLoadChats();
+            } else if (data.status === 'authenticating') {
+                // Authenticated but stores still loading — show connecting state and retry
+                console.log('[WA UI] Authenticating... stores loading, retrying in 2s');
+                const text = document.getElementById('waStatusText');
+                if (text) text.textContent = 'جاري الاتصال...';
+                const dot = document.getElementById('waStatusDot');
+                if (dot) { dot.classList.remove('connected'); dot.style.background = '#f59e0b'; }
+                setTimeout(() => this.waCheckStatus(), 2000);
+            } else if (data.status === 'waiting_qr' && data.qrCode) {
+                console.log('[WA UI] QR code available, showing QR...');
+                this._waShowQr(data.qrCode);
+            } else if (data.qrCode) {
+                console.log('[WA UI] QR code found in response, showing QR...');
+                this._waShowQr(data.qrCode);
             } else {
-                // Not connected - try to auto-initialize (LocalAuth will restore session if exists)
-                statusDiv.innerHTML = '<p>🔄 جاري إعادة الاتصال...</p>';
-                btn.disabled = true;
-
-                try {
-                    await fetch(`${this.API_URL}/api/whatsapp/${userId}/init`, { method: 'POST' });
-                    // Poll for status (will auto-connect if LocalAuth session exists)
-                    this.pollWhatsAppStatus(userId);
-                } catch (initErr) {
-                    statusDiv.innerHTML = '<p style="color:var(--text-secondary);">اضغط على زر الاتصال لربط واتساب</p>';
-                    btn.disabled = false;
-                    btn.innerHTML = '<i class="fab fa-whatsapp"></i> ربط واتساب';
-                }
+                console.log('[WA UI] Disconnected state');
+                this._waShowDisconnected();
             }
         } catch (err) {
-            console.log('WhatsApp status check failed, trying to init...');
-            // Try to initialize anyway
-            try {
-                await fetch(`${this.API_URL}/api/whatsapp/${userId}/init`, { method: 'POST' });
-                this.pollWhatsAppStatus(userId);
-            } catch (initErr) {
-                statusDiv.innerHTML = '<p style="color:var(--text-secondary);">اضغط على زر الاتصال لربط واتساب</p>';
-            }
+            console.error('[WA UI] Status check error:', err);
+            this._waShowDisconnected();
         }
     }
 
-    async loadWhatsAppChats(userId, showLoading = true) {
-        const inbox = document.getElementById('whatsappInbox');
+    // Connect to WhatsApp
+    async waConnect() {
+        const btn = document.getElementById('waConnectBtn');
+        const qrBox = document.getElementById('waQrBox');
+        const qrLoading = document.getElementById('waQrLoading');
+        const qrImg = document.getElementById('waQrImg');
 
-        // Only show loading spinner if no cached data and showLoading is true
-        if (showLoading && !this.waCachedChats) {
-            inbox.innerHTML = `
-                <div style="padding:16px;border-bottom:1px solid var(--border-color);display:flex;justify-content:space-between;align-items:center;">
-                    <h3><i class="fab fa-whatsapp" style="color:#25D366;"></i> المحادثات</h3>
-                    <button onclick="app.logoutWhatsApp('${userId}')" class="btn btn-secondary" style="font-size:12px;padding:8px 12px;">
-                        <i class="fas fa-sign-out-alt"></i> قطع الاتصال
-                    </button>
-                </div>
-                <div id="whatsappChatsList"><div class="loading-spinner"><div class="spinner"></div></div></div>`;
-        } else if (!document.getElementById('whatsappChatsList')) {
-            // Container doesn't exist, create it (but use cached data immediately)
-            inbox.innerHTML = `
-                <div style="padding:16px;border-bottom:1px solid var(--border-color);display:flex;justify-content:space-between;align-items:center;">
-                    <h3><i class="fab fa-whatsapp" style="color:#25D366;"></i> المحادثات</h3>
-                    <button onclick="app.logoutWhatsApp('${userId}')" class="btn btn-secondary" style="font-size:12px;padding:8px 12px;">
-                        <i class="fas fa-sign-out-alt"></i> قطع الاتصال
-                    </button>
-                </div>
-                <div id="whatsappChatsList"></div>`;
+        btn.disabled = true;
+        btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> جاري الاتصال...';
 
-            // Show cached data immediately while fetching fresh data
-            if (this.waCachedChats && this.waCachedChats.length > 0) {
-                this.renderWaChatsList(this.waCachedChats);
+        // Show QR box with loading state
+        qrBox.style.display = 'block';
+        qrLoading.style.display = 'flex';
+        qrImg.style.display = 'none';
+
+        // Update status
+        document.getElementById('waStatusText').textContent = 'جاري الاتصال...';
+
+        try {
+            const res = await fetch(`${this.API_URL}/api/whatsapp/connect`, {
+                method: 'POST',
+                headers: this._waHeaders()
+            });
+            const data = await res.json();
+
+            // Join Socket.IO room for real-time updates
+            if (window.socket) {
+                const userData = JSON.parse(localStorage.getItem('octobot_user') || '{}');
+                window.socket.emit('join-room', `wa-${userData.id}`);
             }
+
+            // Start polling for QR code / connection status
+            this._waStartQrPolling();
+        } catch (err) {
+            console.error('[WA UI] Connect error:', err);
+            btn.disabled = false;
+            btn.innerHTML = '<i class="fab fa-whatsapp"></i> ربط واتساب';
+            qrBox.style.display = 'none';
+            document.getElementById('waStatusText').textContent = 'فشل الاتصال';
+        }
+    }
+
+    // Poll for QR code and connection status
+    _waStartQrPolling() {
+        this._waStopQrPolling();
+        this._waQrPollTimer = setInterval(async () => {
+            try {
+                const res = await fetch(`${this.API_URL}/api/whatsapp/status`, { headers: this._waHeaders() });
+                const data = await res.json();
+
+                if (data.status === 'connected' || data.ready) {
+                    this._waStopQrPolling();
+                    this._waShowConnected(data.account);
+                    this.waLoadChats();
+                } else if (data.qrCode) {
+                    this._waShowQr(data.qrCode);
+                }
+            } catch (err) {
+                // Silent retry
+            }
+        }, 2500);
+    }
+
+    _waStopQrPolling() {
+        if (this._waQrPollTimer) {
+            clearInterval(this._waQrPollTimer);
+            this._waQrPollTimer = null;
+        }
+    }
+
+    // Show QR code
+    _waShowQr(qrCode) {
+        const qrBox = document.getElementById('waQrBox');
+        const qrLoading = document.getElementById('waQrLoading');
+        const qrImg = document.getElementById('waQrImg');
+
+        if (qrBox) qrBox.style.display = 'block';
+        if (qrLoading) qrLoading.style.display = 'none';
+        if (qrImg) {
+            qrImg.src = qrCode;
+            qrImg.style.display = 'block';
+        }
+        document.getElementById('waStatusText').textContent = '📱 امسح رمز QR';
+    }
+
+    // Show connected state
+    _waShowConnected(account) {
+        const dot = document.getElementById('waStatusDot');
+        const text = document.getElementById('waStatusText');
+        const name = document.getElementById('waAccountName');
+        const actions = document.getElementById('waStatusActions');
+        const qrScreen = document.getElementById('waQrScreen');
+        const chatLayout = document.getElementById('waChatLayout');
+
+        if (dot) dot.classList.add('connected');
+        if (text) text.textContent = 'متصل';
+        if (name && account) name.textContent = account.pushname || account.name || '';
+        if (actions) {
+            actions.innerHTML = `
+                <button class="wa-btn wa-btn-disconnect" onclick="app.waDisconnect()">
+                    <i class="fas fa-sign-out-alt"></i> قطع الاتصال
+                </button>`;
+        }
+        if (qrScreen) qrScreen.style.display = 'none';
+        if (chatLayout) chatLayout.style.display = 'flex';
+
+        // Setup Socket.IO listeners
+        this._waSetupSocketListeners();
+    }
+
+    // Show disconnected state
+    _waShowDisconnected() {
+        const dot = document.getElementById('waStatusDot');
+        const text = document.getElementById('waStatusText');
+        const name = document.getElementById('waAccountName');
+        const actions = document.getElementById('waStatusActions');
+        const qrScreen = document.getElementById('waQrScreen');
+        const chatLayout = document.getElementById('waChatLayout');
+
+        if (dot) dot.classList.remove('connected');
+        if (text) text.textContent = 'غير متصل';
+        if (name) name.textContent = '';
+        if (actions) {
+            actions.innerHTML = `
+                <button class="wa-btn wa-btn-connect" id="waConnectBtn" onclick="app.waConnect()">
+                    <i class="fab fa-whatsapp"></i> ربط واتساب
+                </button>`;
+        }
+        if (qrScreen) qrScreen.style.display = 'flex';
+        if (chatLayout) chatLayout.style.display = 'none';
+
+        // Hide QR box
+        const qrBox = document.getElementById('waQrBox');
+        if (qrBox) qrBox.style.display = 'none';
+    }
+
+    // Disconnect WhatsApp
+    async waDisconnect() {
+        if (!confirm('هل تريد قطع اتصال واتساب؟')) return;
+
+        try {
+            await fetch(`${this.API_URL}/api/whatsapp/disconnect`, {
+                method: 'POST',
+                headers: this._waHeaders()
+            });
+        } catch (err) {
+            console.error('[WA UI] Disconnect error:', err);
+        }
+
+        this._waStopQrPolling();
+        this._waStopChatPolling();
+        this._waStopMsgPolling();
+        this.currentWaChat = null;
+        this._waCachedChats = null;
+        this._waShowDisconnected();
+    }
+
+    // _waSetupSocketListeners is defined below (single unified version)
+
+    // Load all chats (with retry for post-connection sync delay)
+    async waLoadChats(retryCount = 0) {
+        const list = document.getElementById('waChatList');
+        console.log('[WA UI] waLoadChats called, list element:', !!list, 'retry:', retryCount);
+        if (!list) return;
+
+        // Show loading on first call
+        if (retryCount === 0) {
+            list.innerHTML = `
+                <div style="text-align:center;padding:40px;color:var(--wa-text-secondary);">
+                    <i class="fas fa-spinner fa-spin" style="font-size:24px;margin-bottom:12px;display:block;"></i>
+                    جاري تحميل المحادثات...
+                </div>`;
         }
 
         try {
-            const response = await fetch(`${this.API_URL}/api/whatsapp/${userId}/chats`);
-            const data = await response.json();
-
-            const list = document.getElementById('whatsappChatsList');
-            if (!list) return;
+            console.log('[WA UI] Fetching chats from API...');
+            const res = await fetch(`${this.API_URL}/api/whatsapp/chats`, { headers: this._waHeaders() });
+            const data = await res.json();
+            console.log('[WA UI] Chats response:', data.chats?.length || 0, 'chats', data.error || '');
 
             if (!data.chats || data.chats.length === 0) {
-                list.innerHTML = '<p style="text-align:center;padding:20px;color:var(--text-secondary);">لا توجد محادثات</p>';
+                // WhatsApp Web needs time to sync after connecting — retry up to 4 times
+                if (retryCount < 4) {
+                    const delay = (retryCount + 1) * 2000; // 2s, 4s, 6s, 8s
+                    console.log(`[WA UI] No chats yet, retrying in ${delay}ms (attempt ${retryCount + 1}/4)...`);
+                    list.innerHTML = `
+                        <div style="text-align:center;padding:40px;color:var(--wa-text-secondary);">
+                            <i class="fas fa-spinner fa-spin" style="font-size:24px;margin-bottom:12px;display:block;"></i>
+                            جاري مزامنة المحادثات... (${retryCount + 1}/4)
+                        </div>`;
+                    setTimeout(() => this.waLoadChats(retryCount + 1), delay);
+                    return;
+                }
+                list.innerHTML = '<div style="text-align:center;padding:40px;color:var(--wa-text-secondary);">لا توجد محادثات</div>';
                 return;
             }
 
-            // Store userId and cache chats for later use
-            this.waInboxUserId = userId;
-            this.waCachedChats = data.chats;
+            this._waCachedChats = data.chats;
+            this._waRenderChatList(data.chats);
+            console.log('[WA UI] Rendered', data.chats.length, 'chats');
 
-            // Render the chats list
-            this.renderWaChatsList(data.chats);
-
-            // Start SSE for real-time inbox updates (only if not already running)
-            if (!this.waInboxEventSource) {
-                this.startWaInboxSSE(userId);
-            }
+            // Start polling for chat list updates
+            this._waStartChatPolling();
         } catch (err) {
-            const list = document.getElementById('whatsappChatsList');
-            if (list && !this.waCachedChats) {
-                list.innerHTML = '<p style="color:var(--error);padding:20px;">فشل تحميل المحادثات</p>';
+            console.error('[WA UI] Load chats error:', err);
+            if (retryCount < 4) {
+                setTimeout(() => this.waLoadChats(retryCount + 1), 3000);
+                return;
             }
+            list.innerHTML = '<div style="text-align:center;padding:40px;color:var(--wa-danger);">فشل تحميل المحادثات</div>';
         }
     }
 
-    // Render WhatsApp chats list
-    renderWaChatsList(chats) {
-        const list = document.getElementById('whatsappChatsList');
+    // Render chat list items (with pinned support)
+    _waRenderChatList(chats) {
+        const list = document.getElementById('waChatList');
         if (!list) return;
 
-        list.innerHTML = chats.slice(0, 50).map(c => {
-            const chatName = (c.name || c.id || 'محادثة').replace(/'/g, "\\'");
-
-            // Profile picture placeholder with data attribute for lazy loading
-            const avatarHtml = `<div class="wa-avatar" data-chat-id="${c.id}" style="width:45px;height:45px;border-radius:50%;background:linear-gradient(135deg,#25D366,#128C7E);display:flex;align-items:center;justify-content:center;color:white;font-size:18px;font-weight:600;overflow:hidden;">
-                       ${c.isGroup ? '<i class="fas fa-users"></i>' : (c.name ? c.name.charAt(0).toUpperCase() : '?')}
-                   </div>`;
+        list.innerHTML = chats.slice(0, 60).map(chat => {
+            const initial = (chat.name || '?').charAt(0).toUpperCase();
+            const isGroup = chat.isGroup;
+            const lastMsg = chat.lastMessage || '';
+            const time = chat.timestamp ? this._waFormatTime(chat.timestamp) : '';
+            const unread = chat.unreadCount || 0;
+            const chatId = (chat.id || '').replace(/'/g, "\\'");
+            const chatName = (chat.name || 'محادثة').replace(/'/g, "\\'");
+            const isActive = this.currentWaChat === chat.id;
+            const isPinned = chat.pinned;
 
             return `
-            <div class="conversation-item" data-chat-id="${c.id}" style="padding:12px;border-bottom:1px solid var(--border-color);cursor:pointer;transition:background 0.2s;" 
-                 onclick="app.openWhatsAppChat('${c.id}', '${chatName}')"
-                 onmouseover="this.style.background='rgba(37,211,102,0.1)'"
-                 onmouseout="this.style.background='transparent'">
-                <div style="display:flex;align-items:center;gap:10px;">
-                    ${avatarHtml}
-                    <div style="flex:1;min-width:0;">
-                        <div style="font-weight:600;display:flex;align-items:center;gap:6px;">
-                            ${c.name || 'غير معروف'}
-                            ${c.isGroup ? '<i class="fas fa-users" style="font-size:10px;color:var(--text-secondary);"></i>' : ''}
-                        </div>
-                        <small style="color:var(--text-secondary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:200px;display:block;">${c.lastMessage || ''}</small>
+            <div class="wa-chat-item${isActive ? ' active' : ''}${isPinned ? ' pinned' : ''}" data-chat-id="${chat.id}" onclick="app.waOpenChat('${chatId}', '${chatName}', ${isGroup})">
+                <div class="wa-chat-avatar${isGroup ? ' group' : ''}">
+                    ${isGroup ? '<i class="fas fa-users"></i>' : initial}
+                </div>
+                <div class="wa-chat-info">
+                    <div class="wa-chat-info-top">
+                        <span class="wa-chat-name">${isPinned ? '<i class="fas fa-thumbtack" style="font-size:10px;color:var(--wa-text-muted);margin-left:4px;"></i> ' : ''}${chat.name || 'غير معروف'}</span>
+                        <span class="wa-chat-time${unread > 0 ? ' unread' : ''}">${time}</span>
                     </div>
-                    <div style="display:flex;flex-direction:column;align-items:flex-end;gap:4px;">
-                        ${c.timestamp ? `<small style="color:var(--text-secondary);font-size:11px;">${this.formatWaTime(c.timestamp)}</small>` : ''}
-                        ${c.unreadCount > 0 ? `<span class="wa-unread-badge" style="background:#25D366;color:white;padding:2px 8px;border-radius:12px;font-size:12px;min-width:20px;text-align:center;">${c.unreadCount}</span>` : ''}
+                    <div class="wa-chat-info-bottom">
+                        <span class="wa-chat-preview">${lastMsg}</span>
+                        ${unread > 0 ? `<span class="wa-unread-badge">${unread}</span>` : ''}
                     </div>
                 </div>
-            </div>
-        `;
+            </div>`;
         }).join('');
-
-        // Lazy load profile pictures in background
-        this.loadChatProfilePictures(chats.slice(0, 50));
     }
 
-    // Lazy load profile pictures for chat list
-    async loadChatProfilePictures(chats) {
-        const userData = JSON.parse(localStorage.getItem('octobot_user') || '{}');
-        const userId = userData.id;
-        if (!userId) return;
-
-        // Load profile pictures one by one to not overload
-        for (const chat of chats) {
-            try {
-                const response = await fetch(`${this.API_URL}/api/whatsapp/${userId}/profile-pic/${encodeURIComponent(chat.id)}`);
-                const data = await response.json();
-
-                if (data.profilePicUrl) {
-                    const avatarEl = document.querySelector(`.wa-avatar[data-chat-id="${chat.id}"]`);
-                    if (avatarEl) {
-                        const fallback = chat.isGroup ? '👥' : (chat.name ? chat.name.charAt(0).toUpperCase() : '?');
-                        avatarEl.innerHTML = `<img src="${data.profilePicUrl}" style="width:100%;height:100%;object-fit:cover;" onerror="this.outerHTML='${fallback}'">`;
-                    }
-                }
-            } catch (e) {
-                // Ignore errors for profile pics
-            }
+    // Filter chats by search query
+    waFilterChats(query) {
+        if (!this._waCachedChats) return;
+        if (!query) {
+            this._waRenderChatList(this._waCachedChats);
+            return;
         }
+        const filtered = this._waCachedChats.filter(c =>
+            (c.name || '').toLowerCase().includes(query.toLowerCase()) ||
+            (c.lastMessage || '').toLowerCase().includes(query.toLowerCase())
+        );
+        this._waRenderChatList(filtered);
     }
 
-    async logoutWhatsApp(userId) {
-        if (!confirm('هل تريد قطع اتصال واتساب؟')) return;
-
-        this.stopWaSSE();
-        this.stopWaInboxSSE();
-        this.stopWaPolling();
-        this.stopWaInboxPolling();
-
-        await fetch(`${this.API_URL}/api/whatsapp/${userId}/logout`, { method: 'POST' });
-        document.getElementById('whatsappQrSection').style.display = 'block';
-        document.getElementById('whatsappInbox').style.display = 'none';
-        document.getElementById('whatsappQrCode').innerHTML = '';
-        document.getElementById('whatsappStatus').innerHTML = '';
-        document.getElementById('whatsappConnectBtn').disabled = false;
-        document.getElementById('whatsappConnectBtn').innerHTML = '<i class="fab fa-whatsapp"></i> ربط واتساب';
-    }
-
-    // Format WhatsApp timestamp
-    formatWaTime(timestamp) {
-        if (!timestamp) return '';
-        const date = new Date(timestamp * 1000);
-        const now = new Date();
-        const isToday = date.toDateString() === now.toDateString();
-
-        if (isToday) {
-            return date.toLocaleTimeString('ar-EG', { hour: '2-digit', minute: '2-digit' });
-        }
-        return date.toLocaleDateString('ar-EG', { day: 'numeric', month: 'short' });
-    }
-
-    // Open a WhatsApp chat
-    async openWhatsAppChat(chatId, chatName) {
-        // Stop inbox SSE when entering a chat
-        this.stopWaInboxSSE();
-
+    // Open a chat
+    async waOpenChat(chatId, chatName, isGroup = false) {
         this.currentWaChat = chatId;
-        this.currentWaChatName = chatName;
-        this.waMessagesData = [];
+        this._waCurrentChatName = chatName;
 
-        const inbox = document.getElementById('whatsappInbox');
-        const userData = JSON.parse(localStorage.getItem('octobot_user') || '{}');
-        const userId = userData.id;
+        // Highlight active chat in list
+        document.querySelectorAll('.wa-chat-item').forEach(el => {
+            el.classList.toggle('active', el.dataset.chatId === chatId);
+        });
 
-        // Show loading first
-        inbox.innerHTML = '<div class="loading-spinner"><div class="spinner"></div></div>';
+        // Show chat header
+        const header = document.getElementById('waChatHeader');
+        const emptyChat = document.getElementById('waEmptyChat');
+        const msgContainer = document.getElementById('waMessagesContainer');
+        const inputArea = document.getElementById('waInputArea');
+        const headerAvatar = document.getElementById('waChatHeaderAvatar');
+        const headerName = document.getElementById('waChatHeaderName');
+        const headerStatus = document.getElementById('waChatHeaderStatus');
 
-        // Fetch contact info (profile pic, phone number)
-        let contactInfo = { name: chatName, phoneNumber: chatId.replace('@c.us', ''), profilePicUrl: null };
-        try {
-            const infoRes = await fetch(`${this.API_URL}/api/whatsapp/${userId}/chat-info/${encodeURIComponent(chatId)}`);
-            const infoData = await infoRes.json();
-            if (!infoData.error) {
-                contactInfo = infoData;
-            }
-        } catch (e) {
-            console.log('Could not fetch contact info');
+        if (emptyChat) emptyChat.style.display = 'none';
+        if (header) header.style.display = 'flex';
+        if (msgContainer) msgContainer.style.display = 'flex';
+        if (inputArea) inputArea.style.display = 'flex';
+
+        // Set header info
+        const initial = (chatName || '?').charAt(0).toUpperCase();
+        if (headerAvatar) {
+            headerAvatar.innerHTML = isGroup ? '<i class="fas fa-users"></i>' : initial;
+            if (isGroup) headerAvatar.style.background = 'linear-gradient(135deg, #3B82F6, #6366F1)';
+            else headerAvatar.style.background = '';
+        }
+        if (headerName) headerName.textContent = chatName;
+        if (headerStatus) headerStatus.textContent = isGroup ? 'مجموعة' : 'جهة اتصال';
+
+        // Show loading in messages
+        if (msgContainer) {
+            msgContainer.innerHTML = '<div class="wa-messages-loading"><div class="wa-spinner"></div> جاري تحميل الرسائل...</div>';
         }
 
-        // Format phone number for display
-        const displayPhone = contactInfo.phoneNumber ? `+${contactInfo.phoneNumber}` : '';
-
-        // Show chat view with contact info
-        inbox.innerHTML = `
-            <div id="waChatView" style="display:flex;flex-direction:column;height:100%;max-height:calc(100vh - 100px);">
-                <!-- Chat Header -->
-                <div style="padding:12px 16px;background:linear-gradient(135deg,#25D366,#128C7E);display:flex;align-items:center;gap:12px;">
-                    <button onclick="app.closeWhatsAppChat()" style="background:rgba(255,255,255,0.2);border:none;color:white;width:36px;height:36px;border-radius:50%;cursor:pointer;display:flex;align-items:center;justify-content:center;">
-                        <i class="fas fa-arrow-right"></i>
-                    </button>
-                    ${contactInfo.profilePicUrl
-                ? `<img src="${contactInfo.profilePicUrl}" style="width:45px;height:45px;border-radius:50%;border:2px solid rgba(255,255,255,0.3);object-fit:cover;" onerror="this.style.display='none';this.nextElementSibling.style.display='flex';">
-                           <div style="width:45px;height:45px;border-radius:50%;background:rgba(255,255,255,0.2);display:none;align-items:center;justify-content:center;color:white;font-weight:600;font-size:18px;">${(contactInfo.name || '?').charAt(0).toUpperCase()}</div>`
-                : `<div style="width:45px;height:45px;border-radius:50%;background:rgba(255,255,255,0.2);display:flex;align-items:center;justify-content:center;color:white;font-weight:600;font-size:18px;">${(contactInfo.name || '?').charAt(0).toUpperCase()}</div>`
-            }
-                    <div style="flex:1;color:white;">
-                        <div style="font-weight:600;font-size:15px;">${contactInfo.name || 'محادثة'}</div>
-                        <small style="opacity:0.9;font-size:12px;direction:ltr;display:block;">${displayPhone}</small>
-                    </div>
-                    <button onclick="app.refreshWaMessages()" style="background:rgba(255,255,255,0.2);border:none;color:white;width:36px;height:36px;border-radius:50%;cursor:pointer;">
-                        <i class="fas fa-sync-alt"></i>
-                    </button>
-                </div>
-                
-                <!-- Messages Container with WhatsApp-style doodle background -->
-                <div id="waMessages" style="flex:1;overflow-y:auto;padding:16px;background-color:#ECE5DD;background-image:url('data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 200 200%22%3E%3Cdefs%3E%3Cstyle%3E.d%7Bfill:%23d4cbc2;opacity:0.4%7D%3C/style%3E%3C/defs%3E%3Cpath class=%22d%22 d=%22M20,20 L25,15 L30,20 L25,25 Z%22/%3E%3Ccircle class=%22d%22 cx=%2250%22 cy=%2230%22 r=%224%22/%3E%3Cpath class=%22d%22 d=%22M80,15 Q85,25 90,15%22 fill=%22none%22 stroke=%22%23d4cbc2%22 stroke-width=%222%22 opacity=%220.4%22/%3E%3Crect class=%22d%22 x=%22110%22 y=%2218%22 width=%228%22 height=%228%22 rx=%221%22/%3E%3Cpath class=%22d%22 d=%22M150,20 L155,28 L145,28 Z%22/%3E%3Ccircle class=%22d%22 cx=%22180%22 cy=%2225%22 r=%223%22/%3E%3Cpath class=%22d%22 d=%22M15,60 L20,55 L25,60%22 fill=%22none%22 stroke=%22%23d4cbc2%22 stroke-width=%222%22 opacity=%220.4%22/%3E%3Crect class=%22d%22 x=%2245%22 y=%2255%22 width=%2210%22 height=%226%22 rx=%221%22/%3E%3Cpath class=%22d%22 d=%22M85,50 Q90,60 95,50%22 fill=%22none%22 stroke=%22%23d4cbc2%22 stroke-width=%222%22 opacity=%220.4%22/%3E%3Ccircle class=%22d%22 cx=%22120%22 cy=%2260%22 r=%225%22/%3E%3Cpath class=%22d%22 d=%22M150,55 L158,55 L154,63 Z%22/%3E%3Crect class=%22d%22 x=%22175%22 y=%2252%22 width=%227%22 height=%2210%22 rx=%221%22/%3E%3Cpath class=%22d%22 d=%22M25,95 L30,90 L35,95 L30,100 Z%22/%3E%3Ccircle class=%22d%22 cx=%2260%22 cy=%2295%22 r=%224%22/%3E%3Cpath class=%22d%22 d=%22M90,88 L95,95 L85,95 Z%22/%3E%3Crect class=%22d%22 x=%22115%22 y=%2290%22 width=%229%22 height=%229%22 rx=%222%22/%3E%3Cpath class=%22d%22 d=%22M145,90 Q150,100 155,90%22 fill=%22none%22 stroke=%22%23d4cbc2%22 stroke-width=%222%22 opacity=%220.4%22/%3E%3Ccircle class=%22d%22 cx=%22180%22 cy=%2292%22 r=%223%22/%3E%3Crect class=%22d%22 x=%2218%22 y=%22125%22 width=%228%22 height=%228%22 rx=%221%22/%3E%3Cpath class=%22d%22 d=%22M50,125 L55,133 L45,133 Z%22/%3E%3Ccircle class=%22d%22 cx=%2285%22 cy=%22130%22 r=%224%22/%3E%3Cpath class=%22d%22 d=%22M115,125 L120,120 L125,125%22 fill=%22none%22 stroke=%22%23d4cbc2%22 stroke-width=%222%22 opacity=%220.4%22/%3E%3Crect class=%22d%22 x=%22148%22 y=%22122%22 width=%2210%22 height=%227%22 rx=%221%22/%3E%3Cpath class=%22d%22 d=%22M180,125 L185,130 L180,135 L175,130 Z%22/%3E%3Cpath class=%22d%22 d=%22M20,165 Q25,175 30,165%22 fill=%22none%22 stroke=%22%23d4cbc2%22 stroke-width=%222%22 opacity=%220.4%22/%3E%3Ccircle class=%22d%22 cx=%2255%22 cy=%22170%22 r=%224%22/%3E%3Crect class=%22d%22 x=%2282%22 y=%22165%22 width=%228%22 height=%228%22 rx=%221%22/%3E%3Cpath class=%22d%22 d=%22M120,162 L125,170 L115,170 Z%22/%3E%3Ccircle class=%22d%22 cx=%22150%22 cy=%22168%22 r=%223%22/%3E%3Cpath class=%22d%22 d=%22M178,165 L183,160 L188,165%22 fill=%22none%22 stroke=%22%23d4cbc2%22 stroke-width=%222%22 opacity=%220.4%22/%3E%3C/svg%3E');background-size:200px;">
-                    <div class="loading-spinner"><div class="spinner"></div></div>
-                </div>
-                
-                <!-- Message Input -->
-                <form onsubmit="app.sendWhatsAppMessage(event)" style="padding:12px;background:var(--bg-card);border-top:1px solid var(--border-color);display:flex;gap:8px;">
-                    <input type="text" id="waMessageInput" placeholder="اكتب رسالة..." 
-                           style="flex:1;padding:12px 16px;border:1px solid var(--border-color);border-radius:24px;background:var(--bg-main);color:var(--text-primary);font-size:14px;outline:none;"
-                           autocomplete="off">
-                    <button type="submit" style="width:44px;height:44px;border-radius:50%;background:#25D366;border:none;color:white;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:transform 0.2s;">
-                        <i class="fas fa-paper-plane"></i>
-                    </button>
-                </form>
-            </div>
-        `;
+        // Mobile: show chat area
+        const layout = document.getElementById('waChatLayout');
+        if (layout) layout.classList.add('chat-open');
 
         // Load messages
-        await this.loadWhatsAppMessages(true);
+        await this._waLoadMessages(chatId);
 
-        // Setup scroll listener for loading older messages
-        this.setupWaMessagesScroll();
+        // Start message polling for real-time updates (fallback for Socket.IO)
+        this._waStartMsgPolling(chatId);
 
-        // Start SSE for real-time message updates (no scroll jumping)
-        this.startWaSSE();
+        // Focus input
+        const input = document.getElementById('waMessageInput');
+        if (input) input.focus();
     }
 
-    // Load WhatsApp messages
-    async loadWhatsAppMessages(showLoading = false, loadOlder = false) {
-        const userData = JSON.parse(localStorage.getItem('octobot_user') || '{}');
-        const userId = userData.id;
-        if (!userId || !this.currentWaChat) return;
-
-        const container = document.getElementById('waMessages');
+    // Load messages for a chat
+    async _waLoadMessages(chatId) {
+        const container = document.getElementById('waMessagesContainer');
         if (!container) return;
 
-        // Initialize pagination state if not exists
-        if (!this.waMessagesPagination) {
-            this.waMessagesPagination = {
-                offset: 0,
-                hasMore: true,
-                loading: false
-            };
-        }
-
-        // Prevent duplicate loading
-        if (this.waMessagesPagination.loading) return;
-
-        // Save scroll position BEFORE any changes
-        const previousScrollTop = container.scrollTop;
-        const previousScrollHeight = container.scrollHeight;
-
-        // Check if user is at the very bottom (within 50px)
-        const isAtBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 50;
-
-        if (showLoading && !loadOlder) {
-            container.innerHTML = '<div class="loading-spinner"><div class="spinner"></div></div>';
-            this.waMessagesPagination = { offset: 0, hasMore: true, loading: false };
-            this.waMessagesData = [];
-        }
-
-        // Show loading indicator at top when loading older messages
-        if (loadOlder && this.waMessagesPagination.hasMore) {
-            this.waMessagesPagination.loading = true;
-            const loadingIndicator = document.createElement('div');
-            loadingIndicator.id = 'waLoadingOlder';
-            loadingIndicator.innerHTML = '<div style="text-align:center;padding:10px;"><div class="spinner" style="width:24px;height:24px;margin:0 auto;"></div><small style="color:#888;">جاري تحميل الرسائل القديمة...</small></div>';
-            container.insertBefore(loadingIndicator, container.firstChild);
-        }
-
         try {
-            // Load only 50 messages with offset for pagination
-            const offset = loadOlder ? this.waMessagesData.length : 0;
-            const response = await fetch(`${this.API_URL}/api/whatsapp/${userId}/messages/${encodeURIComponent(this.currentWaChat)}?limit=50&offset=${offset}`);
-            const data = await response.json();
+            const res = await fetch(`${this.API_URL}/api/whatsapp/chats/${encodeURIComponent(chatId)}/messages?limit=50`, {
+                headers: this._waHeaders()
+            });
+            const data = await res.json();
 
-            // Remove loading indicator
-            const loadingEl = document.getElementById('waLoadingOlder');
-            if (loadingEl) loadingEl.remove();
-
-            if (data.messages) {
-                if (loadOlder) {
-                    // Prepend older messages
-                    const newMessages = data.messages.filter(m => !this.waMessagesData.find(existing => existing.id === m.id));
-                    this.waMessagesData = [...newMessages, ...this.waMessagesData];
-                    this.waMessagesPagination.hasMore = newMessages.length >= 50;
-                } else {
-                    this.waMessagesData = data.messages;
-                    this.waMessagesPagination.hasMore = data.messages.length >= 50;
-                }
-
-                this.renderWhatsAppMessages();
-
-                // Handle scroll position
-                if (showLoading) {
-                    // First load - always scroll to bottom
-                    container.scrollTop = container.scrollHeight;
-                } else if (loadOlder) {
-                    // Loading older messages - maintain relative position
-                    const newScrollHeight = container.scrollHeight;
-                    container.scrollTop = newScrollHeight - previousScrollHeight + previousScrollTop;
-                } else if (isAtBottom) {
-                    // Polling update - only scroll to bottom if user was already at bottom
-                    container.scrollTop = container.scrollHeight;
-                }
-                // Otherwise: do nothing - preserve user's scroll position
+            if (!data.messages || data.messages.length === 0) {
+                container.innerHTML = '<div style="text-align:center;padding:40px;color:var(--wa-text-secondary);">لا توجد رسائل بعد<br><small>ابدأ المحادثة الآن!</small></div>';
+                return;
             }
+
+            this._waMessagesData = data.messages;
+            this._waRenderMessages(data.messages);
+            container.scrollTop = container.scrollHeight;
         } catch (err) {
-            console.error('Error loading WA messages:', err);
-            const loadingEl = document.getElementById('waLoadingOlder');
-            if (loadingEl) loadingEl.remove();
-
-            if (showLoading) {
-                container.innerHTML = '<p style="text-align:center;color:var(--error);padding:20px;">فشل تحميل الرسائل</p>';
-            }
-        } finally {
-            this.waMessagesPagination.loading = false;
+            console.error('[WA UI] Load messages error:', err);
+            container.innerHTML = '<div style="text-align:center;padding:40px;color:var(--wa-danger);">فشل تحميل الرسائل</div>';
         }
     }
 
-    // Setup scroll listener for infinite scroll (older messages)
-    setupWaMessagesScroll() {
-        const container = document.getElementById('waMessages');
-        if (!container || container.dataset.scrollSetup) return;
+    // Render message bubbles (with media support)
+    _waRenderMessages(messages) {
+        const container = document.getElementById('waMessagesContainer');
+        if (!container) return;
 
-        container.dataset.scrollSetup = 'true';
-        container.addEventListener('scroll', () => {
-            // When scrolled to top, load older messages
-            if (container.scrollTop < 100 && this.waMessagesPagination?.hasMore && !this.waMessagesPagination?.loading) {
-                this.loadWhatsAppMessages(false, true);
+        let lastDate = '';
+        const html = messages.map(msg => {
+            const isMe = msg.fromMe;
+            const time = this._waFormatTime(msg.timestamp);
+
+            // Date separator
+            let dateSep = '';
+            const msgDate = msg.timestamp ? new Date(msg.timestamp * 1000).toLocaleDateString('ar-EG') : '';
+            if (msgDate && msgDate !== lastDate) {
+                lastDate = msgDate;
+                dateSep = `<div class="wa-date-separator"><span>${msgDate}</span></div>`;
+            }
+
+            // Message content (with media rendering)
+            let content = '';
+            const chatId = this.currentWaChat;
+            const authToken = localStorage.getItem('octobot_token');
+            const mediaUrl = msg.hasMedia && msg.id ? `${this.API_URL}/api/whatsapp/media/${encodeURIComponent(chatId)}/${encodeURIComponent(msg.id)}?token=${encodeURIComponent(authToken)}` : null;
+
+            if (msg.type === 'image' && mediaUrl) {
+                content = `<div class="wa-media-bubble">
+                    <img src="${mediaUrl}" class="wa-media-img" loading="lazy" onclick="window.open(this.src)" alt="صورة"
+                         onerror="this.onerror=null;this.outerHTML='<div class=\\'wa-media-placeholder\\' onclick=\\'window.open(&quot;${mediaUrl}&quot;)\\'><i class=\\'fas fa-image\\'></i><span>صورة</span></div>'">
+                    ${msg.body ? `<div class="wa-media-caption" dir="auto">${msg.body}</div>` : ''}
+                </div>`;
+            } else if (msg.type === 'video' && mediaUrl) {
+                content = `<div class="wa-media-bubble">
+                    <video src="${mediaUrl}" class="wa-media-video" controls preload="metadata"
+                           onerror="this.onerror=null;this.outerHTML='<div class=\\'wa-media-placeholder\\'><i class=\\'fas fa-video\\'></i><span>فيديو</span></div>'"></video>
+                    ${msg.body ? `<div class="wa-media-caption" dir="auto">${msg.body}</div>` : ''}
+                </div>`;
+            } else if ((msg.type === 'audio' || msg.type === 'ptt') && mediaUrl) {
+                content = `<div class="wa-voice-bubble">
+                    <i class="fas fa-microphone wa-voice-icon"></i>
+                    <audio src="${mediaUrl}" class="wa-media-audio" controls preload="metadata"
+                           onerror="this.onerror=null;this.outerHTML='<span>🎤 رسالة صوتية</span>'"></audio>
+                </div>`;
+            } else if (msg.type === 'document' && mediaUrl) {
+                content = `<div class="wa-doc-bubble">
+                    <i class="fas fa-file-alt wa-doc-icon"></i>
+                    <div class="wa-doc-info">
+                        <span class="wa-doc-name">${msg.body || 'مستند'}</span>
+                        <a href="${mediaUrl}" target="_blank" class="wa-doc-download"><i class="fas fa-download"></i> تحميل</a>
+                    </div>
+                </div>`;
+            } else if (msg.type === 'sticker' && mediaUrl) {
+                content = `<img src="${mediaUrl}" class="wa-sticker-img" loading="lazy" alt="ستيكر"
+                               onerror="this.onerror=null;this.outerHTML='<div class=\\'wa-media-placeholder\\'><i class=\\'fas fa-sticky-note\\'></i><span>ستيكر</span></div>'">`;
+            } else if (msg.hasMedia) {
+                // Fallback for any media type
+                const icons = { image: 'fa-image', video: 'fa-video', audio: 'fa-microphone', ptt: 'fa-microphone', document: 'fa-file', sticker: 'fa-sticky-note' };
+                const icon = icons[msg.type] || 'fa-paperclip';
+                const labels = { image: 'صورة', video: 'فيديو', audio: 'رسالة صوتية', ptt: 'رسالة صوتية', document: 'مستند', sticker: 'ستيكر' };
+                const label = labels[msg.type] || 'ملف';
+                content = `<div class="wa-media-placeholder"><i class="fas ${icon}"></i><span>${label}</span></div>${msg.body ? `<div dir="auto">${msg.body}</div>` : ''}`;
+            } else {
+                content = (msg.body || '').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+            }
+
+            // Group sender name
+            const senderName = (!isMe && (msg.senderName || msg.author))
+                ? `<div class="wa-message-sender">${msg.senderName || msg.author?.split('@')[0] || ''}</div>`
+                : '';
+
+            // Ticks for sent messages (ack: 0=pending, 1=sent, 2=delivered, 3=read, 4=played)
+            let ticks = '';
+            if (isMe) {
+                if (msg.ack >= 3) ticks = '<span class="wa-message-ticks read"><i class="fas fa-check-double"></i></span>';
+                else if (msg.ack >= 2) ticks = '<span class="wa-message-ticks"><i class="fas fa-check-double"></i></span>';
+                else if (msg.ack >= 1) ticks = '<span class="wa-message-ticks"><i class="fas fa-check"></i></span>';
+                else ticks = '<span class="wa-message-ticks"><i class="far fa-clock"></i></span>';
+            }
+
+            return `${dateSep}
+            <div class="wa-message ${isMe ? 'outgoing' : 'incoming'}" data-msg-id="${msg.id || ''}">
+                ${senderName}
+                <div class="wa-message-text" dir="auto">${content}</div>
+                <div class="wa-message-meta">
+                    <span class="wa-message-time">${time}</span>
+                    ${ticks}
+                </div>
+            </div>`;
+        }).join('');
+
+        container.innerHTML = `<div style="display:flex;flex-direction:column;gap:2px;padding-bottom:10px;">${html}</div>`;
+    }
+
+    // Setup Socket.IO listeners for real-time updates (UNIFIED)
+    _waSetupSocketListeners() {
+        if (!window.socket) {
+            window.socket = io(); // Initialize if not exists
+        }
+
+        const userData = JSON.parse(localStorage.getItem('octobot_user') || '{}');
+        const roomName = userData.id ? `wa-${userData.id}` : null;
+
+        // Join room immediately and on every reconnection
+        if (roomName) {
+            window.socket.emit('join-room', roomName);
+            console.log('[WA UI] Joined socket room:', roomName);
+
+            // Re-join on reconnect (critical for real-time after network changes)
+            if (!window.socket._waReconnectHandler) {
+                window.socket._waReconnectHandler = true;
+                window.socket.on('connect', () => {
+                    console.log('[WA UI] Socket reconnected, re-joining room:', roomName);
+                    window.socket.emit('join-room', roomName);
+                });
+            }
+        } else {
+            console.warn('[WA UI] No user ID found, cannot join socket room');
+        }
+
+        // Remove existing listeners to avoid duplicates
+        window.socket.off('wa-new-message');
+        window.socket.off('wa-message-ack');
+        window.socket.off('wa-ready');
+        window.socket.off('wa-qr');
+
+        // New Message
+        window.socket.on('wa-new-message', (data) => {
+            console.log('[WA UI] New message received:', data);
+
+            // Update sidebar preview + reorder
+            this._waUpdateChatPreview(data.chatId, data.message, data.chat);
+
+            // If viewing this chat, append message
+            if (this.currentWaChat === data.chatId) {
+                this._waAppendMessage(data.message);
+                if (!data.message.fromMe) this.playNotificationSound();
+            } else if (!data.message.fromMe) {
+                // Not viewing this chat — notify
+                this.playNotificationSound();
+                const chatName = data.chat?.name || 'واتساب';
+                const preview = data.message.body?.substring(0, 40) || 'رسالة جديدة';
+                this.showToast(`📱 ${chatName}: ${preview}`, 'info');
+            }
+
+            // Instantly move chat to top (pinned stay above)
+            if (this._waCachedChats) {
+                const idx = this._waCachedChats.findIndex(c => c.id === data.chatId);
+                if (idx > 0) {
+                    const chat = this._waCachedChats.splice(idx, 1)[0];
+                    chat.lastMessage = data.message.body || chat.lastMessage;
+                    chat.timestamp = data.message.timestamp || Math.floor(Date.now() / 1000);
+                    // Insert after pinned chats
+                    const firstNonPinned = this._waCachedChats.findIndex(c => !c.pinned);
+                    if (chat.pinned || firstNonPinned < 0) {
+                        this._waCachedChats.unshift(chat);
+                    } else {
+                        this._waCachedChats.splice(firstNonPinned, 0, chat);
+                    }
+                    this._waRenderChatList(this._waCachedChats);
+                } else if (idx === -1 && data.chat) {
+                    // New chat not in list — add it
+                    this._waCachedChats.unshift({
+                        id: data.chatId,
+                        name: data.chat.name,
+                        isGroup: data.chat.isGroup,
+                        pinned: data.chat.pinned || false,
+                        unreadCount: data.chat.unreadCount || 1,
+                        lastMessage: data.message.body || '',
+                        timestamp: data.message.timestamp || Math.floor(Date.now() / 1000)
+                    });
+                    this._waRenderChatList(this._waCachedChats);
+                }
+            }
+        });
+
+        // Message Ack (Ticks: 0=pending, 1=sent, 2=delivered, 3=read, 4=played)
+        window.socket.on('wa-message-ack', (data) => {
+            this._waUpdateMessageAck(data.messageId, data.ack);
+        });
+
+        // Ready
+        window.socket.on('wa-ready', () => {
+            console.log('[WA UI] Socket says READY');
+            this.waCheckStatus();
+        });
+
+        // QR Update (auto-reload — no polling needed)
+        window.socket.on('wa-qr', (data) => {
+            if (data.qrCode) {
+                this._waShowQr(data.qrCode);
+                console.log('[WA UI] QR auto-refreshed via socket');
             }
         });
     }
 
+    // Update message ticks (ack)
+    _waUpdateMessageAck(msgId, ack) {
+        const msgEl = document.querySelector(`.wa-message[data-msg-id="${msgId}"]`);
+        if (!msgEl) return;
 
-    // Render WhatsApp messages
-    renderWhatsAppMessages() {
-        const container = document.getElementById('waMessages');
+        const ticksEl = msgEl.querySelector('.wa-message-ticks');
+        if (!ticksEl) return;
+
+        // ack: 1=sent, 2=delivered, 3=read, 4=played
+        let icon = '';
+        let className = 'wa-message-ticks';
+
+        if (ack >= 3) {
+            icon = '<i class="fas fa-check-double"></i>'; // Blue double check
+            className += ' read';
+        } else if (ack >= 2) {
+            icon = '<i class="fas fa-check-double"></i>'; // Grey double check
+        } else if (ack >= 1) {
+            icon = '<i class="fas fa-check"></i>'; // Grey single check
+        } else {
+            icon = '<i class="far fa-clock"></i>'; // Clock
+        }
+
+        ticksEl.innerHTML = icon;
+        ticksEl.className = className;
+    }
+
+    // Append a single new message to the chat (real-time)
+    _waAppendMessage(msg) {
+        const container = document.getElementById('waMessagesContainer');
         if (!container) return;
 
-        if (!this.waMessagesData || this.waMessagesData.length === 0) {
-            container.innerHTML = '<p style="text-align:center;color:var(--text-secondary);padding:40px;">لا توجد رسائل بعد<br><small>ابدأ المحادثة الآن!</small></p>';
-            return;
-        }
-
-        // Use messages in the order received from server (which is the correct WhatsApp order)
-        // DO NOT sort by timestamp - the server already provides the correct order
-        const messagesToRender = this.waMessagesData;
-
-        // Debug log
-        console.log('[WA Render] Messages count:', messagesToRender.length);
-        if (messagesToRender.length > 0) {
-            console.log('[WA Render] First msg:', messagesToRender[0].body?.substring(0, 20), 'fromMe:', messagesToRender[0].fromMe);
-            console.log('[WA Render] Last msg:', messagesToRender[messagesToRender.length - 1].body?.substring(0, 20), 'fromMe:', messagesToRender[messagesToRender.length - 1].fromMe);
-        }
-
-        const messagesHtml = messagesToRender.map(msg => {
-            const isMe = msg.fromMe;
-            const time = this.formatWaTime(msg.timestamp);
-
-            // Handle different message types
-            let content = '';
-            if (msg.type === 'image' || msg.hasMedia) {
-                content = `<div style="margin-bottom:4px;"><i class="fas fa-image"></i> صورة</div>${msg.body || ''}`;
-            } else if (msg.type === 'video') {
-                content = `<div style="margin-bottom:4px;"><i class="fas fa-video"></i> فيديو</div>${msg.body || ''}`;
-            } else if (msg.type === 'audio' || msg.type === 'ptt') {
-                content = `<div><i class="fas fa-microphone"></i> رسالة صوتية</div>`;
-            } else if (msg.type === 'document') {
-                content = `<div><i class="fas fa-file"></i> مستند</div>`;
-            } else if (msg.type === 'sticker') {
-                content = `<div style="font-size:48px;">🎨</div>`;
-            } else {
-                content = msg.body || '';
-            }
-
-            // For group messages from others, show sender avatar and name
-            // Check if this is a group message (has author field) AND not from me
-            const hasGroupSender = !isMe && (msg.senderName || msg.author);
-            // Extract phone number from author ID - handle formats like "123@c.us", "123@lid", etc.
-            const authorPhone = msg.author ? msg.author.split('@')[0] : '';
-            const senderDisplayName = msg.senderName || authorPhone || '';
-
-            // Sender avatar for group messages
-            const senderAvatar = hasGroupSender
-                ? (msg.senderProfilePic
-                    ? `<img src="${msg.senderProfilePic}" style="width:28px;height:28px;border-radius:50%;object-fit:cover;flex-shrink:0;" onerror="this.outerHTML='<div style=\\'width:28px;height:28px;border-radius:50%;background:#25D366;color:white;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:600;flex-shrink:0;\\'>${senderDisplayName.charAt(0).toUpperCase()}</div>'">`
-                    : `<div style="width:28px;height:28px;border-radius:50%;background:#25D366;color:white;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:600;flex-shrink:0;">${senderDisplayName.charAt(0).toUpperCase()}</div>`)
-                : '';
-
-            // For group messages, show sender name
-            const senderHeader = hasGroupSender
-                ? `<div style="font-size:12px;font-weight:600;color:#25D366;margin-bottom:4px;">${senderDisplayName}</div>`
-                : '';
-
-            // Message status checkmarks (only for sent messages)
-            // ack: 0=pending, 1=sent, 2=delivered, 3=read
-            let statusIcon = '';
-            if (isMe) {
-                if (msg.ack === 0 || msg.ack === undefined) {
-                    statusIcon = '<i class="fas fa-clock" style="font-size:11px;opacity:0.6;"></i>'; // pending
-                } else if (msg.ack === 1) {
-                    statusIcon = '<i class="fas fa-check" style="font-size:11px;"></i>'; // sent
-                } else if (msg.ack === 2) {
-                    statusIcon = '<i class="fas fa-check-double" style="font-size:11px;"></i>'; // delivered
-                } else if (msg.ack >= 3) {
-                    statusIcon = '<i class="fas fa-check-double" style="font-size:11px;color:#53BDEB;"></i>'; // read (blue)
-                }
-            }
-
-            return `
-                <div style="margin-bottom:8px;display:flex;${isMe ? 'justify-content:flex-end;' : 'justify-content:flex-start;'}">
-                    ${hasGroupSender ? senderAvatar : ''}
-                    <div style="max-width:70%;min-width:60px;padding:10px 14px;border-radius:${isMe ? '18px 18px 4px 18px' : '18px 18px 18px 4px'};
-                                background:${isMe ? 'linear-gradient(135deg,#25D366,#128C7E)' : 'var(--bg-card)'};
-                                color:${isMe ? 'white' : 'var(--text-primary)'};
-                                box-shadow:0 1px 2px rgba(0,0,0,0.1);">
-                        ${senderHeader}
-                        <div style="word-break:break-word;font-size:14px;line-height:1.4;">${content}</div>
-                        <div style="font-size:10px;opacity:0.7;margin-top:4px;display:flex;align-items:center;gap:4px;justify-content:flex-end;">
-                            ${time}
-                            ${statusIcon}
-                        </div>
-                    </div>
-                </div>
-            `;
-        }).join('');
-
-        // Wrap in LTR container with flex-column to ensure correct message alignment and order
-        // direction:ltr fixes RTL page layout affecting flex-start/flex-end
-        // flex-direction:column ensures messages display top-to-bottom (oldest first at top, newest at bottom)
-        // Individual text content remains RTL for Arabic text
-        container.innerHTML = `<div style="direction:ltr;text-align:left;display:flex;flex-direction:column;">${messagesHtml}</div>`;
-
-        container.scrollTop = container.scrollHeight;
-    }
-
-    // Send WhatsApp message
-    async sendWhatsAppMessage(event) {
-        event.preventDefault();
-
-        const input = document.getElementById('waMessageInput');
-        if (!input) return;
-
-        const message = input.value.trim();
-        if (!message) return;
-
-        const userData = JSON.parse(localStorage.getItem('octobot_user') || '{}');
-        const userId = userData.id;
-        if (!userId || !this.currentWaChat) return;
-
-        // Clear input immediately
-        input.value = '';
-
-        // Show sending indicator on button
-        const sendBtn = document.querySelector('#waChatArea button[onclick*="sendWhatsAppMessage"]');
-        if (sendBtn) {
-            sendBtn.disabled = true;
-            sendBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i>';
-        }
-
-        try {
-            const response = await fetch(`${this.API_URL}/api/whatsapp/${userId}/send`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    chatId: this.currentWaChat,
-                    message: message
-                })
-            });
-
-            const data = await response.json();
-
-            if (data.success) {
-                console.log('[WA] Message sent successfully');
-                // Immediately refresh messages to show sent message in correct order
-                await this.loadWhatsAppMessages(false);
-            } else {
-                this.showToast(data.error || 'فشل الإرسال', 'error');
-            }
-        } catch (err) {
-            console.error('WA send error:', err);
-            this.showToast('فشل في إرسال الرسالة', 'error');
-        } finally {
-            // Restore send button
-            if (sendBtn) {
-                sendBtn.disabled = false;
-                sendBtn.innerHTML = '<i class="fas fa-paper-plane"></i>';
-            }
-        }
-    }
-
-    // Refresh messages manually
-    async refreshWaMessages() {
-        await this.loadWhatsAppMessages(false);
-        this.showToast('تم التحديث', 'success');
-    }
-
-    // Close chat and go back to inbox
-    closeWhatsAppChat() {
-        this.stopWaSSE();
-        this.stopWaPolling();
-        this.currentWaChat = null;
-        this.currentWaChatName = null;
-        this.waMessagesData = [];
-
-        // Reload inbox
-        const userData = JSON.parse(localStorage.getItem('octobot_user') || '{}');
-        const userId = userData.id;
-        if (userId) {
-            this.loadWhatsAppChats(userId);
-        }
-    }
-
-    // Start SSE for real-time message updates (replaces polling)
-    startWaSSE() {
-        this.stopWaSSE();
-
-        const userData = JSON.parse(localStorage.getItem('octobot_user') || '{}');
-        const userId = userData.id;
-        if (!userId || !this.currentWaChat) return;
-
-        try {
-            const sseUrl = `${this.API_URL}/api/whatsapp/${userId}/sse/${encodeURIComponent(this.currentWaChat)}`;
-            this.waEventSource = new EventSource(sseUrl);
-
-            this.waEventSource.onmessage = (event) => {
-                try {
-                    const data = JSON.parse(event.data);
-
-                    if (data.type === 'new_message') {
-                        console.log('[SSE] New message received:', data.message.body?.substring(0, 30));
-
-                        // Check if message already exists
-                        const exists = this.waMessagesData.some(m => m.id === data.message.id);
-                        if (!exists) {
-                            // Add to data array
-                            this.waMessagesData.push(data.message);
-
-                            // Append message to DOM without full re-render (preserves scroll)
-                            this.appendWaMessage(data.message);
-
-                            // Play sound for incoming messages
-                            if (!data.message.fromMe) {
-                                this.playNotificationSound();
-                            }
-                        }
-                    } else if (data.type === 'connected') {
-                        console.log('[SSE] Connected to chat:', data.chatId);
-                    }
-                } catch (e) {
-                    console.error('[SSE] Parse error:', e);
-                }
-            };
-
-            this.waEventSource.onerror = (err) => {
-                console.error('[SSE] Connection error');
-                // Don't fall back to polling - just reconnect SSE after a delay
-                this.stopWaSSE();
-                setTimeout(() => this.startWaSSE(), 3000);
-            };
-
-            console.log('[SSE] Started for chat:', this.currentWaChat);
-        } catch (e) {
-            console.error('[SSE] Failed to start:', e);
-        }
-    }
-
-    // Append a single new message to DOM without re-rendering (preserves scroll)
-    appendWaMessage(msg) {
-        const container = document.getElementById('waMessages');
-        if (!container) return;
-
-        const isMe = msg.fromMe;
-        const time = this.formatWaTime(msg.timestamp);
-
-        // Check if user is at bottom before adding
+        const wrapper = container.querySelector('div') || container;
         const isAtBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 100;
 
-        // Create message element
-        let content = msg.body || '';
-        if (msg.type === 'image' || msg.hasMedia) {
-            content = `<div><i class="fas fa-image"></i> صورة</div>${msg.body || ''}`;
-        } else if (msg.type === 'audio' || msg.type === 'ptt') {
-            content = `<div><i class="fas fa-microphone"></i> رسالة صوتية</div>`;
+        const isMe = msg.fromMe;
+        const time = this._waFormatTime(msg.timestamp);
+        const content = (msg.body || '').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+        let ticks = '';
+        if (isMe) {
+            ticks = '<span class="wa-message-ticks">✓</span>';
         }
 
-        const messageDiv = document.createElement('div');
-        messageDiv.className = 'wa-message';
-        messageDiv.dataset.msgId = msg.id;
-        messageDiv.style.cssText = `margin-bottom:8px;display:flex;${isMe ? 'justify-content:flex-end;' : 'justify-content:flex-start;'}`;
+        const msgEl = document.createElement('div');
+        msgEl.className = `wa-message ${isMe ? 'outgoing' : 'incoming'}`;
+        msgEl.dataset.msgId = msg.id || '';
+        msgEl.innerHTML = `
+            <div class="wa-message-text" dir="auto">${content}</div>
+            <div class="wa-message-meta">
+                <span class="wa-message-time">${time}</span>
+                ${ticks}
+            </div>`;
 
-        messageDiv.innerHTML = `
-            <div style="max-width:70%;min-width:60px;padding:10px 14px;border-radius:8px;background:${isMe ? 'linear-gradient(135deg,#25D366,#128C7E)' : 'var(--bg-card)'};color:${isMe ? 'white' : 'var(--text-primary)'};box-shadow:0 1px 1px rgba(0,0,0,0.1);">
-                <div style="word-break:break-word;font-size:14px;line-height:1.4;">${content}</div>
-                <div style="font-size:10px;opacity:0.7;margin-top:4px;display:flex;align-items:center;gap:4px;justify-content:flex-end;">
-                    ${time}
-                    ${isMe ? '<i class="fas fa-check-double" style="color:#34B7F1;"></i>' : ''}
-                </div>
-            </div>
-        `;
+        wrapper.appendChild(msgEl);
 
-        container.appendChild(messageDiv);
-
-        // Scroll to bottom only if user was at bottom OR if it's our message
         if (isAtBottom || isMe) {
             container.scrollTop = container.scrollHeight;
         }
     }
 
-    // Stop SSE connection
-    stopWaSSE() {
-        if (this.waEventSource) {
-            this.waEventSource.close();
-            this.waEventSource = null;
-            console.log('[SSE] Stopped');
+    // Update chat preview in sidebar when new message arrives
+    _waUpdateChatPreview(chatId, message, chat) {
+        const chatItem = document.querySelector(`.wa-chat-item[data-chat-id="${chatId}"]`);
+        if (chatItem) {
+            const preview = chatItem.querySelector('.wa-chat-preview');
+            const time = chatItem.querySelector('.wa-chat-time');
+            if (preview) preview.textContent = message.body?.substring(0, 40) || '';
+            if (time) time.textContent = this._waFormatTime(message.timestamp);
+        }
+
+        // Reload chats to reorder by latest message
+        if (!this._waChatReloadTimeout) {
+            this._waChatReloadTimeout = setTimeout(() => {
+                this.waLoadChats();
+                this._waChatReloadTimeout = null;
+            }, 2000);
         }
     }
 
+    // Send a WhatsApp message
+    async waSendMessage() {
+        const input = document.getElementById('waMessageInput');
+        if (!input) return;
 
-    // Start real-time polling for messages - DISABLED for performance
-    // Messages will update when user sends a message or manually refreshes
-    startWaPolling() {
-        // DISABLED - polling causes scroll jumping and performance issues
-        // this.stopWaPolling();
-        // this.waPollingInterval = setInterval(async () => {
-        //     if (this.currentWaChat) {
-        //         await this.loadWhatsAppMessages(false);
-        //     }
-        // }, 5000);
+        const message = input.value.trim();
+        if (!message || !this.currentWaChat) return;
+
+        // Clear input immediately
+        input.value = '';
+
+        // Add optimistic message to UI
+        const optimisticMsg = {
+            id: 'temp-' + Date.now(),
+            body: message,
+            fromMe: true,
+            timestamp: Math.floor(Date.now() / 1000),
+            ack: 0,
+            type: 'chat'
+        };
+        this._waAppendMessage(optimisticMsg);
+
+        try {
+            const res = await fetch(`${this.API_URL}/api/whatsapp/chats/${encodeURIComponent(this.currentWaChat)}/send`, {
+                method: 'POST',
+                headers: this._waHeaders(),
+                body: JSON.stringify({ message })
+            });
+
+            const data = await res.json();
+            if (!data.success) {
+                this.showToast(data.error || 'فشل الإرسال', 'error');
+            }
+        } catch (err) {
+            console.error('[WA UI] Send error:', err);
+            this.showToast('فشل في إرسال الرسالة', 'error');
+        }
+
+        input.focus();
     }
 
-    // Stop message polling
-    stopWaPolling() {
-        if (this.waPollingInterval) {
-            clearInterval(this.waPollingInterval);
-            this.waPollingInterval = null;
+    // Refresh messages manually
+    async waRefreshMessages() {
+        if (this.currentWaChat) {
+            await this._waLoadMessages(this.currentWaChat);
+            this.showToast('تم التحديث', 'success');
         }
     }
 
-    // Start inbox polling for new conversations
-    startWaInboxPolling() {
-        this.stopWaInboxPolling();
+    // Go back to chat list on mobile
+    waBackToList() {
+        const layout = document.getElementById('waChatLayout');
+        if (layout) layout.classList.remove('chat-open');
 
-        this.waInboxPollingInterval = setInterval(async () => {
-            if (!this.currentWaChat) {
-                // Only poll inbox when not in a chat
-                await this.checkForNewWaMessages();
+        this.currentWaChat = null;
+        this._waCurrentChatName = null;
+        this._waStopMsgPolling();
+
+        // Hide chat views
+        const header = document.getElementById('waChatHeader');
+        const emptyChat = document.getElementById('waEmptyChat');
+        const msgContainer = document.getElementById('waMessagesContainer');
+        const inputArea = document.getElementById('waInputArea');
+
+        if (header) header.style.display = 'none';
+        if (emptyChat) emptyChat.style.display = 'flex';
+        if (msgContainer) msgContainer.style.display = 'none';
+        if (inputArea) inputArea.style.display = 'none';
+
+        // Deselect all chat items
+        document.querySelectorAll('.wa-chat-item').forEach(el => el.classList.remove('active'));
+
+        // Refresh chats
+        this.waLoadChats();
+    }
+
+    // Format timestamp
+    _waFormatTime(timestamp) {
+        if (!timestamp) return '';
+        const date = new Date(timestamp * 1000);
+        const now = new Date();
+        const isToday = date.toDateString() === now.toDateString();
+        if (isToday) return date.toLocaleTimeString('ar-EG', { hour: '2-digit', minute: '2-digit' });
+        const yesterday = new Date(now);
+        yesterday.setDate(yesterday.getDate() - 1);
+        if (date.toDateString() === yesterday.toDateString()) return 'أمس';
+        return date.toLocaleDateString('ar-EG', { day: 'numeric', month: 'short' });
+    }
+
+    // Start chat list polling (every 8 seconds for near-real-time)
+    _waStartChatPolling() {
+        this._waStopChatPolling();
+        this._waChatPollTimer = setInterval(async () => {
+            try {
+                const res = await fetch(`${this.API_URL}/api/whatsapp/chats`, { headers: this._waHeaders() });
+                const data = await res.json();
+                if (data.chats && data.chats.length > 0) {
+                    this._waCachedChats = data.chats;
+                    this._waRenderChatList(data.chats);
+                }
+            } catch (err) {
+                console.log('[WA UI] Chat poll refresh failed:', err.message);
+            }
+        }, 15000);
+    }
+
+    _waStopChatPolling() {
+        if (this._waChatPollTimer) {
+            clearInterval(this._waChatPollTimer);
+            this._waChatPollTimer = null;
+        }
+    }
+
+    // === Message Polling (3-second fallback for real-time updates) ===
+    _waStartMsgPolling(chatId) {
+        this._waStopMsgPolling();
+        this._waMsgPollChatId = chatId;
+        this._waMsgPollTimer = setInterval(async () => {
+            // Only poll if same chat is still open
+            if (this.currentWaChat !== this._waMsgPollChatId) {
+                this._waStopMsgPolling();
+                return;
+            }
+            try {
+                const res = await fetch(`${this.API_URL}/api/whatsapp/chats/${encodeURIComponent(chatId)}/messages?limit=50`, {
+                    headers: this._waHeaders()
+                });
+                const data = await res.json();
+                if (!data.messages || data.messages.length === 0) return;
+
+                const oldMsgs = this._waMessagesData || [];
+                const newMsgs = data.messages;
+
+                // Smart diff: check if any new messages OR ack changes
+                const lastOldId = oldMsgs.length > 0 ? oldMsgs[oldMsgs.length - 1].id : null;
+                const lastNewId = newMsgs.length > 0 ? newMsgs[newMsgs.length - 1].id : null;
+                const countChanged = oldMsgs.length !== newMsgs.length;
+                const lastIdChanged = lastOldId !== lastNewId;
+
+                // Check for ack changes on last few messages
+                let ackChanged = false;
+                if (!countChanged && !lastIdChanged && oldMsgs.length > 0) {
+                    for (let i = Math.max(0, oldMsgs.length - 10); i < oldMsgs.length; i++) {
+                        if (oldMsgs[i].ack !== newMsgs[i]?.ack) {
+                            ackChanged = true;
+                            break;
+                        }
+                    }
+                }
+
+                if (countChanged || lastIdChanged || ackChanged) {
+                    console.log('[WA UI] Poll detected changes:', { countChanged, lastIdChanged, ackChanged });
+                    this._waMessagesData = newMsgs;
+                    const container = document.getElementById('waMessagesContainer');
+                    const isAtBottom = container && (container.scrollHeight - container.scrollTop - container.clientHeight < 100);
+                    this._waRenderMessages(newMsgs);
+                    if (isAtBottom && container) {
+                        container.scrollTop = container.scrollHeight;
+                    }
+
+                    // Play sound if new incoming message
+                    if (countChanged && newMsgs.length > oldMsgs.length) {
+                        const latestMsg = newMsgs[newMsgs.length - 1];
+                        if (!latestMsg.fromMe) {
+                            this.playNotificationSound();
+                        }
+                    }
+                }
+            } catch (err) {
+                console.log('[WA UI] Message poll error:', err.message);
             }
         }, 3000); // Poll every 3 seconds
     }
 
-    // Stop inbox polling
-    stopWaInboxPolling() {
-        if (this.waInboxPollingInterval) {
-            clearInterval(this.waInboxPollingInterval);
-            this.waInboxPollingInterval = null;
+    _waStopMsgPolling() {
+        if (this._waMsgPollTimer) {
+            clearInterval(this._waMsgPollTimer);
+            this._waMsgPollTimer = null;
+            this._waMsgPollChatId = null;
         }
     }
 
-    // Check for new WhatsApp messages (for notifications)
-    async checkForNewWaMessages() {
-        const userData = JSON.parse(localStorage.getItem('octobot_user') || '{}');
-        const userId = userData.id;
-        if (!userId) return;
-
+    // Play notification sound
+    playNotificationSound() {
         try {
-            const response = await fetch(`${this.API_URL}/api/whatsapp/${userId}/chats?limit=20`);
-            const data = await response.json();
-
-            if (!data.chats) return;
-
-            // Check for unread messages
-            const totalUnread = data.chats.reduce((sum, c) => sum + (c.unreadCount || 0), 0);
-
-            if (totalUnread > 0 && !this.currentWaChat) {
-                // Find chat with new message
-                const chatWithNew = data.chats.find(c => c.unreadCount > 0);
-                if (chatWithNew) {
-                    this.playNotificationSound();
-                    const preview = chatWithNew.lastMessage?.substring(0, 30) || 'رسالة جديدة';
-                    this.showToast(`📱 ${chatWithNew.name}: ${preview}`, 'info');
-                }
-            }
-        } catch (err) {
-            // Silent fail
-        }
+            const audio = new Audio('data:audio/wav;base64,UklGRnoGAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQoGAACBhYqFbF1fdH+Jl5SKdF9VYXqMnZ2XhG9gXG19i5mblIJuYF1xgI+al5J/bGBecYGQm5iRfmphX3KCk5yal35oYF5whJOcm5d9Z19egJSdnJh7Zl5dg5Wen5h5ZFxegZWfn5h4Y1tegZafoJd3YltegJegoZd2YVtegJegoJZ0YFtfgpigoJZzX1pfg5mgoJVyXllfhJqhoZRxXVlfhJqhoZRxXVpfhJuh');
+            audio.volume = 0.3;
+            audio.play().catch(() => { });
+        } catch (e) { }
     }
-
-    // Start SSE for real-time inbox updates
-    startWaInboxSSE(userId) {
-        this.stopWaInboxSSE();
-
-        if (!userId) return;
-
-        try {
-            const sseUrl = `${this.API_URL}/api/whatsapp/${userId}/sse/inbox`;
-            this.waInboxEventSource = new EventSource(sseUrl);
-
-            this.waInboxEventSource.onmessage = (event) => {
-                try {
-                    const data = JSON.parse(event.data);
-
-                    if (data.type === 'new_message_notification') {
-                        console.log('[SSE Inbox] New message notification:', data.chatId);
-
-                        // Play notification sound
-                        this.playNotificationSound();
-
-                        // Show toast notification
-                        const senderName = data.senderName || 'رسالة جديدة';
-                        this.showToast(`📱 ${senderName}: ${data.preview}`, 'info');
-
-                        // Refresh inbox silently (no loading spinner)
-                        if (this.waInboxUserId) {
-                            this.loadWhatsAppChats(this.waInboxUserId, false);
-                        }
-                    } else if (data.type === 'connected') {
-                        console.log('[SSE Inbox] Connected to inbox stream');
-                    }
-                } catch (e) {
-                    console.error('[SSE Inbox] Parse error:', e);
-                }
-            };
-
-            this.waInboxEventSource.onerror = (err) => {
-                console.error('[SSE Inbox] Connection error');
-                // Don't retry continuously - just fail silently
-            };
-
-            console.log('[SSE Inbox] Started for user:', userId);
-        } catch (e) {
-            console.error('[SSE Inbox] Failed to start:', e);
-        }
-    }
-
-    // Stop inbox SSE
-    stopWaInboxSSE() {
-        if (this.waInboxEventSource) {
-            this.waInboxEventSource.close();
-            this.waInboxEventSource = null;
-            console.log('[SSE Inbox] Stopped');
-        }
-    }
-
-    // Update unread badge on specific chat item (without full reload)
-    updateWaInboxBadge(chatId) {
-        // Find the chat item element and pulse it to indicate new message
-        const chatItems = document.querySelectorAll('.conversation-item');
-        chatItems.forEach(item => {
-            if (item.onclick && item.onclick.toString().includes(chatId)) {
-                // Add a subtle pulse animation
-                item.style.animation = 'pulse 0.5s ease';
-                setTimeout(() => { item.style.animation = ''; }, 500);
-            }
-        });
-    }
-
     // ============= TELEGRAM METHODS =============
 
     // Check Telegram login status
