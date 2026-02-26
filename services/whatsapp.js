@@ -1,4 +1,4 @@
-// WhatsApp Client Service - Using whatsapp-web.js
+// WhatsApp Client Service - Using whatsapp-web.js with PostgreSQL Session Persistence
 const { Client, LocalAuth, MessageMedia } = require('whatsapp-web.js');
 const fs = require('fs');
 const path = require('path');
@@ -12,12 +12,147 @@ class WhatsAppService {
         this.mediaCache = {}; // In-memory media cache: { [messageId]: { mimetype, data, filename, cachedAt } }
         this.mediaCacheMax = 500; // Max cache entries before pruning oldest
         this.sessionDir = path.join(__dirname, '..', '.wwebjs_auth');
+        this._reconnecting = false; // Flag to prevent concurrent reconnect calls
 
         // Create session directory if not exists
         if (!fs.existsSync(this.sessionDir)) {
             fs.mkdirSync(this.sessionDir, { recursive: true });
         }
     }
+
+    // ============= DB SESSION HELPERS =============
+
+    // Lazy-load the WhatsAppSession model (avoid circular dependency at require-time)
+    _getSessionModel() {
+        if (!this._SessionModel) {
+            const { WhatsAppSession } = require('../models');
+            this._SessionModel = WhatsAppSession;
+        }
+        return this._SessionModel;
+    }
+
+    // Save or update session in DB
+    async _saveSessionToDB(userId, clientId, extraData = {}) {
+        try {
+            const WaSession = this._getSessionModel();
+            const data = {
+                userId,
+                clientId,
+                isActive: true,
+                lastConnected: new Date(),
+                ...extraData
+            };
+
+            await WaSession.upsert(data, { conflictFields: ['userId'] });
+            console.log(`[WA DB] ✅ Session saved for user ${userId} (clientId: ${clientId})`);
+        } catch (err) {
+            console.error(`[WA DB] ❌ Failed to save session for user ${userId}:`, err.message);
+        }
+    }
+
+    // Mark session as inactive in DB
+    async _deactivateSessionInDB(userId, reason = null) {
+        try {
+            const WaSession = this._getSessionModel();
+            await WaSession.update(
+                { isActive: false, disconnectReason: reason },
+                { where: { userId } }
+            );
+            console.log(`[WA DB] Session deactivated for user ${userId} (reason: ${reason})`);
+        } catch (err) {
+            console.error(`[WA DB] Failed to deactivate session for user ${userId}:`, err.message);
+        }
+    }
+
+    // Delete session from DB completely
+    async _deleteSessionFromDB(userId) {
+        try {
+            const WaSession = this._getSessionModel();
+            await WaSession.destroy({ where: { userId } });
+            console.log(`[WA DB] Session deleted for user ${userId}`);
+        } catch (err) {
+            console.error(`[WA DB] Failed to delete session for user ${userId}:`, err.message);
+        }
+    }
+
+    // Get all active sessions from DB
+    async _getActiveSessionsFromDB() {
+        try {
+            const WaSession = this._getSessionModel();
+            return await WaSession.findAll({ where: { isActive: true } });
+        } catch (err) {
+            console.error('[WA DB] Failed to get active sessions:', err.message);
+            return [];
+        }
+    }
+
+    // ============= SMART AUTO-RECONNECT =============
+
+    /**
+     * Auto-reconnect all active sessions from DB on server startup.
+     * Uses a queue with delay to avoid overwhelming CPU/RAM.
+     * @param {number} delayMs - Delay between each session initialization (default: 5000ms)
+     */
+    async autoReconnectAll(delayMs = 5000) {
+        if (this._reconnecting) {
+            console.log('[WA AutoReconnect] Already reconnecting, skipping...');
+            return;
+        }
+
+        this._reconnecting = true;
+        console.log('[WA AutoReconnect] 🔄 Starting auto-reconnect for active sessions...');
+
+        try {
+            const activeSessions = await this._getActiveSessionsFromDB();
+
+            if (activeSessions.length === 0) {
+                console.log('[WA AutoReconnect] No active sessions found in DB.');
+                this._reconnecting = false;
+                return;
+            }
+
+            console.log(`[WA AutoReconnect] Found ${activeSessions.length} active session(s). Reconnecting with ${delayMs}ms delay between each...`);
+
+            for (let i = 0; i < activeSessions.length; i++) {
+                const session = activeSessions[i];
+                const userId = session.userId;
+
+                try {
+                    console.log(`[WA AutoReconnect] (${i + 1}/${activeSessions.length}) Reconnecting user ${userId}...`);
+
+                    // Check if session files exist on disk (LocalAuth needs them)
+                    const sessionPath = this.getSessionPath(userId);
+                    if (!fs.existsSync(sessionPath)) {
+                        console.log(`[WA AutoReconnect] ⚠️ No session files for user ${userId} on disk. Marking inactive.`);
+                        await this._deactivateSessionInDB(userId, 'session_files_missing');
+                        continue;
+                    }
+
+                    // Create client and initialize
+                    await this.getClient(userId);
+                    await this.initialize(userId);
+
+                    console.log(`[WA AutoReconnect] ✅ User ${userId} initialization started.`);
+                } catch (err) {
+                    console.error(`[WA AutoReconnect] ❌ Failed to reconnect user ${userId}:`, err.message);
+                }
+
+                // Wait before next session to let the server "breathe"
+                if (i < activeSessions.length - 1) {
+                    console.log(`[WA AutoReconnect] Waiting ${delayMs}ms before next session...`);
+                    await new Promise(resolve => setTimeout(resolve, delayMs));
+                }
+            }
+
+            console.log('[WA AutoReconnect] ✅ Auto-reconnect complete.');
+        } catch (err) {
+            console.error('[WA AutoReconnect] ❌ Critical error:', err.message);
+        } finally {
+            this._reconnecting = false;
+        }
+    }
+
+    // ============= CORE CLIENT METHODS =============
 
     // Get session path for user
     getSessionPath(userId) {
@@ -31,6 +166,7 @@ class WhatsAppService {
         }
 
         const sessionPath = this.getSessionPath(userId);
+        const clientId = `session-${userId}`;
 
         const client = new Client({
             authStrategy: new LocalAuth({
@@ -64,6 +200,10 @@ class WhatsAppService {
         client.on('authenticated', () => {
             console.log(`[WA] User ${userId} authenticated successfully`);
             this.qrCodes[userId] = null;
+
+            // Save session to DB on successful authentication
+            this._saveSessionToDB(userId, clientId);
+
             // Mark as ready after short delay to let stores load
             setTimeout(() => {
                 this.readyStates[userId] = true;
@@ -71,19 +211,41 @@ class WhatsAppService {
             }, 5000);
         });
 
-        client.on('auth_failure', (msg) => {
+        client.on('auth_failure', async (msg) => {
             console.error(`[WA] Auth failure for user ${userId}:`, msg);
+            // Mark session as inactive on auth failure
+            await this._deactivateSessionInDB(userId, `auth_failure: ${msg}`);
         });
 
-        client.on('disconnected', (reason) => {
+        client.on('disconnected', async (reason) => {
             console.log(`[WA] User ${userId} disconnected:`, reason);
             delete this.clients[userId];
             delete this.readyStates[userId];
+
+            // Update DB: mark inactive with reason (but keep the session for potential reconnect)
+            if (reason === 'LOGOUT') {
+                // Explicit logout — delete session entirely
+                await this._deleteSessionFromDB(userId);
+            } else {
+                // Unexpected disconnect — keep session, mark inactive with reason
+                await this._deactivateSessionInDB(userId, reason);
+            }
         });
 
-        client.on('ready', () => {
+        client.on('ready', async () => {
             console.log(`[WA] User ${userId} is ready — stores loaded`);
             this.readyStates[userId] = true;
+
+            // Update DB with phone number and lastConnected
+            try {
+                const phone = client.info?.wid?.user || null;
+                await this._saveSessionToDB(userId, clientId, {
+                    phoneNumber: phone,
+                    disconnectReason: null // Clear any previous disconnect reason
+                });
+            } catch (err) {
+                console.error(`[WA] Error updating session on ready:`, err.message);
+            }
         });
 
         this.clients[userId] = client;
@@ -164,11 +326,13 @@ class WhatsAppService {
                         id: chat.id._serialized,
                         name: chat.name || chat.id.user,
                         isGroup: chat.isGroup,
-                        isArchived: chat.archived,
+                        archived: chat.archived || false,
                         pinned: chat.pinned || false,
+                        isMuted: chat.isMuted || false,
                         unreadCount: chat.unreadCount,
                         lastMessage: chat.lastMessage?.body || '',
-                        timestamp: chat.lastMessage?.timestamp || chat.lastMessage?._timestamp || 0
+                        timestamp: chat.lastMessage?.timestamp || chat.lastMessage?._timestamp || 0,
+                        labels: chat.labels || []
                     }));
                 } catch (innerErr) {
                     lastError = innerErr;
@@ -225,21 +389,37 @@ class WhatsAppService {
                 this._cacheMediaInBackground(mediaMessages);
             }
 
-            return messages.map(msg => ({
-                id: msg.id._serialized,
-                body: msg.body,
-                from: typeof msg.from === 'string' ? msg.from : msg.from?._serialized || '',
-                to: typeof msg.to === 'string' ? msg.to : msg.to?._serialized || '',
-                author: typeof msg.author === 'string' ? msg.author : msg.author?._serialized || '',
-                senderName: msg._data?.notifyName || '',
-                type: msg.type,
-                hasMedia: msg.hasMedia,
-                timestamp: msg.timestamp,
-                fromMe: msg.fromMe,
-                ack: msg.ack,
-                isGroup: (typeof msg.from === 'string' ? msg.from : '').includes('@g.us'),
-                isStatus: msg.id.fromMe === false && msg.type === 'status'
-            }));
+            return messages.map(msg => {
+                const mapped = {
+                    id: msg.id._serialized,
+                    body: msg.body,
+                    from: typeof msg.from === 'string' ? msg.from : msg.from?._serialized || '',
+                    to: typeof msg.to === 'string' ? msg.to : msg.to?._serialized || '',
+                    author: typeof msg.author === 'string' ? msg.author : msg.author?._serialized || '',
+                    senderName: msg._data?.notifyName || '',
+                    type: msg.type,
+                    hasMedia: msg.hasMedia,
+                    timestamp: msg.timestamp,
+                    fromMe: msg.fromMe,
+                    ack: msg.ack,
+                    isGroup: (typeof msg.from === 'string' ? msg.from : '').includes('@g.us'),
+                    isStatus: msg.id.fromMe === false && msg.type === 'status',
+                    hasQuotedMsg: msg.hasQuotedMsg || false
+                };
+
+                // Include quoted message data if present
+                if (msg.hasQuotedMsg && msg._data?.quotedMsg) {
+                    const q = msg._data.quotedMsg;
+                    mapped._quotedMsg = {
+                        body: q.body || '',
+                        type: q.type || 'chat',
+                        fromMe: q.self === 'in' ? false : true,
+                        senderName: q.notifyName || ''
+                    };
+                }
+
+                return mapped;
+            });
         } catch (err) {
             console.error('[WA] Get messages error:', err.message);
             return [];
@@ -284,11 +464,18 @@ class WhatsAppService {
         console.log(`[WA Media Cache] Pruned ${toRemove.length} entries`);
     }
 
-    // Send text message
-    async sendMessage(userId, chatId, message) {
+    // Send text message (with optional quote reply)
+    async sendMessage(userId, chatId, message, options = {}) {
         try {
             const client = await this.getClient(userId);
-            const result = await client.sendMessage(chatId, message, { sendSeen: false });
+            const sendOpts = { sendSeen: false };
+
+            // Quote reply support
+            if (options.quotedMessageId) {
+                sendOpts.quotedMessageId = options.quotedMessageId;
+            }
+
+            const result = await client.sendMessage(chatId, message, sendOpts);
 
             return {
                 success: true,
@@ -432,13 +619,17 @@ class WhatsAppService {
             if (this.clients[userId]) {
                 await this.clients[userId].logout();
                 delete this.clients[userId];
+                delete this.readyStates[userId];
 
-                // Clean up session
+                // Clean up session files
                 const sessionPath = this.getSessionPath(userId);
                 if (fs.existsSync(sessionPath)) {
                     fs.rmSync(sessionPath, { recursive: true, force: true });
                 }
             }
+
+            // Delete session from DB (explicit logout = full cleanup)
+            await this._deleteSessionFromDB(userId);
 
             return { success: true };
         } catch (err) {

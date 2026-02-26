@@ -12,10 +12,15 @@ const EcommerceStore = require('./EcommerceStore')(sequelize);
 const EcommerceProduct = require('./EcommerceProduct')(sequelize);
 const EcommerceOrder = require('./EcommerceOrder')(sequelize);
 const DailyStats = require('./DailyStats')(sequelize);
+const WhatsAppSession = require('./WhatsAppSession')(sequelize);
 
 // Define associations
 User.hasMany(Platform, { foreignKey: 'userId', as: 'platforms' });
 Platform.belongsTo(User, { foreignKey: 'userId', as: 'user' });
+
+// WhatsApp Session Associations
+User.hasOne(WhatsAppSession, { foreignKey: 'userId', as: 'waSession' });
+WhatsAppSession.belongsTo(User, { foreignKey: 'userId', as: 'user' });
 
 Platform.hasMany(Conversation, { foreignKey: 'platformId', as: 'conversations' });
 Conversation.belongsTo(Platform, { foreignKey: 'platformId', as: 'connectedPlatform' });
@@ -50,7 +55,8 @@ async function syncDatabase() {
             EcommerceStore.sync({ alter: true }),
             EcommerceProduct.sync({ alter: true }),
             EcommerceOrder.sync({ alter: true }),
-            DailyStats.sync({ alter: true })
+            DailyStats.sync({ alter: true }),
+            WhatsAppSession.sync({ alter: true })
         ]);
 
         console.log('✅ All database tables synced!');
@@ -68,6 +74,7 @@ async function syncDatabase() {
             await EcommerceStore.sync({ alter: true });
             await EcommerceProduct.sync({ alter: true });
             await EcommerceOrder.sync({ alter: true });
+            await WhatsAppSession.sync({ alter: true });
             console.log('✅ All database tables synced (sequential)!');
             return true;
         } catch (seqError) {
@@ -90,5 +97,6 @@ module.exports = {
     EcommerceProduct,
     EcommerceOrder,
     DailyStats,
+    WhatsAppSession,
     syncDatabase
 };

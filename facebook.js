@@ -48,7 +48,7 @@ class FacebookIntegration {
             const octobotUserId = userData.id || '';
 
             // Fetch the auth URL from server to avoid IIS redirect rewriting
-            const response = await fetch(`${this.baseUrl}/auth/facebook?json=true&octobotUserId=${encodeURIComponent(octobotUserId)}`, {
+            const response = await fetch(`${this.baseUrl}/auth/instagram?json=true&octobotUserId=${encodeURIComponent(octobotUserId)}`, {
                 headers: { 'Accept': 'application/json' }
             });
             const data = await response.json();

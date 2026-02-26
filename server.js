@@ -255,6 +255,23 @@ const attachWaListeners = (client, userId) => {
     client.on('message_create', onMessageCreate);
     client.on('message_ack', onMessageAck);
 
+    // Typing indicator: detect when a contact is typing
+    client.on('chat_state_changed', (state) => {
+        if (!global.io) return;
+        // state: { id: chatId, isTyping: boolean }
+        try {
+            const chatId = typeof state.id === 'string' ? state.id : state.id?._serialized;
+            if (chatId) {
+                global.io.to(`wa-${userId}`).emit('wa-typing', {
+                    chatId,
+                    isTyping: state.isTyping !== false
+                });
+            }
+        } catch (e) {
+            // Silent
+        }
+    });
+
     client._socketAttached = true;
 };
 
@@ -368,14 +385,18 @@ app.get('/api/whatsapp/chats/:chatId/messages', authMiddleware, async (req, res)
     }
 });
 
-// Send text message
+// Send text message (with optional quote reply)
 app.post('/api/whatsapp/chats/:chatId/send', authMiddleware, async (req, res) => {
     try {
         const userId = req.user.id;
         const chatId = decodeURIComponent(req.params.chatId);
-        const { message } = req.body;
+        const { message, replyToMsgId } = req.body;
         if (!message) return res.status(400).json({ success: false, error: 'Message is required' });
-        const result = await whatsappService.sendMessage(userId, chatId, message);
+
+        const options = {};
+        if (replyToMsgId) options.quotedMessageId = replyToMsgId;
+
+        const result = await whatsappService.sendMessage(userId, chatId, message, options);
         res.json(result);
     } catch (err) {
         console.error('[WA API] Send message error:', err.message);
@@ -394,6 +415,323 @@ app.post('/api/whatsapp/chats/:chatId/send-media', authMiddleware, upload.single
         res.json(result);
     } catch (err) {
         console.error('[WA API] Send media error:', err.message);
+        res.status(500).json({ success: false, error: err.message });
+    }
+});
+
+// Send typing state to contact
+app.post('/api/whatsapp/chats/:chatId/typing', authMiddleware, async (req, res) => {
+    try {
+        const userId = req.user.id;
+        const chatId = decodeURIComponent(req.params.chatId);
+        const client = await whatsappService.getClient(userId);
+        const chat = await client.getChatById(chatId);
+        await chat.sendStateTyping();
+        res.json({ success: true });
+    } catch (err) {
+        res.json({ success: false });
+    }
+});
+
+// ============= WHATSAPP BUSINESS LABELS =============
+
+// Get all labels for user
+app.get('/api/whatsapp/labels', authMiddleware, async (req, res) => {
+    try {
+        const userId = req.user.id;
+        const client = await whatsappService.getClient(userId);
+        const labels = await client.getLabels();
+        res.json({
+            success: true,
+            labels: labels.map(l => ({
+                id: l.id,
+                name: l.name,
+                color: l.hexColor || l.color || '#888',
+                count: l.count || 0
+            }))
+        });
+    } catch (err) {
+        console.error('[WA API] Get labels error:', err.message);
+        res.json({ success: false, labels: [], error: err.message });
+    }
+});
+
+// Get labels for a specific chat
+app.get('/api/whatsapp/chats/:chatId/labels', authMiddleware, async (req, res) => {
+    try {
+        const userId = req.user.id;
+        const chatId = decodeURIComponent(req.params.chatId);
+        const client = await whatsappService.getClient(userId);
+        const chat = await client.getChatById(chatId);
+        const labels = chat.labels || [];
+        res.json({ success: true, labels });
+    } catch (err) {
+        res.json({ success: false, labels: [] });
+    }
+});
+
+// Add label to chat
+app.post('/api/whatsapp/chats/:chatId/labels/:labelId', authMiddleware, async (req, res) => {
+    try {
+        const userId = req.user.id;
+        const chatId = decodeURIComponent(req.params.chatId);
+        const labelId = req.params.labelId;
+        const client = await whatsappService.getClient(userId);
+        const chat = await client.getChatById(chatId);
+
+        // Get current labels and add the new one
+        const currentLabels = chat.labels || [];
+        if (!currentLabels.includes(labelId)) {
+            currentLabels.push(labelId);
+        }
+        await chat.changeLabels(currentLabels);
+        res.json({ success: true });
+    } catch (err) {
+        console.error('[WA API] Add label error:', err.message);
+        res.json({ success: false, error: err.message });
+    }
+});
+
+// Remove label from chat
+app.delete('/api/whatsapp/chats/:chatId/labels/:labelId', authMiddleware, async (req, res) => {
+    try {
+        const userId = req.user.id;
+        const chatId = decodeURIComponent(req.params.chatId);
+        const labelId = req.params.labelId;
+        const client = await whatsappService.getClient(userId);
+        const chat = await client.getChatById(chatId);
+
+        // Remove the label
+        const currentLabels = (chat.labels || []).filter(id => id !== labelId);
+        await chat.changeLabels(currentLabels);
+        res.json({ success: true });
+    } catch (err) {
+        console.error('[WA API] Remove label error:', err.message);
+        res.json({ success: false, error: err.message });
+    }
+});
+
+// ============= CHAT MANAGEMENT ROUTES =============
+
+// Pin / Unpin a chat
+app.post('/api/whatsapp/chats/:chatId/pin', authMiddleware, async (req, res) => {
+    try {
+        const userId = req.user.id;
+        const chatId = decodeURIComponent(req.params.chatId);
+        const client = await whatsappService.getClient(userId);
+        const chat = await client.getChatById(chatId);
+        const result = chat.pinned ? await chat.unpin() : await chat.pin();
+        res.json({ success: true, pinned: !chat.pinned });
+    } catch (err) {
+        console.error('[WA API] Pin error:', err.message);
+        res.status(500).json({ success: false, error: err.message });
+    }
+});
+
+// Archive / Unarchive a chat
+app.post('/api/whatsapp/chats/:chatId/archive', authMiddleware, async (req, res) => {
+    try {
+        const userId = req.user.id;
+        const chatId = decodeURIComponent(req.params.chatId);
+        const client = await whatsappService.getClient(userId);
+        const chat = await client.getChatById(chatId);
+        if (chat.archived) {
+            await chat.unarchive();
+            res.json({ success: true, archived: false });
+        } else {
+            await chat.archive();
+            res.json({ success: true, archived: true });
+        }
+    } catch (err) {
+        console.error('[WA API] Archive error:', err.message);
+        res.status(500).json({ success: false, error: err.message });
+    }
+});
+
+// Mute / Unmute a chat
+app.post('/api/whatsapp/chats/:chatId/mute', authMiddleware, async (req, res) => {
+    try {
+        const userId = req.user.id;
+        const chatId = decodeURIComponent(req.params.chatId);
+        const client = await whatsappService.getClient(userId);
+        const chat = await client.getChatById(chatId);
+        if (chat.isMuted) {
+            const result = await chat.unmute();
+            res.json({ success: true, isMuted: false });
+        } else {
+            // Mute forever (no expiry)
+            const result = await chat.mute();
+            res.json({ success: true, isMuted: true });
+        }
+    } catch (err) {
+        console.error('[WA API] Mute error:', err.message);
+        res.status(500).json({ success: false, error: err.message });
+    }
+});
+
+// Mark as read
+app.post('/api/whatsapp/chats/:chatId/read', authMiddleware, async (req, res) => {
+    try {
+        const userId = req.user.id;
+        const chatId = decodeURIComponent(req.params.chatId);
+        const client = await whatsappService.getClient(userId);
+        const chat = await client.getChatById(chatId);
+        await chat.sendSeen();
+        res.json({ success: true });
+    } catch (err) {
+        console.error('[WA API] Mark read error:', err.message);
+        res.status(500).json({ success: false, error: err.message });
+    }
+});
+
+// Mark as unread
+app.post('/api/whatsapp/chats/:chatId/unread', authMiddleware, async (req, res) => {
+    try {
+        const userId = req.user.id;
+        const chatId = decodeURIComponent(req.params.chatId);
+        const client = await whatsappService.getClient(userId);
+        const chat = await client.getChatById(chatId);
+        await chat.markUnread();
+        res.json({ success: true });
+    } catch (err) {
+        console.error('[WA API] Mark unread error:', err.message);
+        res.status(500).json({ success: false, error: err.message });
+    }
+});
+
+// ============= CONTACT INFO & STARRED & GROUP MANAGEMENT =============
+
+// Get contact/chat info
+app.get('/api/whatsapp/chats/:chatId/info', authMiddleware, async (req, res) => {
+    try {
+        const userId = req.user.id;
+        const chatId = decodeURIComponent(req.params.chatId);
+        const client = await whatsappService.getClient(userId);
+        const chat = await client.getChatById(chatId);
+        const contact = await chat.getContact();
+
+        const info = {
+            id: chat.id._serialized,
+            name: chat.name || contact.pushname || contact.name || chat.id.user,
+            pushname: contact.pushname || '',
+            number: contact.number || chat.id.user,
+            isGroup: chat.isGroup,
+            isMyContact: contact.isMyContact || false,
+            isBusiness: contact.isBusiness || false,
+            profilePicUrl: null,
+            about: null
+        };
+
+        // Try to get profile picture
+        try { info.profilePicUrl = await contact.getProfilePicUrl(); } catch (e) { }
+
+        // Try to get about/status
+        try { info.about = await contact.getAbout?.(); } catch (e) { }
+
+        // Group-specific info
+        if (chat.isGroup) {
+            info.groupDescription = chat.groupMetadata?.desc || '';
+            info.groupCreatedAt = chat.groupMetadata?.creation || 0;
+            info.participantCount = chat.groupMetadata?.participants?.length || 0;
+            info.participants = (chat.groupMetadata?.participants || []).map(p => ({
+                id: p.id._serialized,
+                isAdmin: p.isAdmin,
+                isSuperAdmin: p.isSuperAdmin
+            }));
+        }
+
+        res.json({ success: true, info });
+    } catch (err) {
+        console.error('[WA API] Get info error:', err.message);
+        res.status(500).json({ success: false, error: err.message });
+    }
+});
+
+// Star / Unstar a message
+app.post('/api/whatsapp/messages/:msgId/star', authMiddleware, async (req, res) => {
+    try {
+        const userId = req.user.id;
+        const msgId = decodeURIComponent(req.params.msgId);
+        const chatId = decodeURIComponent(req.body.chatId);
+        const client = await whatsappService.getClient(userId);
+
+        const chat = await client.getChatById(chatId);
+        const messages = await chat.fetchMessages({ limit: 100 });
+        const msg = messages.find(m => m.id._serialized === msgId);
+
+        if (!msg) return res.json({ success: false, error: 'Message not found' });
+
+        if (msg.isStarred) {
+            await msg.unstar();
+            res.json({ success: true, starred: false });
+        } else {
+            await msg.star();
+            res.json({ success: true, starred: true });
+        }
+    } catch (err) {
+        console.error('[WA API] Star error:', err.message);
+        res.status(500).json({ success: false, error: err.message });
+    }
+});
+
+// Get starred messages for a chat
+app.get('/api/whatsapp/chats/:chatId/starred', authMiddleware, async (req, res) => {
+    try {
+        const userId = req.user.id;
+        const chatId = decodeURIComponent(req.params.chatId);
+        const client = await whatsappService.getClient(userId);
+        const chat = await client.getChatById(chatId);
+        const messages = await chat.fetchMessages({ limit: 200 });
+        const starred = messages.filter(m => m.isStarred).map(m => ({
+            id: m.id._serialized,
+            body: m.body,
+            fromMe: m.fromMe,
+            timestamp: m.timestamp,
+            type: m.type,
+            hasMedia: m.hasMedia
+        }));
+        res.json({ success: true, messages: starred });
+    } catch (err) {
+        console.error('[WA API] Get starred error:', err.message);
+        res.json({ success: true, messages: [] });
+    }
+});
+
+// Add participant to group
+app.post('/api/whatsapp/groups/:chatId/add', authMiddleware, async (req, res) => {
+    try {
+        const userId = req.user.id;
+        const chatId = decodeURIComponent(req.params.chatId);
+        const { number } = req.body;
+        const client = await whatsappService.getClient(userId);
+        const chat = await client.getChatById(chatId);
+
+        if (!chat.isGroup) return res.json({ success: false, error: 'Not a group' });
+
+        const participantId = number.includes('@') ? number : `${number}@c.us`;
+        const result = await chat.addParticipants([participantId]);
+        res.json({ success: true, result });
+    } catch (err) {
+        console.error('[WA API] Add participant error:', err.message);
+        res.status(500).json({ success: false, error: err.message });
+    }
+});
+
+// Remove participant from group
+app.post('/api/whatsapp/groups/:chatId/remove', authMiddleware, async (req, res) => {
+    try {
+        const userId = req.user.id;
+        const chatId = decodeURIComponent(req.params.chatId);
+        const { participantId } = req.body;
+        const client = await whatsappService.getClient(userId);
+        const chat = await client.getChatById(chatId);
+
+        if (!chat.isGroup) return res.json({ success: false, error: 'Not a group' });
+
+        await chat.removeParticipants([participantId]);
+        res.json({ success: true });
+    } catch (err) {
+        console.error('[WA API] Remove participant error:', err.message);
         res.status(500).json({ success: false, error: err.message });
     }
 });
@@ -1116,6 +1454,7 @@ const FB_GRAPH_URL = 'https://graph.facebook.com/v21.0';
 const FB_APP_ID = process.env.FB_APP_ID;
 const FB_APP_SECRET = process.env.FB_APP_SECRET;
 const REDIRECT_URI = `${process.env.BASE_URL || 'http://localhost:3000'}/auth/facebook/callback`;
+const IG_REDIRECT_URI = `${process.env.BASE_URL || 'http://localhost:3000'}/auth/instagram/callback`;
 
 // ============= LOG SYSTEM =============
 const systemLogs = [];
@@ -1919,12 +2258,10 @@ app.get('/auth/facebook', (req, res) => {
     const permissions = [
         'pages_show_list',
         'pages_read_engagement',
-        'pages_manage_posts',
-        'pages_read_user_content',
         'pages_manage_metadata',  // Required for webhook subscriptions
         'pages_messaging',        // Required for inbox/conversations
         'public_profile',
-        'ads_read'
+        'email'
     ].join(',');
 
     // Include OctoBot user ID in state for multi-admin support
@@ -1986,20 +2323,17 @@ app.get('/auth/facebook/callback', async (req, res) => {
 
         const user = userResponse.data;
 
-        // Store user data with OctoBot user link for multi-admin support
         appData.users[user.id] = {
             id: user.id,
             name: user.name,
             picture: user.picture?.data?.url,
             accessToken: longLivedToken,
             connectedAt: new Date().toISOString(),
-            octobotUserId: octobotUserId  // Link to OctoBot admin user
+            octobotUserId: octobotUserId
         };
         saveData();
 
         console.log(`[FB Auth] Connected Facebook ${user.name} (${user.id}) to OctoBot user ${octobotUserId}`);
-
-        // Redirect to app with success
         res.redirect(`/?auth=success&userId=${user.id}`);
 
     } catch (err) {
@@ -2014,6 +2348,185 @@ app.post('/auth/facebook/disconnect', (req, res) => {
     if (appData.users[userId]) {
         delete appData.users[userId];
         saveData();
+    }
+    res.json({ success: true });
+});
+
+// ============= DEBUG TEST - MINIMAL PERMISSIONS =============
+app.get('/auth/test', (req, res) => {
+    const authUrl = `https://www.facebook.com/v18.0/dialog/oauth?` +
+        `client_id=${FB_APP_ID}` +
+        `&redirect_uri=${encodeURIComponent(REDIRECT_URI)}` +
+        `&scope=public_profile,email` +
+        `&response_type=code`;
+    console.log('[TEST] Minimal auth URL:', authUrl);
+    res.redirect(authUrl);
+});
+
+// ============= INSTAGRAM AUTH (CUSTOMER OAUTH - FULL PERMISSIONS) =============
+
+// Step 1: Get Instagram OAuth URL (same Facebook dialog but with full permissions)
+app.get('/auth/instagram', (req, res) => {
+    const { octobotUserId } = req.query;
+
+    // Permissions configured in Facebook App Use Cases
+    const permissions = [
+        'pages_messaging',
+        'email',
+        'public_profile',
+        'pages_show_list',
+        'pages_read_engagement',
+        'pages_manage_metadata',
+        'instagram_basic',
+        'instagram_manage_messages',
+        'instagram_manage_comments',
+        'instagram_content_publish'
+    ].join(',');
+
+    // Include OctoBot user ID in state (with ig_ prefix to identify Instagram flow)
+    const stateData = JSON.stringify({
+        octobotUserId: octobotUserId || '',
+        flow: 'instagram'
+    });
+    const state = encodeURIComponent(Buffer.from(stateData).toString('base64'));
+
+    // Use the IG_REDIRECT_URI 
+    const authUrl = `https://www.facebook.com/v18.0/dialog/oauth?` +
+        `client_id=${FB_APP_ID}` +
+        `&redirect_uri=${encodeURIComponent(IG_REDIRECT_URI)}` +
+        `&scope=${permissions}` +
+        `&response_type=code` +
+        `&state=${state}`;
+
+    console.log('[IG Auth] Generated Instagram OAuth URL');
+    console.log('[IG Auth] Permissions:', permissions);
+    console.log('[IG Auth] Redirect URI:', IG_REDIRECT_URI);
+
+    // If json=true, return JSON; otherwise redirect directly to Facebook
+    if (req.query.json === 'true') {
+        res.json({ authUrl });
+    } else {
+        res.redirect(authUrl);
+    }
+});
+
+// Step 2: Handle Instagram OAuth Callback
+app.get('/auth/instagram/callback', async (req, res) => {
+    const { code, error, state } = req.query;
+
+    // Decode state
+    let octobotUserId = null;
+    try {
+        if (state) {
+            const stateData = JSON.parse(Buffer.from(decodeURIComponent(state), 'base64').toString());
+            octobotUserId = stateData.octobotUserId || null;
+        }
+    } catch (e) {
+        console.error('[IG Auth] Error parsing state:', e.message);
+    }
+
+    if (error) {
+        console.error('[IG Auth] OAuth error:', error);
+        return res.redirect('/?error=' + encodeURIComponent(error));
+    }
+
+    try {
+        // Exchange code for access token
+        const tokenResponse = await axios.get(`${FB_GRAPH_URL}/oauth/access_token`, {
+            params: {
+                client_id: FB_APP_ID,
+                client_secret: FB_APP_SECRET,
+                redirect_uri: IG_REDIRECT_URI,
+                code: code
+            }
+        });
+
+        const { access_token } = tokenResponse.data;
+
+        // Get long-lived token (60 days)
+        const longTokenResponse = await axios.get(`${FB_GRAPH_URL}/oauth/access_token`, {
+            params: {
+                grant_type: 'fb_exchange_token',
+                client_id: FB_APP_ID,
+                client_secret: FB_APP_SECRET,
+                fb_exchange_token: access_token
+            }
+        });
+
+        const longLivedToken = longTokenResponse.data.access_token;
+
+        // Get user info
+        const userResponse = await axios.get(`${FB_GRAPH_URL}/me`, {
+            params: {
+                fields: 'id,name,picture',
+                access_token: longLivedToken
+            }
+        });
+
+        const user = userResponse.data;
+
+        // Get user's pages with tokens
+        let pages = {};
+        try {
+            const pagesResponse = await axios.get(`${FB_GRAPH_URL}/${user.id}/accounts`, {
+                params: {
+                    access_token: longLivedToken,
+                    fields: 'id,name,access_token,picture,instagram_business_account',
+                    limit: 100
+                }
+            });
+
+            if (pagesResponse.data.data) {
+                for (const page of pagesResponse.data.data) {
+                    pages[page.id] = {
+                        id: page.id,
+                        name: page.name,
+                        accessToken: page.access_token,
+                        picture: page.picture?.data?.url,
+                        instagramAccountId: page.instagram_business_account?.id || null
+                    };
+                }
+            }
+        } catch (pagesErr) {
+            console.error('[IG Auth] Error fetching pages:', pagesErr.message);
+        }
+
+        // Store user data
+        appData.users[user.id] = {
+            id: user.id,
+            name: user.name,
+            picture: user.picture?.data?.url,
+            accessToken: longLivedToken,
+            connectedAt: new Date().toISOString(),
+            octobotUserId: octobotUserId,
+            authFlow: 'instagram',
+            pages: pages
+        };
+        saveData();
+
+        // Subscribe pages to webhooks automatically
+        for (const pageId of Object.keys(pages)) {
+            await subscribePageToWebhook(pageId, pages[pageId].accessToken).catch(err => {
+                console.error(`[IG Auth] Failed to subscribe page ${pageId}:`, err.message);
+            });
+        }
+
+        console.log(`[IG Auth] ✅ Connected ${user.name} via Instagram flow`);
+        res.redirect(`/?auth=success&userId=${user.id}&flow=instagram`);
+
+    } catch (err) {
+        console.error('[IG Auth] Auth error:', err.response?.data || err.message);
+        res.redirect('/?error=instagram_auth_failed');
+    }
+});
+
+// Disconnect Instagram/Facebook OAuth
+app.post('/auth/instagram/disconnect', (req, res) => {
+    const { userId } = req.body;
+    if (appData.users[userId]) {
+        delete appData.users[userId];
+        saveData();
+        console.log(`[IG Auth] Disconnected user ${userId}`);
     }
     res.json({ success: true });
 });
@@ -6716,6 +7229,17 @@ async function startServer() {
         }, 30000);
 
         console.log('[Scheduler] ✅ Analytics sync job scheduled (runs every hour)');
+
+        // ============= WHATSAPP AUTO-RECONNECT =============
+        // Reconnect saved WhatsApp sessions from DB (after 15 seconds to let server stabilize)
+        setTimeout(async () => {
+            try {
+                console.log('[WA AutoReconnect] 🔄 Starting WhatsApp session auto-reconnect...');
+                await whatsappService.autoReconnectAll(5000); // 5s delay between each session
+            } catch (err) {
+                console.error('[WA AutoReconnect] ❌ Auto-reconnect failed:', err.message);
+            }
+        }, 15000);
 
         // ============= AUTO-START PUPPETEER AUTOMATION =============
         // Auto-initialize Puppeteer for campaign fallback (after 10 seconds)

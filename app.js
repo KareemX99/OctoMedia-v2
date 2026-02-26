@@ -2372,14 +2372,68 @@ class SocialMediaHub {
                                 <div class="wa-chat-header-status" id="waChatHeaderStatus"></div>
                             </div>
                             <div class="wa-chat-header-actions">
+                                <button onclick="app._waToggleSearchBar()" title="بحث في الرسائل"><i class="fas fa-search"></i></button>
+                                <button onclick="app._waShowStarred()" title="الرسائل المميزة"><i class="fas fa-star"></i></button>
+                                <button onclick="app._waExportChat()" title="تصدير المحادثة"><i class="fas fa-file-export"></i></button>
+                                <button onclick="app._waToggleLabelMenu(event)" title="إدارة التصنيفات" id="waLabelBtn"><i class="fas fa-tags"></i></button>
+                                <button onclick="app._waToggleInfoPanel()" title="معلومات"><i class="fas fa-info-circle"></i></button>
                                 <button onclick="app.waRefreshMessages()" title="تحديث"><i class="fas fa-sync-alt"></i></button>
                             </div>
                         </div>
+
+                        <!-- Message Search Bar (hidden by default) -->
+                        <div id="waSearchBar" class="wa-search-bar" style="display:none;">
+                            <input type="text" id="waSearchInput" placeholder="بحث في الرسائل..." oninput="app._waSearchMessages(this.value)">
+                            <span id="waSearchCount" class="wa-search-count"></span>
+                            <button onclick="app._waSearchNav(-1)" title="السابق"><i class="fas fa-chevron-up"></i></button>
+                            <button onclick="app._waSearchNav(1)" title="التالي"><i class="fas fa-chevron-down"></i></button>
+                            <button onclick="app._waToggleSearchBar()" title="إغلاق"><i class="fas fa-times"></i></button>
+                        </div>
+
                         <!-- Messages Container (hidden until chat selected) -->
                         <div class="wa-messages" id="waMessagesContainer" style="display:none;"></div>
+
+                        <!-- Contact/Group Info Panel (slides from left) -->
+                        <div id="waInfoPanel" class="wa-info-panel" style="display:none;">
+                            <div class="wa-info-header">
+                                <button onclick="app._waCloseInfoPanel()"><i class="fas fa-times"></i></button>
+                                <span>معلومات</span>
+                            </div>
+                            <div id="waInfoContent" class="wa-info-content"></div>
+                        </div>
+                        <!-- Hidden file input for WhatsApp media -->
+                        <input type="file" id="waFileInput" style="display:none"
+                            accept="image/*,video/*,audio/*,.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.zip,.rar,.csv"
+                            onchange="app._waOnFileSelected(this)">
+                        
+                        <!-- Media Preview Panel (shown when file is selected) -->
+                        <div id="waMediaPreview" class="wa-media-preview" style="display:none;">
+                            <div class="wa-preview-content">
+                                <div id="waPreviewThumb" class="wa-preview-thumb"></div>
+                                <div class="wa-preview-info">
+                                    <span id="waPreviewName" class="wa-preview-name"></span>
+                                    <span id="waPreviewSize" class="wa-preview-size"></span>
+                                </div>
+                                <button class="wa-preview-cancel" onclick="app._waClearMediaPreview()" title="إلغاء">
+                                    <i class="fas fa-times"></i>
+                                </button>
+                            </div>
+                        </div>
+
+                        <!-- Reply Preview Bar (shown when replying) -->
+                        <div id="waReplyPreview" class="wa-reply-preview" style="display:none;"></div>
+
                         <!-- Input Area (hidden until chat selected) -->
+                        <!-- Emoji Picker Panel -->
+                        <div id="waEmojiPicker" class="wa-emoji-picker" style="display:none;"></div>
+
                         <div class="wa-input-area" id="waInputArea" style="display:none;">
-                            <button class="wa-attach-btn" title="إرفاق"><i class="fas fa-paperclip"></i></button>
+                            <button class="wa-attach-btn" onclick="document.getElementById('waFileInput').click()" title="إرفاق ملف">
+                                <i class="fas fa-paperclip"></i>
+                            </button>
+                            <button class="wa-emoji-btn" onclick="app._waToggleEmojiPicker()" title="إيموجي">
+                                <i class="far fa-smile"></i>
+                            </button>
                             <div class="wa-input-wrap">
                                 <input type="text" id="waMessageInput" placeholder="اكتب رسالة..." 
                                     onkeypress="if(event.key==='Enter'){event.preventDefault();app.waSendMessage();}">
@@ -10826,7 +10880,17 @@ class SocialMediaHub {
         }
 
         try {
-            console.log('[WA UI] Fetching chats from API...');
+            console.log('[WA UI] Fetching labels and chats from API...');
+
+            // Fetch labels first
+            try {
+                const lRes = await fetch(`${this.API_URL}/api/whatsapp/labels`, { headers: this._waHeaders() });
+                const lData = await lRes.json();
+                if (lData.success) {
+                    this._waAllLabels = lData.labels;
+                }
+            } catch (e) { console.error('Failed to fetch WA labels', e); }
+
             const res = await fetch(`${this.API_URL}/api/whatsapp/chats`, { headers: this._waHeaders() });
             const data = await res.json();
             console.log('[WA UI] Chats response:', data.chats?.length || 0, 'chats', data.error || '');
@@ -10864,39 +10928,496 @@ class SocialMediaHub {
         }
     }
 
-    // Render chat list items (with pinned support)
+
+    // Render chat list items (with pinned + archived separation)
     _waRenderChatList(chats) {
         const list = document.getElementById('waChatList');
         if (!list) return;
 
-        list.innerHTML = chats.slice(0, 60).map(chat => {
-            const initial = (chat.name || '?').charAt(0).toUpperCase();
-            const isGroup = chat.isGroup;
-            const lastMsg = chat.lastMessage || '';
-            const time = chat.timestamp ? this._waFormatTime(chat.timestamp) : '';
-            const unread = chat.unreadCount || 0;
-            const chatId = (chat.id || '').replace(/'/g, "\\'");
-            const chatName = (chat.name || 'محادثة').replace(/'/g, "\\'");
-            const isActive = this.currentWaChat === chat.id;
-            const isPinned = chat.pinned;
+        // If viewing archived, render only archived chats
+        if (this._waShowingArchived) {
+            const archivedChats = chats.filter(c => c.archived);
+            list.innerHTML = `
+                <div class="wa-archived-header" onclick="app._waBackFromArchived()">
+                    <i class="fas fa-arrow-right"></i>
+                    <span>المحادثات المؤرشفة (${archivedChats.length})</span>
+                </div>
+                ${archivedChats.length === 0 ? '<div style="text-align:center;padding:40px;color:var(--wa-text-secondary);">لا توجد محادثات مؤرشفة</div>' : ''}
+                ${archivedChats.map(chat => this._waRenderChatItem(chat)).join('')}
+            `;
+            return;
+        }
 
-            return `
-            <div class="wa-chat-item${isActive ? ' active' : ''}${isPinned ? ' pinned' : ''}" data-chat-id="${chat.id}" onclick="app.waOpenChat('${chatId}', '${chatName}', ${isGroup})">
-                <div class="wa-chat-avatar${isGroup ? ' group' : ''}">
-                    ${isGroup ? '<i class="fas fa-users"></i>' : initial}
+        // Normal view: active chats + archived bar at TOP
+        const activeChats = chats.filter(c => !c.archived);
+        const archivedCount = chats.filter(c => c.archived).length;
+
+        let html = '';
+
+        // Show archived bar at top if there are archived chats
+        if (archivedCount > 0) {
+            html += `
+                <div class="wa-archived-bar" onclick="app._waToggleArchived()">
+                    <i class="fas fa-archive"></i>
+                    <span>المحادثات المؤرشفة</span>
+                    <span class="wa-archived-count">${archivedCount}</span>
                 </div>
-                <div class="wa-chat-info">
-                    <div class="wa-chat-info-top">
-                        <span class="wa-chat-name">${isPinned ? '<i class="fas fa-thumbtack" style="font-size:10px;color:var(--wa-text-muted);margin-left:4px;"></i> ' : ''}${chat.name || 'غير معروف'}</span>
-                        <span class="wa-chat-time${unread > 0 ? ' unread' : ''}">${time}</span>
-                    </div>
-                    <div class="wa-chat-info-bottom">
-                        <span class="wa-chat-preview">${lastMsg}</span>
-                        ${unread > 0 ? `<span class="wa-unread-badge">${unread}</span>` : ''}
-                    </div>
+            `;
+        }
+
+        html += activeChats.slice(0, 60).map(chat => this._waRenderChatItem(chat)).join('');
+
+        list.innerHTML = html;
+    }
+
+    // Render a single chat item
+    _waRenderChatItem(chat) {
+        const initial = (chat.name || '?').charAt(0).toUpperCase();
+        const isGroup = chat.isGroup;
+        const lastMsg = chat.lastMessage || '';
+        const time = chat.timestamp ? this._waFormatTime(chat.timestamp) : '';
+        const unread = chat.unreadCount || 0;
+        const chatId = (chat.id || '').replace(/'/g, "\\'");
+        const chatName = (chat.name || 'محادثة').replace(/'/g, "\\'");
+        const isActive = this.currentWaChat === chat.id;
+        const isPinned = chat.pinned;
+
+        // Labels HTML
+        let labelsHtml = '';
+        if (chat.labels && chat.labels.length > 0 && this._waAllLabels) {
+            const dots = chat.labels.map(labelId => {
+                const l = this._waAllLabels.find(x => x.id === labelId);
+                return l ? `<div class="wa-label-dot" style="background:${l.color}" title="${l.name}"></div>` : '';
+            }).join('');
+            if (dots) labelsHtml = `<div class="wa-chat-labels">${dots}</div>`;
+        }
+
+        return `
+        <div class="wa-chat-item${isActive ? ' active' : ''}${isPinned ? ' pinned' : ''}" data-chat-id="${chat.id}" data-pinned="${isPinned ? '1' : '0'}" data-archived="${chat.archived ? '1' : '0'}" data-muted="${chat.isMuted ? '1' : '0'}" data-unread="${unread}" onclick="app.waOpenChat('${chatId}', '${chatName}', ${isGroup})" oncontextmenu="event.preventDefault();app._waShowChatMenu(event, '${chatId}', '${chatName}', ${isGroup})">
+            <div class="wa-chat-avatar${isGroup ? ' group' : ''}">
+                ${isGroup ? '<i class="fas fa-users"></i>' : initial}
+            </div>
+            <div class="wa-chat-info">
+                <div class="wa-chat-info-top">
+                    ${labelsHtml}
+                    <span class="wa-chat-name">${isPinned ? '<i class="fas fa-thumbtack" style="font-size:10px;color:var(--wa-text-muted);margin-left:4px;"></i> ' : ''}${chat.isMuted ? '<i class="fas fa-bell-slash" style="font-size:9px;color:var(--wa-text-muted);margin-left:3px;"></i> ' : ''}${chat.name || 'غير معروف'}</span>
+                    <span class="wa-chat-time${unread > 0 ? ' unread' : ''}">${time}</span>
                 </div>
+                <div class="wa-chat-info-bottom">
+                    <span class="wa-chat-preview">${lastMsg}</span>
+                    ${unread > 0 ? `<span class="wa-unread-badge">${unread}</span>` : ''}
+                </div>
+            </div>
+        </div>`;
+    }
+
+    // Show archived chats view
+    _waToggleArchived() {
+        this._waShowingArchived = true;
+        if (this._waCachedChats) {
+            this._waRenderChatList(this._waCachedChats);
+        }
+    }
+
+    // Go back to main chat list
+    _waBackFromArchived() {
+        this._waShowingArchived = false;
+        if (this._waCachedChats) {
+            this._waRenderChatList(this._waCachedChats);
+        }
+    }
+
+    // ============= MESSAGE SEARCH =============
+
+    _waToggleSearchBar() {
+        const bar = document.getElementById('waSearchBar');
+        if (!bar) return;
+        if (bar.style.display !== 'none') {
+            bar.style.display = 'none';
+            // Clear highlights
+            document.querySelectorAll('.wa-search-highlight').forEach(el => {
+                el.outerHTML = el.textContent;
+            });
+            this._waSearchResults = [];
+            this._waSearchIdx = -1;
+        } else {
+            bar.style.display = 'flex';
+            document.getElementById('waSearchInput')?.focus();
+        }
+    }
+
+    _waSearchMessages(query) {
+        const container = document.getElementById('waMessagesContainer');
+        const countEl = document.getElementById('waSearchCount');
+        if (!container || !query || query.length < 2) {
+            // Clear previous highlights
+            document.querySelectorAll('.wa-search-highlight').forEach(el => {
+                el.outerHTML = el.textContent;
+            });
+            this._waSearchResults = [];
+            this._waSearchIdx = -1;
+            if (countEl) countEl.textContent = '';
+            return;
+        }
+
+        // Clear old highlights first
+        document.querySelectorAll('.wa-search-highlight').forEach(el => {
+            el.outerHTML = el.textContent;
+        });
+
+        const msgs = container.querySelectorAll('.wa-message-text');
+        this._waSearchResults = [];
+        const regex = new RegExp(`(${query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})`, 'gi');
+
+        msgs.forEach(el => {
+            if (el.textContent.toLowerCase().includes(query.toLowerCase())) {
+                el.innerHTML = el.innerHTML.replace(regex, '<span class="wa-search-highlight">$1</span>');
+                this._waSearchResults.push(el);
+            }
+        });
+
+        this._waSearchIdx = this._waSearchResults.length > 0 ? 0 : -1;
+        if (countEl) countEl.textContent = this._waSearchResults.length > 0 ? `${1}/${this._waSearchResults.length}` : 'لا نتائج';
+
+        if (this._waSearchResults.length > 0) {
+            this._waSearchResults[0].scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }
+    }
+
+    _waSearchNav(direction) {
+        if (!this._waSearchResults || this._waSearchResults.length === 0) return;
+        this._waSearchIdx = (this._waSearchIdx + direction + this._waSearchResults.length) % this._waSearchResults.length;
+        this._waSearchResults[this._waSearchIdx].scrollIntoView({ behavior: 'smooth', block: 'center' });
+        const countEl = document.getElementById('waSearchCount');
+        if (countEl) countEl.textContent = `${this._waSearchIdx + 1}/${this._waSearchResults.length}`;
+    }
+
+    // ============= CONTACT / GROUP INFO PANEL =============
+
+    async _waToggleInfoPanel() {
+        const panel = document.getElementById('waInfoPanel');
+        if (!panel || !this.currentWaChat) return;
+
+        if (panel.style.display !== 'none') {
+            this._waCloseInfoPanel();
+            return;
+        }
+
+        const content = document.getElementById('waInfoContent');
+        content.innerHTML = '<div style="text-align:center;padding:40px;color:var(--wa-text-secondary);"><i class="fas fa-spinner fa-spin" style="font-size:24px;"></i></div>';
+        panel.style.display = 'flex';
+
+        try {
+            const res = await fetch(`${this.API_URL}/api/whatsapp/chats/${encodeURIComponent(this.currentWaChat)}/info`, { headers: this._waHeaders() });
+            const data = await res.json();
+            if (!data.success) throw new Error(data.error);
+
+            const info = data.info;
+            let html = '';
+
+            // Profile section
+            html += `<div class="wa-info-profile">
+                <div class="wa-info-avatar ${info.isGroup ? 'group' : ''}">
+                    ${info.profilePicUrl ? `<img src="${info.profilePicUrl}" alt="">` : `<span>${info.isGroup ? '<i class="fas fa-users"></i>' : (info.name || '?').charAt(0).toUpperCase()}</span>`}
+                </div>
+                <div class="wa-info-name">${info.name}</div>
+                ${!info.isGroup ? `<div class="wa-info-number">+${info.number}</div>` : ''}
+                ${info.isBusiness ? '<div class="wa-info-badge"><i class="fas fa-briefcase"></i> حساب أعمال</div>' : ''}
+                ${info.isMyContact ? '<div class="wa-info-badge"><i class="fas fa-address-book"></i> جهة اتصال</div>' : ''}
             </div>`;
-        }).join('');
+
+            // About
+            if (info.about) {
+                html += `<div class="wa-info-section">
+                    <div class="wa-info-section-title">الحالة</div>
+                    <div class="wa-info-section-body">${info.about}</div>
+                </div>`;
+            }
+
+            // Group Info
+            if (info.isGroup) {
+                if (info.groupDescription) {
+                    html += `<div class="wa-info-section">
+                        <div class="wa-info-section-title">وصف المجموعة</div>
+                        <div class="wa-info-section-body">${info.groupDescription}</div>
+                    </div>`;
+                }
+
+                html += `<div class="wa-info-section">
+                    <div class="wa-info-section-title"><i class="fas fa-users"></i> الأعضاء (${info.participantCount})</div>
+                    <div class="wa-info-participants">
+                        ${info.participants.map(p => {
+                    const num = p.id.replace('@c.us', '');
+                    return `<div class="wa-info-participant">
+                                <span class="wa-info-p-num">+${num}</span>
+                                ${p.isAdmin || p.isSuperAdmin ? '<span class="wa-info-p-admin">مشرف</span>' : ''}
+                                <button class="wa-info-p-remove" onclick="app._waRemoveParticipant('${p.id}')" title="إزالة"><i class="fas fa-times"></i></button>
+                            </div>`;
+                }).join('')}
+                    </div>
+                    <div class="wa-info-add-member">
+                        <input type="text" id="waAddMemberInput" placeholder="رقم الهاتف (مثل 201xxxxxxxxx)">
+                        <button onclick="app._waAddParticipant()"><i class="fas fa-user-plus"></i> إضافة</button>
+                    </div>
+                </div>`;
+            }
+
+            // Shared Media section — from cached messages
+            if (this._waMessagesData && this._waMessagesData.length > 0) {
+                const mediaMessages = this._waMessagesData.filter(m =>
+                    (m.type === 'image' || m.type === 'video' || m.type === 'sticker') && m.id
+                );
+                if (mediaMessages.length > 0) {
+                    html += `<div class="wa-info-section">
+                        <div class="wa-info-section-title"><i class="fas fa-photo-video"></i> الوسائط المشتركة (${mediaMessages.length})</div>
+                        <div class="wa-info-media-grid">`;
+                    mediaMessages.slice(0, 30).forEach(m => {
+                        const mediaUrl = `${this.API_URL}/api/whatsapp/media/${encodeURIComponent(this.currentWaChat)}/${encodeURIComponent(m.id)}?token=${encodeURIComponent(localStorage.getItem('octobot_token'))}`;
+                        html += `<div class="wa-info-media-item" onclick="window.open('${mediaUrl}','_blank')">
+                            ${m.type === 'video' ? '<i class="fas fa-play-circle wa-info-media-play"></i>' : ''}
+                            <img src="${mediaUrl}" alt="" loading="lazy">
+                        </div>`;
+                    });
+                    html += `</div></div>`;
+                }
+            }
+
+            content.innerHTML = html;
+        } catch (err) {
+            content.innerHTML = `<div style="text-align:center;padding:40px;color:#ff6b6b;">فشل تحميل المعلومات<br><small>${err.message}</small></div>`;
+        }
+    }
+
+    _waCloseInfoPanel() {
+        const panel = document.getElementById('waInfoPanel');
+        if (panel) panel.style.display = 'none';
+    }
+
+    async _waAddParticipant() {
+        const input = document.getElementById('waAddMemberInput');
+        const number = input?.value?.trim();
+        if (!number || !this.currentWaChat) return;
+
+        try {
+            const res = await fetch(`${this.API_URL}/api/whatsapp/groups/${encodeURIComponent(this.currentWaChat)}/add`, {
+                method: 'POST',
+                headers: { ...this._waHeaders(), 'Content-Type': 'application/json' },
+                body: JSON.stringify({ number })
+            });
+            const data = await res.json();
+            if (data.success) {
+                this.showToast('تم إضافة العضو', 'success');
+                input.value = '';
+                this._waToggleInfoPanel(); // Refresh
+                setTimeout(() => this._waToggleInfoPanel(), 300);
+            } else {
+                this.showToast(data.error || 'فشل الإضافة', 'error');
+            }
+        } catch (err) {
+            this.showToast('حدث خطأ', 'error');
+        }
+    }
+
+    async _waRemoveParticipant(participantId) {
+        if (!this.currentWaChat || !confirm('هل تريد إزالة هذا العضو؟')) return;
+
+        try {
+            const res = await fetch(`${this.API_URL}/api/whatsapp/groups/${encodeURIComponent(this.currentWaChat)}/remove`, {
+                method: 'POST',
+                headers: { ...this._waHeaders(), 'Content-Type': 'application/json' },
+                body: JSON.stringify({ participantId })
+            });
+            const data = await res.json();
+            if (data.success) {
+                this.showToast('تم إزالة العضو', 'success');
+                this._waCloseInfoPanel();
+                setTimeout(() => this._waToggleInfoPanel(), 300);
+            } else {
+                this.showToast(data.error || 'فشل الإزالة', 'error');
+            }
+        } catch (err) {
+            this.showToast('حدث خطأ', 'error');
+        }
+    }
+
+    // ============= STARRED MESSAGES =============
+
+    async _waStarMessage(msgId) {
+        if (!this.currentWaChat) return;
+        try {
+            const res = await fetch(`${this.API_URL}/api/whatsapp/messages/${encodeURIComponent(msgId)}/star`, {
+                method: 'POST',
+                headers: { ...this._waHeaders(), 'Content-Type': 'application/json' },
+                body: JSON.stringify({ chatId: this.currentWaChat })
+            });
+            const data = await res.json();
+            if (data.success) {
+                // Toggle star icon
+                const btn = document.querySelector(`[data-msg-id="${msgId}"] .wa-star-btn i`);
+                if (btn) {
+                    btn.className = data.starred ? 'fas fa-star' : 'far fa-star';
+                    btn.style.color = data.starred ? '#F59E0B' : '';
+                }
+                this.showToast(data.starred ? 'تم التمييز ⭐' : 'تم إلغاء التمييز', 'success');
+            }
+        } catch (err) {
+            this.showToast('فشل تمييز الرسالة', 'error');
+        }
+    }
+
+    async _waShowStarred() {
+        if (!this.currentWaChat) return;
+        const panel = document.getElementById('waInfoPanel');
+        const content = document.getElementById('waInfoContent');
+        if (!panel || !content) return;
+
+        content.innerHTML = '<div style="text-align:center;padding:40px;color:var(--wa-text-secondary);"><i class="fas fa-spinner fa-spin" style="font-size:24px;"></i></div>';
+        panel.style.display = 'flex';
+
+        try {
+            const res = await fetch(`${this.API_URL}/api/whatsapp/chats/${encodeURIComponent(this.currentWaChat)}/starred`, { headers: this._waHeaders() });
+            const data = await res.json();
+            const msgs = data.messages || [];
+
+            let html = '<div class="wa-info-section"><div class="wa-info-section-title"><i class="fas fa-star" style="color:#F59E0B;"></i> الرسائل المميزة</div>';
+            if (msgs.length === 0) {
+                html += '<div style="text-align:center;padding:20px;color:var(--wa-text-secondary);">لا توجد رسائل مميزة</div>';
+            } else {
+                msgs.forEach(m => {
+                    const time = this._waFormatTime(m.timestamp);
+                    const dir = m.fromMe ? 'أنت' : 'العميل';
+                    html += `<div class="wa-starred-msg">
+                        <div class="wa-starred-meta"><span>${dir}</span><span>${time}</span></div>
+                        <div class="wa-starred-body">${m.body || (m.hasMedia ? '<i class="fas fa-image"></i> ميديا' : '—')}</div>
+                    </div>`;
+                });
+            }
+            html += '</div>';
+            content.innerHTML = html;
+        } catch (err) {
+            content.innerHTML = '<div style="text-align:center;padding:40px;color:var(--wa-danger);">فشل التحميل</div>';
+        }
+    }
+
+    // ============= EXPORT CHAT =============
+
+    _waExportChat() {
+        if (!this._waMessagesData || this._waMessagesData.length === 0) {
+            this.showToast('لا توجد رسائل للتصدير', 'warning');
+            return;
+        }
+
+        let text = `=== محادثة واتساب: ${this._waCurrentChatName || 'غير معروف'} ===\n`;
+        text += `تاريخ التصدير: ${new Date().toLocaleString('ar-EG')}\n`;
+        text += `عدد الرسائل: ${this._waMessagesData.length}\n`;
+        text += '='.repeat(50) + '\n\n';
+
+        this._waMessagesData.forEach(msg => {
+            const date = new Date(msg.timestamp * 1000);
+            const timeStr = date.toLocaleString('ar-EG');
+            const sender = msg.fromMe ? 'أنت' : (this._waCurrentChatName || 'العميل');
+            const body = msg.body || (msg.hasMedia ? `[${msg.type || 'ميديا'}]` : '');
+            text += `[${timeStr}] ${sender}: ${body}\n`;
+        });
+
+        // Download as .txt
+        const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `chat_${this._waCurrentChatName || 'export'}_${new Date().toISOString().slice(0, 10)}.txt`;
+        a.click();
+        URL.revokeObjectURL(url);
+        this.showToast('تم تصدير المحادثة 📤', 'success');
+    }
+
+    // ============= CHAT CONTEXT MENU =============
+
+    _waShowChatMenu(event, chatId, chatName, isGroup) {
+        // Remove existing menu
+        const existing = document.getElementById('waChatContextMenu');
+        if (existing) existing.remove();
+
+        const el = event.currentTarget;
+        const isPinned = el?.dataset?.pinned === '1';
+        const isArchived = el?.dataset?.archived === '1';
+        const isMuted = el?.dataset?.muted === '1';
+        const hasUnread = parseInt(el?.dataset?.unread || '0') > 0;
+
+        const menu = document.createElement('div');
+        menu.id = 'waChatContextMenu';
+        menu.className = 'wa-context-menu';
+
+        menu.innerHTML = `
+            <div class="wa-ctx-item" onclick="app._waChatAction('${chatId}', 'pin')">
+                <i class="fas fa-thumbtack"></i>
+                <span>${isPinned ? 'إلغاء التثبيت' : 'تثبيت'}</span>
+            </div>
+            <div class="wa-ctx-item" onclick="app._waChatAction('${chatId}', 'archive')">
+                <i class="fas fa-archive"></i>
+                <span>${isArchived ? 'إلغاء الأرشفة' : 'أرشفة'}</span>
+            </div>
+            <div class="wa-ctx-item" onclick="app._waChatAction('${chatId}', 'mute')">
+                <i class="fas ${isMuted ? 'fa-bell' : 'fa-bell-slash'}"></i>
+                <span>${isMuted ? 'إلغاء الكتم' : 'كتم'}</span>
+            </div>
+            <div class="wa-ctx-divider"></div>
+            <div class="wa-ctx-item" onclick="app._waChatAction('${chatId}', '${hasUnread ? 'read' : 'unread'}')">
+                <i class="fas ${hasUnread ? 'fa-envelope-open' : 'fa-envelope'}"></i>
+                <span>${hasUnread ? 'تعيين كمقروء' : 'تعيين كغير مقروء'}</span>
+            </div>
+        `;
+
+        // Position near cursor
+        const x = event.clientX;
+        const y = event.clientY;
+        menu.style.position = 'fixed';
+        menu.style.zIndex = '10000';
+        menu.style.top = `${y}px`;
+        menu.style.left = `${x}px`;
+
+        document.body.appendChild(menu);
+
+        // Adjust if overflows viewport
+        const rect = menu.getBoundingClientRect();
+        if (rect.right > window.innerWidth) menu.style.left = `${x - rect.width}px`;
+        if (rect.bottom > window.innerHeight) menu.style.top = `${y - rect.height}px`;
+
+        // Close on click anywhere
+        const close = () => { menu.remove(); document.removeEventListener('click', close); };
+        setTimeout(() => document.addEventListener('click', close), 0);
+    }
+
+    async _waChatAction(chatId, action) {
+        // Close menu
+        const menu = document.getElementById('waChatContextMenu');
+        if (menu) menu.remove();
+
+        const labels = {
+            pin: ['تم التثبيت/إلغاء التثبيت', 'فشل التثبيت'],
+            archive: ['تم الأرشفة/إلغاء الأرشفة', 'فشل الأرشفة'],
+            mute: ['تم الكتم/إلغاء الكتم', 'فشل الكتم'],
+            read: ['تم التعيين كمقروء', 'فشل التعيين'],
+            unread: ['تم التعيين كغير مقروء', 'فشل التعيين']
+        };
+
+        try {
+            const res = await fetch(`${this.API_URL}/api/whatsapp/chats/${encodeURIComponent(chatId)}/${action}`, {
+                method: 'POST',
+                headers: this._waHeaders()
+            });
+            const data = await res.json();
+            if (data.success) {
+                this.showToast(labels[action]?.[0] || 'تم', 'success');
+                // Refresh chat list
+                this.waLoadChats();
+            } else {
+                this.showToast(data.error || labels[action]?.[1] || 'فشل', 'error');
+            }
+        } catch (err) {
+            console.error(`[WA UI] Chat action '${action}' error:`, err);
+            this.showToast(labels[action]?.[1] || 'حدث خطأ', 'error');
+        }
     }
 
     // Filter chats by search query
@@ -10959,12 +11480,61 @@ class SocialMediaHub {
         // Load messages
         await this._waLoadMessages(chatId);
 
+        // Mark chat as read — remove unread badge from UI + call API
+        const chatItem = document.querySelector(`.wa-chat-item[data-chat-id="${chatId}"]`);
+        if (chatItem) {
+            const badge = chatItem.querySelector('.wa-unread-badge');
+            if (badge) badge.remove();
+            chatItem.dataset.unread = '0';
+            // Also fix the time color
+            const timeEl = chatItem.querySelector('.wa-chat-time');
+            if (timeEl) timeEl.classList.remove('unread');
+        }
+        // Update cached data
+        if (this._waCachedChats) {
+            const cached = this._waCachedChats.find(c => c.id === chatId);
+            if (cached) cached.unreadCount = 0;
+        }
+        // Call API to mark as read on WhatsApp (fire and forget)
+        fetch(`${this.API_URL}/api/whatsapp/chats/${encodeURIComponent(chatId)}/read`, {
+            method: 'POST',
+            headers: this._waHeaders()
+        }).catch(() => { });
+
         // Start message polling for real-time updates (fallback for Socket.IO)
         this._waStartMsgPolling(chatId);
 
-        // Focus input
+        // Setup drag & drop on the messages container
+        this._waSetupDragDrop();
+
+        // Setup clipboard paste for images
+        this._waSetupClipboardPaste();
+
+        // Clear any leftover reply state
+        this._waClearReply();
+
+        // Focus input and add typing sender
         const input = document.getElementById('waMessageInput');
-        if (input) input.focus();
+        if (input) {
+            input.focus();
+
+            // Debounced typing sender (send typing state to contact)
+            if (!input._waTypingHandler) {
+                input._waTypingHandler = true;
+                let typingTimer = null;
+                input.addEventListener('input', () => {
+                    if (!this.currentWaChat) return;
+                    if (typingTimer) return; // Already sent recently
+                    // Send typing state
+                    fetch(`${this.API_URL}/api/whatsapp/chats/${encodeURIComponent(this.currentWaChat)}/typing`, {
+                        method: 'POST',
+                        headers: this._waHeaders()
+                    }).catch(() => { });
+                    // Debounce: wait 2s before sending again
+                    typingTimer = setTimeout(() => { typingTimer = null; }, 2000);
+                });
+            }
+        }
     }
 
     // Load messages for a chat
@@ -11015,17 +11585,49 @@ class SocialMediaHub {
             const chatId = this.currentWaChat;
             const authToken = localStorage.getItem('octobot_token');
             const mediaUrl = msg.hasMedia && msg.id ? `${this.API_URL}/api/whatsapp/media/${encodeURIComponent(chatId)}/${encodeURIComponent(msg.id)}?token=${encodeURIComponent(authToken)}` : null;
+            const safeMediaUrl = mediaUrl ? mediaUrl.replace(/'/g, "\\'") : '';
+            const docName = msg.body || 'مستند';
+            const safeDocName = docName.replace(/'/g, "\\'");
+
+            // Ticks for sent messages (ack: 0=pending, 1=sent, 2=delivered, 3=read, 4=played)
+            // Computed BEFORE content so image/video overlays can use it
+            let ticks = '';
+            if (isMe) {
+                if (msg.ack >= 3) ticks = '<span class="wa-message-ticks read"><i class="fas fa-check-double"></i></span>';
+                else if (msg.ack >= 2) ticks = '<span class="wa-message-ticks"><i class="fas fa-check-double"></i></span>';
+                else if (msg.ack >= 1) ticks = '<span class="wa-message-ticks"><i class="fas fa-check"></i></span>';
+                else ticks = '<span class="wa-message-ticks"><i class="far fa-clock"></i></span>';
+            }
 
             if (msg.type === 'image' && mediaUrl) {
                 content = `<div class="wa-media-bubble">
-                    <img src="${mediaUrl}" class="wa-media-img" loading="lazy" onclick="window.open(this.src)" alt="صورة"
-                         onerror="this.onerror=null;this.outerHTML='<div class=\\'wa-media-placeholder\\' onclick=\\'window.open(&quot;${mediaUrl}&quot;)\\'><i class=\\'fas fa-image\\'></i><span>صورة</span></div>'">
+                    <div class="wa-media-wrapper">
+                        <img src="${mediaUrl}" class="wa-media-img" loading="lazy"
+                             onclick="app._waOpenLightbox('${safeMediaUrl}')" alt="صورة"
+                             onerror="this.onerror=null;this.outerHTML='<div class=\\'wa-media-placeholder\\'><i class=\\'fas fa-image\\'></i><span>صورة</span></div>'">
+                        <button class="wa-media-download-btn" onclick="event.stopPropagation();app._waDownloadMedia('${safeMediaUrl}','image_${msg.timestamp || Date.now()}.jpg')" title="حفظ">
+                            <i class="fas fa-download"></i>
+                        </button>
+                        <div class="wa-media-time-overlay">
+                            <span class="wa-message-time">${time}</span>
+                            ${ticks}
+                        </div>
+                    </div>
                     ${msg.body ? `<div class="wa-media-caption" dir="auto">${msg.body}</div>` : ''}
                 </div>`;
             } else if (msg.type === 'video' && mediaUrl) {
                 content = `<div class="wa-media-bubble">
-                    <video src="${mediaUrl}" class="wa-media-video" controls preload="metadata"
-                           onerror="this.onerror=null;this.outerHTML='<div class=\\'wa-media-placeholder\\'><i class=\\'fas fa-video\\'></i><span>فيديو</span></div>'"></video>
+                    <div class="wa-media-wrapper">
+                        <video src="${mediaUrl}" class="wa-media-video" controls preload="metadata"
+                               onerror="this.onerror=null;this.outerHTML='<div class=\\'wa-media-placeholder\\'><i class=\\'fas fa-video\\'></i><span>فيديو</span></div>'"></video>
+                        <button class="wa-media-download-btn" onclick="event.stopPropagation();app._waDownloadMedia('${safeMediaUrl}','video_${msg.timestamp || Date.now()}.mp4')" title="حفظ">
+                            <i class="fas fa-download"></i>
+                        </button>
+                        <div class="wa-media-time-overlay">
+                            <span class="wa-message-time">${time}</span>
+                            ${ticks}
+                        </div>
+                    </div>
                     ${msg.body ? `<div class="wa-media-caption" dir="auto">${msg.body}</div>` : ''}
                 </div>`;
             } else if ((msg.type === 'audio' || msg.type === 'ptt') && mediaUrl) {
@@ -11033,14 +11635,21 @@ class SocialMediaHub {
                     <i class="fas fa-microphone wa-voice-icon"></i>
                     <audio src="${mediaUrl}" class="wa-media-audio" controls preload="metadata"
                            onerror="this.onerror=null;this.outerHTML='<span>🎤 رسالة صوتية</span>'"></audio>
+                    <button class="wa-audio-download-btn" onclick="event.stopPropagation();app._waDownloadMedia('${safeMediaUrl}','audio_${msg.timestamp || Date.now()}.ogg')" title="حفظ">
+                        <i class="fas fa-download"></i>
+                    </button>
                 </div>`;
             } else if (msg.type === 'document' && mediaUrl) {
+                const docIcon = this._waGetFileIcon(docName);
+                const docColor = this._waGetFileColor(docName);
                 content = `<div class="wa-doc-bubble">
-                    <i class="fas fa-file-alt wa-doc-icon"></i>
+                    <i class="fas ${docIcon} wa-doc-icon" style="color:${docColor};"></i>
                     <div class="wa-doc-info">
-                        <span class="wa-doc-name">${msg.body || 'مستند'}</span>
-                        <a href="${mediaUrl}" target="_blank" class="wa-doc-download"><i class="fas fa-download"></i> تحميل</a>
+                        <span class="wa-doc-name">${docName}</span>
                     </div>
+                    <button class="wa-doc-download-btn" onclick="event.stopPropagation();app._waDownloadMedia('${safeMediaUrl}','${safeDocName}')" title="تحميل">
+                        <i class="fas fa-download"></i>
+                    </button>
                 </div>`;
             } else if (msg.type === 'sticker' && mediaUrl) {
                 content = `<img src="${mediaUrl}" class="wa-sticker-img" loading="lazy" alt="ستيكر"
@@ -11051,9 +11660,28 @@ class SocialMediaHub {
                 const icon = icons[msg.type] || 'fa-paperclip';
                 const labels = { image: 'صورة', video: 'فيديو', audio: 'رسالة صوتية', ptt: 'رسالة صوتية', document: 'مستند', sticker: 'ستيكر' };
                 const label = labels[msg.type] || 'ملف';
-                content = `<div class="wa-media-placeholder"><i class="fas ${icon}"></i><span>${label}</span></div>${msg.body ? `<div dir="auto">${msg.body}</div>` : ''}`;
+                const dlBtn = mediaUrl ? `<button class="wa-media-download-btn wa-fallback-dl" onclick="event.stopPropagation();app._waDownloadMedia('${safeMediaUrl}','${label}_${msg.timestamp || Date.now()}')" title="تحميل"><i class="fas fa-download"></i></button>` : '';
+                content = `<div class="wa-media-placeholder">${dlBtn}<i class="fas ${icon}"></i><span>${label}</span></div>${msg.body ? `<div dir="auto">${msg.body}</div>` : ''}`;
             } else {
                 content = (msg.body || '').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+                // Apply WhatsApp text formatting
+                content = this._waParseFormatting(content);
+            }
+
+            // Quoted message block (if replying to a message)
+            let quotedHtml = '';
+            if (msg.hasQuotedMsg && msg._quotedMsg) {
+                const q = msg._quotedMsg;
+                const qSender = q.fromMe ? 'أنت' : (q.senderName || 'العميل');
+                const qBody = (q.body || '').substring(0, 80).replace(/</g, '&lt;').replace(/>/g, '&gt;');
+                const qIcon = q.type === 'image' ? '<i class="fas fa-image"></i> ' :
+                    q.type === 'video' ? '<i class="fas fa-video"></i> ' :
+                        q.type === 'audio' || q.type === 'ptt' ? '<i class="fas fa-microphone"></i> ' :
+                            q.type === 'document' ? '<i class="fas fa-file"></i> ' : '';
+                quotedHtml = `<div class="wa-quoted-msg" onclick="this.closest('.wa-message')?.previousElementSibling?.scrollIntoView({behavior:'smooth',block:'center'})">
+                    <div class="wa-quoted-sender">${qSender}</div>
+                    <div class="wa-quoted-body">${qIcon}${qBody || 'ملف'}</div>
+                </div>`;
             }
 
             // Group sender name
@@ -11061,23 +11689,25 @@ class SocialMediaHub {
                 ? `<div class="wa-message-sender">${msg.senderName || msg.author?.split('@')[0] || ''}</div>`
                 : '';
 
-            // Ticks for sent messages (ack: 0=pending, 1=sent, 2=delivered, 3=read, 4=played)
-            let ticks = '';
-            if (isMe) {
-                if (msg.ack >= 3) ticks = '<span class="wa-message-ticks read"><i class="fas fa-check-double"></i></span>';
-                else if (msg.ack >= 2) ticks = '<span class="wa-message-ticks"><i class="fas fa-check-double"></i></span>';
-                else if (msg.ack >= 1) ticks = '<span class="wa-message-ticks"><i class="fas fa-check"></i></span>';
-                else ticks = '<span class="wa-message-ticks"><i class="far fa-clock"></i></span>';
-            }
+            // Reply button data (safe for HTML attribute)
+            const safeBody = (msg.body || '').substring(0, 60).replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+            const replyBtn = msg.id ? `<button class="wa-reply-btn" onclick="event.stopPropagation();app._waSetReply('${(msg.id || '').replace(/'/g, "\\'")}','${safeBody}',${isMe})" title="رد"><i class="fas fa-reply"></i></button>` : '';
+            const starBtn = msg.id ? `<button class="wa-star-btn" onclick="event.stopPropagation();app._waStarMessage('${(msg.id || '').replace(/'/g, "\\'")}' )" title="تمييز"><i class="${msg.isStarred ? 'fas' : 'far'} fa-star"${msg.isStarred ? ' style="color:#F59E0B;"' : ''}></i></button>` : '';
+
+            // Detect if this is a media message with overlay time
+            const isMediaMsg = (msg.type === 'image' || msg.type === 'video') && mediaUrl;
 
             return `${dateSep}
-            <div class="wa-message ${isMe ? 'outgoing' : 'incoming'}" data-msg-id="${msg.id || ''}">
+            <div class="wa-message ${isMe ? 'outgoing' : 'incoming'}${isMediaMsg ? ' has-media' : ''}" data-msg-id="${msg.id || ''}">
+                ${replyBtn}
+                ${starBtn}
                 ${senderName}
+                ${quotedHtml}
                 <div class="wa-message-text" dir="auto">${content}</div>
-                <div class="wa-message-meta">
+                ${isMediaMsg ? '' : `<div class="wa-message-meta">
                     <span class="wa-message-time">${time}</span>
                     ${ticks}
-                </div>
+                </div>`}
             </div>`;
         }).join('');
 
@@ -11115,6 +11745,26 @@ class SocialMediaHub {
         window.socket.off('wa-message-ack');
         window.socket.off('wa-ready');
         window.socket.off('wa-qr');
+        window.socket.off('wa-typing');
+
+        // Typing indicator from contacts
+        window.socket.on('wa-typing', (data) => {
+            if (this.currentWaChat === data.chatId) {
+                const statusEl = document.getElementById('waChatHeaderStatus');
+                if (statusEl) {
+                    if (data.isTyping) {
+                        statusEl.innerHTML = '<span class="wa-typing-status">يكتب الآن...</span>';
+                        // Auto-clear after 5 seconds
+                        clearTimeout(this._waTypingTimeout);
+                        this._waTypingTimeout = setTimeout(() => {
+                            statusEl.textContent = 'متصل';
+                        }, 5000);
+                    } else {
+                        statusEl.textContent = 'متصل';
+                    }
+                }
+            }
+        });
 
         // New Message
         window.socket.on('wa-new-message', (data) => {
@@ -11126,14 +11776,8 @@ class SocialMediaHub {
             // If viewing this chat, append message
             if (this.currentWaChat === data.chatId) {
                 this._waAppendMessage(data.message);
-                if (!data.message.fromMe) this.playNotificationSound();
-            } else if (!data.message.fromMe) {
-                // Not viewing this chat — notify
-                this.playNotificationSound();
-                const chatName = data.chat?.name || 'واتساب';
-                const preview = data.message.body?.substring(0, 40) || 'رسالة جديدة';
-                this.showToast(`📱 ${chatName}: ${preview}`, 'info');
             }
+            // WhatsApp notifications disabled by user preference
 
             // Instantly move chat to top (pinned stay above)
             if (this._waCachedChats) {
@@ -11266,16 +11910,26 @@ class SocialMediaHub {
         }
     }
 
-    // Send a WhatsApp message
+    // Send a WhatsApp message (text or media)
     async waSendMessage() {
+        // If there's a pending media file, delegate to waSendMedia
+        if (this._waPendingFile) {
+            return this.waSendMedia();
+        }
+
         const input = document.getElementById('waMessageInput');
         if (!input) return;
 
         const message = input.value.trim();
         if (!message || !this.currentWaChat) return;
 
-        // Clear input immediately
+        // Capture reply state before clearing
+        const replyToMsgId = this._waReplyToMsg?.id || null;
+        const replyToBody = this._waReplyToMsg?.body || null;
+
+        // Clear input and reply state immediately
         input.value = '';
+        this._waClearReply();
 
         // Add optimistic message to UI
         const optimisticMsg = {
@@ -11284,15 +11938,20 @@ class SocialMediaHub {
             fromMe: true,
             timestamp: Math.floor(Date.now() / 1000),
             ack: 0,
-            type: 'chat'
+            type: 'chat',
+            hasQuotedMsg: !!replyToMsgId,
+            _quotedMsg: replyToBody ? { body: replyToBody, type: 'chat' } : null
         };
         this._waAppendMessage(optimisticMsg);
 
         try {
+            const bodyPayload = { message };
+            if (replyToMsgId) bodyPayload.replyToMsgId = replyToMsgId;
+
             const res = await fetch(`${this.API_URL}/api/whatsapp/chats/${encodeURIComponent(this.currentWaChat)}/send`, {
                 method: 'POST',
                 headers: this._waHeaders(),
-                body: JSON.stringify({ message })
+                body: JSON.stringify(bodyPayload)
             });
 
             const data = await res.json();
@@ -11306,6 +11965,563 @@ class SocialMediaHub {
 
         input.focus();
     }
+
+    // ============= MEDIA SEND METHODS =============
+
+    // File type icon mapping
+    _waGetFileIcon(filename) {
+        const ext = (filename || '').split('.').pop().toLowerCase();
+        const iconMap = {
+            pdf: 'fa-file-pdf', doc: 'fa-file-word', docx: 'fa-file-word',
+            xls: 'fa-file-excel', xlsx: 'fa-file-excel', csv: 'fa-file-csv',
+            ppt: 'fa-file-powerpoint', pptx: 'fa-file-powerpoint',
+            zip: 'fa-file-archive', rar: 'fa-file-archive', '7z': 'fa-file-archive',
+            txt: 'fa-file-alt', mp3: 'fa-file-audio', wav: 'fa-file-audio',
+            mp4: 'fa-file-video', avi: 'fa-file-video', mov: 'fa-file-video'
+        };
+        return iconMap[ext] || 'fa-file';
+    }
+
+    // File color mapping
+    _waGetFileColor(filename) {
+        const ext = (filename || '').split('.').pop().toLowerCase();
+        const colorMap = {
+            pdf: '#e74c3c', doc: '#2b579a', docx: '#2b579a',
+            xls: '#217346', xlsx: '#217346', csv: '#217346',
+            ppt: '#d24726', pptx: '#d24726',
+            zip: '#f39c12', rar: '#f39c12'
+        };
+        return colorMap[ext] || '#7f8c8d';
+    }
+
+    // Format file size
+    _waFormatFileSize(bytes) {
+        if (!bytes) return '';
+        if (bytes < 1024) return bytes + ' B';
+        if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+        return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+    }
+
+    // Handle file selection from input
+    _waOnFileSelected(input) {
+        const file = input.files[0];
+        if (!file) return;
+
+        // Size check (50MB max)
+        const MAX_SIZE = 50 * 1024 * 1024;
+        if (file.size > MAX_SIZE) {
+            this.showToast(`حجم الملف أكبر من 50MB (${this._waFormatFileSize(file.size)})`, 'error');
+            input.value = '';
+            return;
+        }
+
+        this._waPendingFile = file;
+        this._waShowMediaPreview(file);
+    }
+
+    // Show preview panel
+    _waShowMediaPreview(file) {
+        const preview = document.getElementById('waMediaPreview');
+        const thumb = document.getElementById('waPreviewThumb');
+        const name = document.getElementById('waPreviewName');
+        const size = document.getElementById('waPreviewSize');
+        if (!preview || !thumb) return;
+
+        // Revoke any previous ObjectURL
+        if (this._waPreviewUrl) {
+            URL.revokeObjectURL(this._waPreviewUrl);
+            this._waPreviewUrl = null;
+        }
+
+        const isImage = file.type.startsWith('image/');
+        const isVideo = file.type.startsWith('video/');
+
+        if (isImage) {
+            this._waPreviewUrl = URL.createObjectURL(file);
+            thumb.innerHTML = `<img src="${this._waPreviewUrl}" alt="preview" style="max-height:60px;max-width:80px;border-radius:6px;object-fit:cover;">`;
+        } else if (isVideo) {
+            this._waPreviewUrl = URL.createObjectURL(file);
+            thumb.innerHTML = `<video src="${this._waPreviewUrl}" style="max-height:60px;max-width:80px;border-radius:6px;" muted></video>`;
+        } else {
+            const icon = this._waGetFileIcon(file.name);
+            const color = this._waGetFileColor(file.name);
+            thumb.innerHTML = `<i class="fas ${icon}" style="font-size:28px;color:${color};"></i>`;
+        }
+
+        name.textContent = file.name;
+        size.textContent = this._waFormatFileSize(file.size);
+        preview.style.display = 'flex';
+
+        // Focus the text input for optional caption
+        const input = document.getElementById('waMessageInput');
+        if (input) {
+            input.placeholder = 'اكتب وصف (اختياري)...';
+            input.focus();
+        }
+    }
+
+    // Clear media preview
+    _waClearMediaPreview() {
+        const preview = document.getElementById('waMediaPreview');
+        if (preview) preview.style.display = 'none';
+
+        const fileInput = document.getElementById('waFileInput');
+        if (fileInput) fileInput.value = '';
+
+        // Revoke ObjectURL to free memory
+        if (this._waPreviewUrl) {
+            URL.revokeObjectURL(this._waPreviewUrl);
+            this._waPreviewUrl = null;
+        }
+
+        this._waPendingFile = null;
+
+        // Reset placeholder
+        const input = document.getElementById('waMessageInput');
+        if (input) input.placeholder = 'اكتب رسالة...';
+    }
+
+    // Send media file
+    async waSendMedia() {
+        if (!this._waPendingFile || !this.currentWaChat) return;
+
+        const file = this._waPendingFile;
+        const caption = (document.getElementById('waMessageInput')?.value || '').trim();
+
+        // Clear preview immediately
+        this._waClearMediaPreview();
+        const msgInput = document.getElementById('waMessageInput');
+        if (msgInput) msgInput.value = '';
+
+        // Determine type for optimistic UI
+        let optType = 'document';
+        if (file.type.startsWith('image/')) optType = 'image';
+        else if (file.type.startsWith('video/')) optType = 'video';
+        else if (file.type.startsWith('audio/')) optType = 'audio';
+
+        // Optimistic message
+        const tempId = 'temp-' + Date.now();
+        const optimisticMsg = {
+            id: tempId,
+            body: caption || file.name,
+            fromMe: true,
+            timestamp: Math.floor(Date.now() / 1000),
+            ack: 0,
+            type: optType,
+            hasMedia: true,
+            _uploading: true
+        };
+        this._waAppendMessage(optimisticMsg);
+
+        // Show uploading indicator on the temp message
+        const tempEl = document.querySelector(`[data-msg-id="${tempId}"] .wa-message-text`);
+        if (tempEl) {
+            const icon = this._waGetFileIcon(file.name);
+            const color = this._waGetFileColor(file.name);
+            tempEl.innerHTML = `<div class="wa-upload-indicator">
+                <i class="fas fa-spinner fa-spin" style="margin-left:8px;"></i>
+                <i class="fas ${icon}" style="color:${color};margin-left:6px;"></i>
+                <span>جاري رفع ${file.name}...</span>
+            </div>${caption ? `<div dir="auto" style="margin-top:4px;">${caption}</div>` : ''}`;
+        }
+
+        try {
+            const formData = new FormData();
+            formData.append('media', file);
+            formData.append('caption', caption);
+
+            const token = localStorage.getItem('octobot_token');
+            const res = await fetch(`${this.API_URL}/api/whatsapp/chats/${encodeURIComponent(this.currentWaChat)}/send-media`, {
+                method: 'POST',
+                headers: { 'Authorization': `Bearer ${token}` },
+                body: formData
+            });
+
+            const data = await res.json();
+
+            if (!data.success) {
+                this.showToast(data.error || 'فشل رفع الملف', 'error');
+                // Remove optimistic message
+                const el = document.querySelector(`[data-msg-id="${tempId}"]`);
+                if (el) el.remove();
+            } else {
+                // Refresh messages to get the real message
+                setTimeout(() => this._waLoadMessages(this.currentWaChat), 1500);
+            }
+        } catch (err) {
+            console.error('[WA UI] Send media error:', err);
+            this.showToast('فشل في رفع الملف', 'error');
+            const el = document.querySelector(`[data-msg-id="${tempId}"]`);
+            if (el) el.remove();
+        }
+    }
+
+    // Download media file (blob download)
+    async _waDownloadMedia(mediaUrl, filename) {
+        try {
+            this.showToast('جاري التحميل...', 'info');
+            const res = await fetch(mediaUrl);
+            if (!res.ok) throw new Error('Download failed');
+            const blob = await res.blob();
+
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = filename || 'media';
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+
+            // Free memory
+            setTimeout(() => URL.revokeObjectURL(url), 1000);
+            this.showToast('تم التحميل ✅', 'success');
+        } catch (err) {
+            console.error('[WA UI] Download error:', err);
+            this.showToast('فشل في التحميل', 'error');
+        }
+    }
+
+    // Open image in fullscreen lightbox
+    _waOpenLightbox(imageUrl) {
+        // Remove existing lightbox if any
+        const existing = document.getElementById('waLightbox');
+        if (existing) existing.remove();
+
+        const overlay = document.createElement('div');
+        overlay.id = 'waLightbox';
+        overlay.className = 'wa-lightbox';
+        overlay.innerHTML = `
+            <div class="wa-lightbox-backdrop" onclick="document.getElementById('waLightbox')?.remove()"></div>
+            <img src="${imageUrl}" class="wa-lightbox-img" onclick="event.stopPropagation()">
+            <button class="wa-lightbox-close" onclick="document.getElementById('waLightbox')?.remove()"><i class="fas fa-times"></i></button>
+            <button class="wa-lightbox-download" onclick="event.stopPropagation();app._waDownloadMedia('${imageUrl.replace(/'/g, "\\'")}','image.jpg')"><i class="fas fa-download"></i></button>
+        `;
+        document.body.appendChild(overlay);
+
+        // Close on Escape
+        const handler = (e) => {
+            if (e.key === 'Escape') {
+                overlay.remove();
+                document.removeEventListener('keydown', handler);
+            }
+        };
+        document.addEventListener('keydown', handler);
+    }
+
+    // ============= REPLY METHODS =============
+
+    // Set reply state (called from reply button on messages)
+    _waSetReply(msgId, msgBody, fromMe) {
+        this._waReplyToMsg = { id: msgId, body: msgBody };
+        const preview = document.getElementById('waReplyPreview');
+        if (preview) {
+            const sender = fromMe ? 'أنت' : 'العميل';
+            const body = (msgBody || 'ملف').substring(0, 60);
+            preview.innerHTML = `
+                <div class="wa-reply-preview-content">
+                    <div class="wa-reply-preview-bar"></div>
+                    <div class="wa-reply-preview-info">
+                        <span class="wa-reply-preview-sender">${sender}</span>
+                        <span class="wa-reply-preview-body">${body}</span>
+                    </div>
+                    <button class="wa-reply-preview-cancel" onclick="app._waClearReply()"><i class="fas fa-times"></i></button>
+                </div>
+            `;
+            preview.style.display = 'flex';
+        }
+        // Focus input
+        const input = document.getElementById('waMessageInput');
+        if (input) input.focus();
+    }
+
+    // Clear reply state
+    _waClearReply() {
+        this._waReplyToMsg = null;
+        const preview = document.getElementById('waReplyPreview');
+        if (preview) {
+            preview.style.display = 'none';
+            preview.innerHTML = '';
+        }
+    }
+
+    // ============= TEXT FORMATTING =============
+
+    // Parse WhatsApp text formatting into HTML
+    _waParseFormatting(text) {
+        if (!text) return text;
+        // Bold: *text*
+        text = text.replace(/\*([^*]+)\*/g, '<strong>$1</strong>');
+        // Italic: _text_
+        text = text.replace(/\b_([^_]+)_\b/g, '<em>$1</em>');
+        // Strikethrough: ~text~
+        text = text.replace(/~([^~]+)~/g, '<del>$1</del>');
+        // Monospace: ```text```
+        text = text.replace(/```([^`]+)```/g, '<code>$1</code>');
+        // Line breaks
+        text = text.replace(/\n/g, '<br>');
+        return text;
+    }
+
+    // ============= CLIPBOARD PASTE =============
+
+    // Setup paste handler for images from clipboard
+    _waSetupClipboardPaste() {
+        const input = document.getElementById('waMessageInput');
+        if (!input || input._waClipboardPasteActive) return;
+        input._waClipboardPasteActive = true;
+
+        document.addEventListener('paste', (e) => {
+            // Only handle if WhatsApp section is active and a chat is open
+            if (!this.currentWaChat) return;
+            const waSection = document.getElementById('whatsapp');
+            if (!waSection || waSection.style.display === 'none') return;
+
+            const items = e.clipboardData?.items;
+            if (!items) return;
+
+            for (const item of items) {
+                if (item.type.startsWith('image/')) {
+                    e.preventDefault();
+                    const file = item.getAsFile();
+                    if (file) {
+                        this._waPendingFile = file;
+                        this._waShowMediaPreview(file);
+                        break;
+                    }
+                }
+            }
+        });
+    }
+
+    // ============= LABELS MANAGEMENT =============
+
+    // Toggle Label Dropdown for current chat
+    async _waToggleLabelMenu(event) {
+        event.stopPropagation();
+        if (!this.currentWaChat) return;
+
+        // If labels haven't been loaded yet, try to fetch them now
+        if (!this._waAllLabels) {
+            try {
+                const lRes = await fetch(`${this.API_URL}/api/whatsapp/labels`, { headers: this._waHeaders() });
+                const lData = await lRes.json();
+                if (lData.success && lData.labels && lData.labels.length > 0) {
+                    this._waAllLabels = lData.labels;
+                } else {
+                    this.showToast(lData.error || 'هذا الحساب لا يدعم التصنيفات (يجب أن يكون WhatsApp Business)', 'warning');
+                    console.warn('[WA Labels]', lData.error || 'No labels found — account may not be WhatsApp Business');
+                    return;
+                }
+            } catch (e) {
+                this.showToast('فشل في تحميل التصنيفات', 'error');
+                console.error('[WA Labels] Fetch error:', e);
+                return;
+            }
+        }
+
+        if (!this._waAllLabels || this._waAllLabels.length === 0) {
+            this.showToast('لا توجد تصنيفات — تأكد أن الحساب WhatsApp Business', 'warning');
+            return;
+        }
+
+        // Check if menu exists, toggle it
+        let menu = document.getElementById('waLabelMenu');
+        if (menu) {
+            menu.remove();
+            return;
+        }
+
+        const btn = event.currentTarget;
+        const rect = btn.getBoundingClientRect();
+
+        menu = document.createElement('div');
+        menu.id = 'waLabelMenu';
+        menu.className = 'wa-label-dropdown';
+        // Position below button
+        Object.assign(menu.style, {
+            position: 'absolute',
+            top: `${rect.bottom + window.scrollY + 8}px`,
+            left: `${rect.left + window.scrollX + (rect.width / 2)}px`,
+            transform: 'translateX(-50%)',
+            zIndex: '1000'
+        });
+
+        menu.innerHTML = `<div style="padding: 10px; text-align: center; color: var(--wa-teal-light); font-size: 12px;"><i class="fas fa-spinner fa-spin"></i> جاري التحميل...</div>`;
+        document.body.appendChild(menu);
+
+        // Close when clicking outside
+        const closeMenu = (e) => {
+            if (!menu.contains(e.target) && e.target !== btn && !btn.contains(e.target)) {
+                menu.remove();
+                document.removeEventListener('click', closeMenu);
+            }
+        };
+        setTimeout(() => document.addEventListener('click', closeMenu), 0);
+
+        try {
+            // Fetch current chat labels to show checkmarks
+            const res = await fetch(`${this.API_URL}/api/whatsapp/chats/${encodeURIComponent(this.currentWaChat)}/labels`, { headers: this._waHeaders() });
+            const data = await res.json();
+            const currentLabels = data.labels || [];
+
+            let html = '';
+            for (const label of this._waAllLabels) {
+                const hasLabel = currentLabels.includes(label.id);
+                html += `
+                    <div class="wa-label-option" onclick="app._waToggleLabel('${label.id}', ${hasLabel}); event.stopPropagation();">
+                        <div class="wa-label-dot" style="background:${label.color}"></div>
+                        <span>${label.name}</span>
+                        ${hasLabel ? '<i class="fas fa-check"></i>' : ''}
+                    </div>
+                `;
+            }
+            menu.innerHTML = html;
+        } catch (err) {
+            menu.innerHTML = `<div style="padding: 10px; color: var(--wa-danger); text-align: center; font-size: 13px;">فشل التحميل</div>`;
+        }
+    }
+
+    // Add or remove a label from the current chat
+    async _waToggleLabel(labelId, currentlyHasLabel) {
+        if (!this.currentWaChat) return;
+
+        // Optimistically close menu
+        const menu = document.getElementById('waLabelMenu');
+        if (menu) menu.remove();
+
+        try {
+            const method = currentlyHasLabel ? 'DELETE' : 'POST';
+            const res = await fetch(`${this.API_URL}/api/whatsapp/chats/${encodeURIComponent(this.currentWaChat)}/labels/${labelId}`, {
+                method,
+                headers: this._waHeaders()
+            });
+            const data = await res.json();
+            if (data.success) {
+                this.showToast(currentlyHasLabel ? 'تم إزالة التصنيف' : 'تم إضافة التصنيف', 'success');
+                // Refresh chat list to update label dots
+                this.waLoadChats();
+            } else {
+                this.showToast(data.error || 'فشل تحديث التصنيف', 'error');
+            }
+        } catch (err) {
+            this.showToast('حدث خطأ في تحديث التصنيف', 'error');
+        }
+    }
+
+    // ============= EMOJI PICKER =============
+
+    _waToggleEmojiPicker() {
+        const picker = document.getElementById('waEmojiPicker');
+        if (!picker) return;
+
+        if (picker.style.display !== 'none') {
+            picker.style.display = 'none';
+            return;
+        }
+
+        // Build picker content if first time
+        if (!picker.innerHTML) {
+            const categories = {
+                '😀 وجوه': ['😀', '😁', '😂', '🤣', '😃', '😄', '😅', '😆', '😉', '😊', '😋', '😎', '😍', '🥰', '😘', '😗', '😙', '😚', '🙂', '🤗', '🤩', '🤔', '🤨', '😐', '😑', '😶', '🙄', '😏', '😣', '😥', '😮', '🤐', '😯', '😪', '😫', '😴', '🥱', '😌', '😛', '😜', '🤪', '😝', '🤤', '😒', '😓', '😔', '😕', '🙃', '🤑', '😲', '🥳', '😷', '🤒', '🤕', '🤧', '🥺', '😢', '😭', '😤', '😠', '😡', '🤬', '😈', '👿', '💀', '☠️', '💩', '🤡', '👹', '👻', '👽', '🤖'],
+                '❤️ قلوب': ['❤️', '🧡', '💛', '💚', '💙', '💜', '🖤', '🤍', '🤎', '💔', '❣️', '💕', '💞', '💓', '💗', '💖', '💘', '💝', '💟', '♥️', '🫶', '💌'],
+                '👍 إيدين': ['👍', '👎', '👊', '✊', '🤛', '🤜', '👏', '🙌', '👐', '🤲', '🤝', '🙏', '✌️', '🤞', '🤟', '🤘', '👌', '🤌', '🤏', '👈', '👉', '👆', '👇', '☝️', '✋', '🤚', '🖐️', '🖖', '👋', '🤙', '💪', '🖕', '✍️', '🫵'],
+                '🎉 احتفال': ['🎉', '🎊', '🎈', '🎁', '🎂', '🎀', '🎃', '🎄', '🎆', '🎇', '✨', '🎐', '🎑', '🎋', '🎍', '🎎', '🏆', '🥇', '🥈', '🥉', '⭐', '🌟', '💫', '🔥', '💥', '💯', '🏅'],
+                '🍎 طعام': ['🍎', '🍊', '🍋', '🍌', '🍉', '🍇', '🍓', '🫐', '🍒', '🍑', '🥭', '🍍', '🥥', '🥝', '🍅', '🥑', '☕', '🍵', '🧃', '🥤', '🍺', '🍕', '🍔', '🌮', '🍟', '🍩', '🍰', '🧁', '🍫', '🍬'],
+                '🌍 طبيعة': ['🌍', '🌎', '🌏', '🌞', '🌝', '🌙', '⭐', '🌟', '☁️', '⛅', '🌧️', '⛈️', '🌈', '🌊', '🌸', '🌹', '🌺', '🌻', '🌼', '🌷', '🌱', '🌲', '🌳', '🌴', '🐶', '🐱', '🐼', '🦁', '🐸', '🦋', '🐝', '🕊️']
+            };
+
+            let html = '<div class="wa-emoji-tabs">';
+            const catKeys = Object.keys(categories);
+            catKeys.forEach((cat, i) => {
+                const icon = cat.split(' ')[0];
+                html += `<button class="wa-emoji-tab${i === 0 ? ' active' : ''}" data-cat="${i}" onclick="app._waSelectEmojiTab(${i})">${icon}</button>`;
+            });
+            html += '</div>';
+
+            catKeys.forEach((cat, i) => {
+                const label = cat.split(' ').slice(1).join(' ');
+                html += `<div class="wa-emoji-panel${i === 0 ? ' active' : ''}" data-cat="${i}">`;
+                html += `<div class="wa-emoji-cat-label">${label}</div>`;
+                html += '<div class="wa-emoji-grid">';
+                categories[cat].forEach(em => {
+                    html += `<button class="wa-emoji-item" onclick="app._waInsertEmoji('${em}')">${em}</button>`;
+                });
+                html += '</div></div>';
+            });
+
+            picker.innerHTML = html;
+        }
+
+        picker.style.display = 'block';
+
+        // Close when clicking outside
+        const closeHandler = (e) => {
+            if (!picker.contains(e.target) && !e.target.closest('.wa-emoji-btn')) {
+                picker.style.display = 'none';
+                document.removeEventListener('click', closeHandler);
+            }
+        };
+        setTimeout(() => document.addEventListener('click', closeHandler), 0);
+    }
+
+    _waSelectEmojiTab(idx) {
+        const picker = document.getElementById('waEmojiPicker');
+        if (!picker) return;
+        picker.querySelectorAll('.wa-emoji-tab').forEach(t => t.classList.toggle('active', parseInt(t.dataset.cat) === idx));
+        picker.querySelectorAll('.wa-emoji-panel').forEach(p => p.classList.toggle('active', parseInt(p.dataset.cat) === idx));
+    }
+
+    _waInsertEmoji(emoji) {
+        const input = document.getElementById('waMessageInput');
+        if (!input) return;
+        const start = input.selectionStart;
+        const end = input.selectionEnd;
+        const val = input.value;
+        input.value = val.substring(0, start) + emoji + val.substring(end);
+        input.selectionStart = input.selectionEnd = start + emoji.length;
+        input.focus();
+    }
+
+    // Setup drag & drop on messages container
+    _waSetupDragDrop() {
+        const container = document.getElementById('waMessagesContainer');
+        if (!container || container._waDragDropActive) return;
+        container._waDragDropActive = true;
+
+        container.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            container.classList.add('wa-drag-over');
+        });
+
+        container.addEventListener('dragleave', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            container.classList.remove('wa-drag-over');
+        });
+
+        container.addEventListener('drop', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            container.classList.remove('wa-drag-over');
+
+            const file = e.dataTransfer.files[0];
+            if (!file) return;
+
+            // Same size check
+            const MAX_SIZE = 50 * 1024 * 1024;
+            if (file.size > MAX_SIZE) {
+                this.showToast(`حجم الملف أكبر من 50MB (${this._waFormatFileSize(file.size)})`, 'error');
+                return;
+            }
+
+            this._waPendingFile = file;
+            this._waShowMediaPreview(file);
+        });
+    }
+
+    // Override waSendMessage to detect pending media
+    // (Original waSendMessage handles text only; if there's a pending file, delegate to waSendMedia)
 
     // Refresh messages manually
     async waRefreshMessages() {
@@ -11355,7 +12571,7 @@ class SocialMediaHub {
         return date.toLocaleDateString('ar-EG', { day: 'numeric', month: 'short' });
     }
 
-    // Start chat list polling (every 8 seconds for near-real-time)
+    // Start chat list polling (every 30 seconds, skip re-render if unchanged)
     _waStartChatPolling() {
         this._waStopChatPolling();
         this._waChatPollTimer = setInterval(async () => {
@@ -11363,13 +12579,19 @@ class SocialMediaHub {
                 const res = await fetch(`${this.API_URL}/api/whatsapp/chats`, { headers: this._waHeaders() });
                 const data = await res.json();
                 if (data.chats && data.chats.length > 0) {
+                    // Change detection: only re-render if data actually changed
+                    const newHash = data.chats.length + '|' + data.chats.slice(0, 5).map(c => c.id + ':' + (c.timestamp || 0) + ':' + (c.unreadCount || 0)).join(',');
+                    if (this._waChatListHash === newHash) {
+                        return; // No change — skip re-render
+                    }
+                    this._waChatListHash = newHash;
                     this._waCachedChats = data.chats;
                     this._waRenderChatList(data.chats);
                 }
             } catch (err) {
                 console.log('[WA UI] Chat poll refresh failed:', err.message);
             }
-        }, 15000);
+        }, 30000);
     }
 
     _waStopChatPolling() {
@@ -11426,13 +12648,7 @@ class SocialMediaHub {
                         container.scrollTop = container.scrollHeight;
                     }
 
-                    // Play sound if new incoming message
-                    if (countChanged && newMsgs.length > oldMsgs.length) {
-                        const latestMsg = newMsgs[newMsgs.length - 1];
-                        if (!latestMsg.fromMe) {
-                            this.playNotificationSound();
-                        }
-                    }
+                    // WhatsApp notification sound disabled by user preference
                 }
             } catch (err) {
                 console.log('[WA UI] Message poll error:', err.message);
