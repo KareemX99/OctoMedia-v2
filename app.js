@@ -2150,6 +2150,43 @@ class SocialMediaHub {
                 <button id="campaignSendBtn" class="bcast-send-btn" onclick="app.startBackendCampaign()"><i class="fas fa-rocket"></i><span>إطلاق الحملة</span></button>
                 <p class="bcast-note"><i class="fas fa-shield-check"></i> الحملة تعمل في الخلفية</p>
                 <div id="broadcastResults" style="margin-top:32px;display:none;"></div>
+
+                <!-- Browser Automation Panel -->
+                <div class="bcast-card" style="margin-top:32px;border:1px solid var(--border-color);">
+                    <div class="bcast-card-header">
+                        <div class="bcast-card-icon" style="background:rgba(168,85,247,0.1);color:#a855f7;"><i class="fas fa-robot"></i></div>
+                        <h3 class="bcast-card-title">أتمتة المتصفح (Fallback)</h3>
+                    </div>
+                    <p style="font-size:13px;color:var(--text-secondary);margin-bottom:16px;">
+                        <i class="fas fa-info-circle" style="color:var(--primary);"></i>
+                        لو الـ API فشل (عملاء خارج النافذة)، المتصفح هيبعتلهم تلقائياً. سجّل دخول مرة واحدة بس.
+                    </p>
+                    <div id="automationStatus" style="display:flex;align-items:center;gap:10px;padding:12px 16px;background:var(--glass);border-radius:10px;margin-bottom:16px;">
+                        <div id="automationDot" style="width:12px;height:12px;border-radius:50%;background:var(--text-secondary);"></div>
+                        <span id="automationText" style="font-size:14px;font-weight:500;">غير مفعّل</span>
+                    </div>
+                    <div style="display:flex;gap:10px;flex-wrap:wrap;">
+                        <button onclick="app.initBrowserAutomation()" id="initAutoBtn" style="flex:1;min-width:140px;padding:12px 16px;border-radius:10px;background:linear-gradient(135deg,#6366f1,#8b5cf6);border:none;color:white;cursor:pointer;font-weight:600;font-size:14px;display:flex;align-items:center;justify-content:center;gap:8px;">
+                            <i class="fas fa-power-off"></i> تشغيل المتصفح
+                        </button>
+                        <button onclick="app.showAutoLoginForm()" id="loginAutoBtn" style="flex:1;min-width:140px;padding:12px 16px;border-radius:10px;background:linear-gradient(135deg,#3b82f6,#1d4ed8);border:none;color:white;cursor:pointer;font-weight:600;font-size:14px;display:flex;align-items:center;justify-content:center;gap:8px;display:none;">
+                            <i class="fab fa-facebook"></i> تسجيل الدخول
+                        </button>
+                    </div>
+                    <div id="autoLoginForm" style="display:none;margin-top:16px;padding:16px;background:var(--glass);border-radius:10px;">
+                        <div style="margin-bottom:12px;">
+                            <label style="display:block;font-size:13px;font-weight:500;margin-bottom:6px;color:var(--text-secondary);">البريد الإلكتروني / رقم الهاتف</label>
+                            <input type="text" id="autoEmail" placeholder="email@example.com" style="width:100%;padding:10px 14px;border-radius:8px;border:1px solid var(--border-color);background:var(--bg-card);color:var(--text-primary);font-size:14px;box-sizing:border-box;">
+                        </div>
+                        <div style="margin-bottom:12px;">
+                            <label style="display:block;font-size:13px;font-weight:500;margin-bottom:6px;color:var(--text-secondary);">كلمة المرور</label>
+                            <input type="password" id="autoPassword" placeholder="••••••••" style="width:100%;padding:10px 14px;border-radius:8px;border:1px solid var(--border-color);background:var(--bg-card);color:var(--text-primary);font-size:14px;box-sizing:border-box;">
+                        </div>
+                        <button onclick="app.loginBrowserAutomation()" style="width:100%;padding:12px;border-radius:8px;background:var(--success);border:none;color:white;cursor:pointer;font-weight:600;font-size:14px;">
+                            <i class="fas fa-sign-in-alt"></i> تسجيل الدخول
+                        </button>
+                    </div>
+                </div>
             </div>`;
 
         // Modals
@@ -8272,6 +8309,9 @@ class SocialMediaHub {
     broadcastNextCursor = null;
 
     async loadBroadcastRecipients(loadMore = false) {
+        // Auto-check automation status
+        this.checkAutomationStatus();
+
         const pageId = document.getElementById('broadcastPageSelect')?.value;
         if (!pageId) {
             document.getElementById('broadcastStats').style.display = 'none';
@@ -8287,18 +8327,16 @@ class SocialMediaHub {
         // Fetch ALL customers automatically (fetchAll=true)
         const data = await window.fbIntegration.getBroadcastRecipients(pageId, 100, null, true);
 
-        // Set all recipients
+        // Set ALL recipients (no filtering - Puppeteer can send to everyone)
         this.broadcastRecipients = data.recipients || [];
         this.broadcastRecipientsOriginal = [...this.broadcastRecipients];
         this.broadcastRecipientsFiltered = [...this.broadcastRecipients];
 
-        // Count eligible from loaded recipients
-        const eligibleLoaded = this.broadcastRecipients.filter(r => r.isEligible).length;
         const totalLoaded = this.broadcastRecipients.length;
 
-        // Update display with actual counts
+        // Update display
         document.getElementById('totalRecipients').innerHTML = `${totalLoaded} <small style="color:var(--text-secondary);">عميل</small>`;
-        document.getElementById('eligibleRecipients').innerHTML = `${eligibleLoaded} <small style="color:var(--success);">✓ مؤهل للإرسال</small>`;
+        document.getElementById('eligibleRecipients').innerHTML = `<small style="color:var(--success);">🤖 الإرسال عبر المتصفح — الكل مؤهل</small>`;
         document.getElementById('broadcastStats').style.display = 'block';
 
         // Update totalAvailable for limit input
@@ -8322,7 +8360,7 @@ class SocialMediaHub {
         const countInput = document.getElementById('recipientCount');
         if (countInput) countInput.max = totalLoaded;
 
-        this.showToast(`✅ تم تحميل ${totalLoaded} عميل (${eligibleLoaded} مؤهل)`, 'success');
+        this.showToast(`✅ تم تحميل ${totalLoaded} عميل`, 'success');
     }
 
     // ============= MESSAGE TEMPLATES =============
@@ -8922,6 +8960,218 @@ class SocialMediaHub {
         this.removeBroadcastMedia();
     }
 
+    // ============= BROWSER AUTOMATION CONTROLS =============
+
+    async initBrowserAutomation() {
+        const btn = document.getElementById('initAutoBtn');
+        if (btn) {
+            btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> جاري الفحص...';
+            btn.disabled = true;
+        }
+        try {
+            // Check if already initialized and logged in
+            const res = await fetch(`${window.location.origin}/api/automation/status`);
+            const data = await res.json();
+            if (data.initialized && data.isLoggedIn) {
+                this.updateAutomationUI('ready');
+                this.showToast('🤖 ✅ المتصفح جاهز ومتصل بالفعل!', 'success');
+            } else {
+                // Show login form
+                this.updateAutomationUI('initialized');
+                const form = document.getElementById('autoLoginForm');
+                if (form) form.style.display = 'block';
+                this.showToast('📝 أدخل بيانات فيسبوك وسجّل دخول', 'warning');
+            }
+        } catch (err) {
+            // Show login form anyway
+            const form = document.getElementById('autoLoginForm');
+            if (form) form.style.display = 'block';
+            this.showToast('📝 أدخل بيانات فيسبوك وسجّل دخول', 'warning');
+        }
+        if (btn) {
+            btn.innerHTML = '<i class="fas fa-power-off"></i> تشغيل المتصفح';
+            btn.disabled = false;
+        }
+    }
+
+    showAutoLoginForm() {
+        const form = document.getElementById('autoLoginForm');
+        form.style.display = form.style.display === 'none' ? 'block' : 'none';
+    }
+
+    async loginBrowserAutomation() {
+        const email = document.getElementById('autoEmail').value.trim();
+        const password = document.getElementById('autoPassword').value.trim();
+        if (!email || !password) {
+            this.showToast('أدخل البريد وكلمة المرور', 'error');
+            return;
+        }
+
+        // Step 1: Initialize VISIBLE browser
+        this.showToast('🤖 جاري فتح المتصفح...', 'success');
+        this.updateAutomationUI('initialized');
+
+        try {
+            // Init in VISIBLE mode (headless: false)
+            const initRes = await fetch(`${window.location.origin}/api/automation/init`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ headless: false })
+            });
+            const initData = await initRes.json();
+
+            if (!initData.success) {
+                this.showToast('❌ فشل فتح المتصفح: ' + (initData.error || ''), 'error');
+                this.updateAutomationUI('error');
+                return;
+            }
+
+            // If already logged in from saved cookies
+            if (initData.isLoggedIn) {
+                this.showToast('🤖 ✅ أنت مسجل دخول بالفعل!', 'success');
+                // Close visible and re-init headless
+                await fetch(`${window.location.origin}/api/automation/close`, { method: 'POST' });
+                await this._reinitHeadless();
+                return;
+            }
+
+            // Step 2: Auto-fill email & password
+            this.showToast('🤖 جاري تعبئة البيانات...', 'success');
+            const loginRes = await fetch(`${window.location.origin}/api/automation/login`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ email, password })
+            });
+            const loginData = await loginRes.json();
+
+            if (loginData.success) {
+                // Login succeeded immediately (no 2FA needed)
+                this.showToast('🤖 ✅ تم تسجيل الدخول بنجاح!', 'success');
+                await fetch(`${window.location.origin}/api/automation/close`, { method: 'POST' });
+                await this._reinitHeadless();
+                document.getElementById('autoLoginForm').style.display = 'none';
+                document.getElementById('autoPassword').value = '';
+            } else {
+                // Might need 2FA or captcha - show confirm button
+                this.showToast('📱 كمّل تسجيل الدخول في المتصفح الظاهر', 'warning');
+                const loginForm = document.getElementById('autoLoginForm');
+                if (loginForm) {
+                    loginForm.innerHTML = `
+                        <div style="text-align:center;padding:16px;">
+                            <p style="font-size:15px;font-weight:600;margin-bottom:8px;">📱 كمّل تسجيل الدخول في المتصفح</p>
+                            <p style="font-size:13px;color:var(--text-secondary);margin-bottom:16px;">لو فيسبوك طلب رمز تحقق أو كابتشا — كمّله في النافذة الظاهرة</p>
+                            <button onclick="app.confirmAutoLogin()" style="width:100%;padding:14px;border-radius:10px;background:linear-gradient(135deg,#22c55e,#16a34a);border:none;color:white;cursor:pointer;font-weight:700;font-size:15px;">
+                                <i class="fas fa-check-circle"></i> تم تسجيل الدخول ✅
+                            </button>
+                        </div>
+                    `;
+                }
+            }
+        } catch (err) {
+            this.showToast('❌ خطأ: ' + err.message, 'error');
+            this.updateAutomationUI('error');
+        }
+    }
+
+    async confirmAutoLogin() {
+        this.showToast('🤖 جاري التحقق وحفظ الكوكيز...', 'success');
+        try {
+            const statusRes = await fetch(`${window.location.origin}/api/automation/status`);
+            const status = await statusRes.json();
+
+            if (status.isLoggedIn) {
+                this.showToast('🤖 ✅ تم حفظ الجلسة! المتصفح هيقفل ويشتغل في الخلفية', 'success');
+                // Close visible browser
+                await fetch(`${window.location.origin}/api/automation/close`, { method: 'POST' });
+                // Re-init in headless mode for campaigns
+                await this._reinitHeadless();
+                // Reset login form
+                const loginForm = document.getElementById('autoLoginForm');
+                if (loginForm) {
+                    loginForm.style.display = 'none';
+                    loginForm.innerHTML = `
+                        <div style="margin-bottom:12px;">
+                            <label style="display:block;font-size:13px;font-weight:500;margin-bottom:6px;color:var(--text-secondary);">البريد الإلكتروني / رقم الهاتف</label>
+                            <input type="text" id="autoEmail" placeholder="email@example.com" style="width:100%;padding:10px 14px;border-radius:8px;border:1px solid var(--border-color);background:var(--bg-card);color:var(--text-primary);font-size:14px;box-sizing:border-box;">
+                        </div>
+                        <div style="margin-bottom:12px;">
+                            <label style="display:block;font-size:13px;font-weight:500;margin-bottom:6px;color:var(--text-secondary);">كلمة المرور</label>
+                            <input type="password" id="autoPassword" placeholder="••••••••" style="width:100%;padding:10px 14px;border-radius:8px;border:1px solid var(--border-color);background:var(--bg-card);color:var(--text-primary);font-size:14px;box-sizing:border-box;">
+                        </div>
+                        <button onclick="app.loginBrowserAutomation()" style="width:100%;padding:12px;border-radius:8px;background:var(--success);border:none;color:white;cursor:pointer;font-weight:600;font-size:14px;">
+                            <i class="fas fa-sign-in-alt"></i> تسجيل الدخول
+                        </button>
+                    `;
+                }
+                document.getElementById('autoPassword')?.remove;
+            } else {
+                this.showToast('❌ لسه مش مسجل دخول — كمّل في المتصفح وجرب تاني', 'error');
+            }
+        } catch (err) {
+            this.showToast('❌ خطأ: ' + err.message, 'error');
+        }
+    }
+
+    async _reinitHeadless() {
+        try {
+            const res = await fetch(`${window.location.origin}/api/automation/init`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ headless: true })
+            });
+            const data = await res.json();
+            if (data.success && data.isLoggedIn) {
+                this.updateAutomationUI('ready');
+            } else {
+                this.updateAutomationUI('error');
+            }
+        } catch (e) {
+            this.updateAutomationUI('error');
+        }
+    }
+
+    updateAutomationUI(status) {
+        const dot = document.getElementById('automationDot');
+        const text = document.getElementById('automationText');
+        const loginBtn = document.getElementById('loginAutoBtn');
+        if (!dot || !text) return;
+        if (status === 'ready') {
+            dot.style.background = '#22c55e';
+            text.textContent = '✅ متصل وجاهز للإرسال';
+            text.style.color = '#22c55e';
+            if (loginBtn) loginBtn.style.display = 'none';
+        } else if (status === 'initialized') {
+            dot.style.background = '#eab308';
+            text.textContent = '⚠️ المتصفح شغال — محتاج تسجيل دخول';
+            text.style.color = '#eab308';
+            if (loginBtn) loginBtn.style.display = 'flex';
+        } else if (status === 'error') {
+            dot.style.background = '#ef4444';
+            text.textContent = '❌ غير متصل';
+            text.style.color = '#ef4444';
+            if (loginBtn) loginBtn.style.display = 'none';
+        } else {
+            dot.style.background = 'var(--text-secondary)';
+            text.textContent = 'غير مفعّل';
+            text.style.color = 'var(--text-secondary)';
+            if (loginBtn) loginBtn.style.display = 'none';
+        }
+    }
+
+    async checkAutomationStatus() {
+        try {
+            const res = await fetch(`${window.location.origin}/api/automation/status`);
+            const data = await res.json();
+            if (data.initialized && data.isLoggedIn) {
+                this.updateAutomationUI('ready');
+            } else if (data.initialized) {
+                this.updateAutomationUI('initialized');
+            } else {
+                this.updateAutomationUI('off');
+            }
+        } catch (e) { /* ignore */ }
+    }
+
     // ============= BACKEND CAMPAIGN FUNCTIONS =============
 
     // Start backend campaign (alternative to frontend loop)
@@ -9372,117 +9622,6 @@ class SocialMediaHub {
         }
     }
 
-    async initBrowserAutomation() {
-        this.showToast('جاري تشغيل المتصفح في الخلفية...', 'success');
-        document.getElementById('automationStatusText').textContent = 'جاري التشغيل...';
-        document.getElementById('automationStatusText').style.color = 'var(--warning)';
-
-        const result = await window.fbIntegration.initAutomation(true); // true = headless (background)
-
-        if (result.success) {
-            if (result.isLoggedIn) {
-                this.showToast('✅ Browser Automation جاهز', 'success');
-                document.getElementById('automationStatusText').textContent = '✅ جاهز للإرسال (في الخلفية)';
-                document.getElementById('automationStatusText').style.color = 'var(--success)';
-                document.getElementById('firstTimeLoginBtn').style.display = 'none';
-                this.automationReady = true;
-            } else {
-                this.showToast('⚠️ تحتاج تسجيل دخول أول مرة', 'warning');
-                document.getElementById('automationStatusText').textContent = '⚠️ سجل دخول أول مرة ثم جرب مرة أخرى';
-                document.getElementById('automationStatusText').style.color = 'var(--warning)';
-            }
-        } else {
-            this.showToast('فشل تشغيل المتصفح', 'error');
-            document.getElementById('automationStatusText').textContent = '❌ فشل التشغيل';
-            document.getElementById('automationStatusText').style.color = 'var(--danger)';
-        }
-    }
-
-    // First-time login with visible browser
-    async firstTimeLogin() {
-        this.showToast('جاري فتح المتصفح لتسجيل الدخول...', 'success');
-        document.getElementById('automationStatusText').textContent = 'جاري فتح المتصفح...';
-        document.getElementById('automationStatusText').style.color = 'var(--warning)';
-
-        // Open visible browser (headless = false)
-        const result = await window.fbIntegration.initAutomation(false);
-
-        if (result.success) {
-            if (result.isLoggedIn) {
-                // Already logged in from saved cookies!
-                this.showToast('✅ أنت مسجل دخول بالفعل!', 'success');
-                document.getElementById('automationStatusText').textContent = '✅ مسجل دخول - يمكنك استخدام الوضع التلقائي';
-                document.getElementById('automationStatusText').style.color = 'var(--success)';
-                document.getElementById('firstTimeLoginBtn').style.display = 'none';
-                this.automationReady = true;
-
-                // Close the visible browser
-                await window.fbIntegration.closeAutomation();
-            } else {
-                // Need to log in - browser is open and visible
-                this.showToast('📱 سجل دخول في المتصفح الظاهر ثم اضغط الزر أدناه', 'success');
-                document.getElementById('automationStatusText').innerHTML = `
-                    <div style="text-align:center;">
-                        <p style="margin-bottom:12px;">🔐 سجل دخول يدوياً في نافذة المتصفح الظاهرة</p>
-                        <button onclick="app.confirmFirstTimeLogin()" class="btn btn-success" style="padding:12px 24px;">
-                            <i class="fas fa-check"></i> تم تسجيل الدخول
-                        </button>
-                    </div>
-                `;
-            }
-        } else {
-            this.showToast('فشل فتح المتصفح', 'error');
-            document.getElementById('automationStatusText').textContent = '❌ فشل فتح المتصفح';
-            document.getElementById('automationStatusText').style.color = 'var(--danger)';
-        }
-    }
-
-    // Confirm first-time login completed
-    async confirmFirstTimeLogin() {
-        this.showToast('جاري حفظ الجلسة...', 'success');
-
-        // Check for token and load initial state cookies
-        const status = await window.fbIntegration.checkAutomationStatus();
-
-        if (status.isLoggedIn) {
-            this.showToast('✅ تم حفظ الجلسة! يمكنك الآن استخدام الإرسال التلقائي', 'success');
-            document.getElementById('automationStatusText').textContent = '✅ تم الحفظ - استخدم الزر الأخضر للإرسال';
-            document.getElementById('automationStatusText').style.color = 'var(--success)';
-            document.getElementById('firstTimeLoginBtn').style.display = 'none';
-            this.automationReady = true;
-
-            // Close the visible browser
-            await window.fbIntegration.closeAutomation();
-        } else {
-            this.showToast('❌ لسه مش مسجل دخول، حاول تاني', 'error');
-            document.getElementById('automationStatusText').textContent = '❌ لم يتم تسجيل الدخول بعد';
-            document.getElementById('automationStatusText').style.color = 'var(--danger)';
-        }
-    }
-
-    async loginBrowserAutomation() {
-        const email = document.getElementById('fbEmail').value;
-        const password = document.getElementById('fbPassword').value;
-
-        if (!email || !password) {
-            this.showToast('أدخل الإيميل وكلمة المرور', 'error');
-            return;
-        }
-
-        this.showToast('جاري تسجيل الدخول...', 'success');
-
-        const result = await window.fbIntegration.loginAutomation(email, password);
-
-        if (result.success) {
-            this.showToast('تم تسجيل الدخول بنجاح', 'success');
-            document.getElementById('automationStatusText').textContent = '✅ متصل ومُسجل الدخول';
-            document.getElementById('automationStatusText').style.color = 'var(--success)';
-            document.getElementById('automationLoginForm').style.display = 'none';
-            this.automationReady = true;
-        } else {
-            this.showToast('فشل تسجيل الدخول', 'error');
-        }
-    }
 
     // Navigation override to load data
     async navigateToPage(page) {

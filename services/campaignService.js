@@ -5,8 +5,8 @@ const path = require('path');
 
 class CampaignService {
     constructor() {
-        this.activeCampaigns = new Map(); // campaignId -> running state
-        this.liveProgress = new Map(); // campaignId -> {sentCount, failedCount, status, totalRecipients}
+        this.activeCampaigns = new Map();
+        this.liveProgress = new Map();
         this.Campaign = null;
         this.appData = null;
         this.FB_GRAPH_URL = 'https://graph.facebook.com/v21.0';
@@ -228,7 +228,7 @@ class CampaignService {
                     console.log(`[Campaign] Sending to ${recipient.name} (${currentIndex + 1}/${recipients.length})`);
 
                     // ===== Facebook API with Message Tags =====
-                    await this.sendMessage(pageToken, recipient, uniqueMessage, campaign.messageTag, campaign.mediaFiles, campaign.imageUrls);
+                    await this.sendMessage(pageToken, recipient, uniqueMessage, campaign.messageTag, campaign.mediaFiles, campaign.imageUrls, campaign.pageId);
                     console.log(`[Campaign] ✅ Sent to ${recipient.name} via Message Tags`);
 
                     // Update live progress cache IMMEDIATELY for real-time UI updates
@@ -360,140 +360,34 @@ class CampaignService {
         }
     }
 
-    // Send single message using POST_PURCHASE_UPDATE tag
-    async sendMessage(pageToken, recipient, message, messageTag, mediaFiles, imageUrls = []) {
-        const TAG = 'POST_PURCHASE_UPDATE'; // Default for shipping/order updates
-
-        // Helper to send a single API call
-        const sendWithTag = async (payload) => {
-            return axios.post(`${this.FB_GRAPH_URL}/me/messages`, {
-                ...payload,
-                recipient: { id: recipient.id },
-                messaging_type: 'MESSAGE_TAG',
-                tag: TAG
-            }, { params: { access_token: pageToken } });
-        };
-
-        // Send remote image URLs first (from e-commerce products)
-        for (const imageUrl of imageUrls) {
-            try {
-                const encodedUrl = encodeURI(decodeURI(imageUrl));
-                console.log(`[Campaign] Sending remote image: ${encodedUrl}`);
-
-                try {
-                    await sendWithTag({
-                        message: {
-                            attachment: {
-                                type: 'image',
-                                payload: { url: encodedUrl, is_reusable: true }
-                            }
-                        }
-                    });
-                    console.log(`[Campaign] ✅ Remote image sent (tag: ${TAG})`);
-                } catch (tagErr) {
-                    const fbErr = tagErr.response?.data?.error;
-                    if (fbErr?.code === 551) throw tagErr;
-                    console.error(`[Campaign] ❌ Failed to send remote image (tag: ${TAG}): ${fbErr?.message || tagErr.message}`);
-                }
-            } catch (imgErr) {
-                const imgFbErr = imgErr.response?.data?.error;
-                const imgErrDetail = imgFbErr
-                    ? `code=${imgFbErr.code}, subcode=${imgFbErr.error_subcode}, msg=${imgFbErr.message}`
-                    : imgErr.message;
-                console.error(`[Campaign] ❌ Failed to send remote image: ${imgErrDetail}`);
-            }
+    // Send single message via Puppeteer (browser automation) ONLY
+    async sendMessage(pageToken, recipient, message, messageTag, mediaFiles, imageUrls = [], pageId = null) {
+        // Check Puppeteer is ready
+        if (!this.messengerBot || !this.messengerBot.isLoggedIn) {
+            throw new Error('المتصفح غير متصل — سجّل دخول من الداشبورد أولاً');
         }
 
-        // Send local media files
+        // Send local media files via Puppeteer
         for (const mediaPath of mediaFiles) {
             if (fs.existsSync(mediaPath)) {
-                const FormData = require('form-data');
-                const form = new FormData();
-                form.append('message', JSON.stringify({
-                    attachment: {
-                        type: 'image',
-                        payload: { is_reusable: true }
-                    }
-                }));
-                form.append('filedata', fs.createReadStream(mediaPath));
-
-                const uploadRes = await axios.post(`${this.FB_GRAPH_URL}/me/message_attachments`, form, {
-                    headers: form.getHeaders(),
-                    params: { access_token: pageToken }
-                });
-
-                const attachmentId = uploadRes.data.attachment_id;
-
-                try {
-                    await sendWithTag({
-                        message: {
-                            attachment: {
-                                type: 'image',
-                                payload: { attachment_id: attachmentId }
-                            }
-                        }
-                    });
-                    console.log(`[Campaign] ✅ Media sent (tag: ${TAG})`);
-                } catch (tagErr) {
-                    const fbErr = tagErr.response?.data?.error;
-                    if (fbErr?.code === 551) throw tagErr;
-
-                    // Tag failed → try Puppeteer fallback
-                    if (this.messengerBot && this.messengerBot.isLoggedIn) {
-                        try {
-                            console.log(`[Campaign] 🤖 Tag failed → Trying Puppeteer for media...`);
-                            const result = await this.messengerBot.sendMessage(recipient.id, null, mediaPath);
-                            if (result.success) {
-                                console.log(`[Campaign] 🤖 ✅ Media sent via Puppeteer`);
-                            } else {
-                                throw new Error('خارج نافذة المراسلة - فشل الإرسال (Tag + Puppeteer)');
-                            }
-                        } catch (autoErr) {
-                            console.error(`[Campaign] 🤖 ❌ Puppeteer media failed: ${autoErr.message}`);
-                            throw new Error('خارج نافذة المراسلة - فشل الإرسال (Tag + Puppeteer)');
-                        }
-                    } else {
-                        throw new Error(`خارج نافذة المراسلة (${fbErr?.message || tagErr.message})`);
-                    }
+                console.log(`[Campaign] 🤖 Sending media to ${recipient.name}...`);
+                const result = await this.messengerBot.sendMessage(recipient.id, null, mediaPath, recipient.name, pageId);
+                if (result.success) {
+                    console.log(`[Campaign] 🤖 ✅ Media sent to ${recipient.name}`);
+                } else {
+                    throw new Error(`فشل إرسال الميديا: ${result.error || 'خطأ غير معروف'}`);
                 }
             }
         }
 
-        // Send text message using POST_PURCHASE_UPDATE
+        // Send text message via Puppeteer
         if (message) {
-            try {
-                await sendWithTag({ message: { text: message } });
-                console.log(`[Campaign] ✅ Text sent (tag: ${TAG})`);
-                return; // Success!
-            } catch (tagErr) {
-                const fbError = tagErr.response?.data?.error;
-                const errorCode = fbError?.code;
-
-                // User not available (deleted/blocked)
-                if (errorCode === 551) {
-                    throw new Error('المستخدم غير متاح (حساب محذوف أو محظور)');
-                }
-
-                // Tag failed → try Puppeteer as fallback
-                if (this.messengerBot && this.messengerBot.isLoggedIn) {
-                    try {
-                        console.log(`[Campaign] 🤖 Tag failed → Trying Puppeteer for ${recipient.name}...`);
-                        const result = await this.messengerBot.sendMessage(recipient.id, message);
-                        if (result.success) {
-                            console.log(`[Campaign] 🤖 ✅ Sent via Puppeteer to ${recipient.name}`);
-                            return; // Success via automation!
-                        } else {
-                            throw new Error(result.error || 'Puppeteer send failed');
-                        }
-                    } catch (autoErr) {
-                        console.error(`[Campaign] 🤖 ❌ Puppeteer also failed: ${autoErr.message}`);
-                        throw new Error(`فشل الإرسال بكل الطرق (POST_PURCHASE_UPDATE + Puppeteer)`);
-                    }
-                }
-
-                // No Puppeteer available
-                const finalErr = fbError?.message || 'فشل الإرسال';
-                throw new Error(`خارج نافذة المراسلة - POST_PURCHASE_UPDATE فشل (${finalErr})`);
+            console.log(`[Campaign] 🤖 Sending text to ${recipient.name}...`);
+            const result = await this.messengerBot.sendMessage(recipient.id, message, null, recipient.name, pageId);
+            if (result.success) {
+                console.log(`[Campaign] 🤖 ✅ Text sent to ${recipient.name}`);
+            } else {
+                throw new Error(`فشل الإرسال: ${result.error || 'خطأ غير معروف'}`);
             }
         }
     }

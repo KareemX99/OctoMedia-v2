@@ -203,50 +203,162 @@ class MessengerAutomation {
         }
     }
 
-    async sendMessage(recipientId, message, imagePath = null) {
+    async sendMessage(recipientId, message, imagePath = null, recipientName = null, pageId = null) {
         try {
-            // Try multiple URL formats
-            const urls = [
-                `https://www.messenger.com/t/${recipientId}`,
-                `https://www.facebook.com/messages/t/${recipientId}`
-            ];
+            // Strategy: Use Meta Business Suite inbox to find and message the recipient
+            // PSIDs don't work in browser URLs, so we search by name instead
 
-            let messageBoxFound = false;
+            if (!recipientName) {
+                return { success: false, error: 'اسم المستلم مطلوب للإرسال عبر المتصفح' };
+            }
 
-            for (const url of urls) {
+            // Try multiple inbox URLs in order
+            const inboxUrls = [];
+            if (pageId) {
+                inboxUrls.push(`https://business.facebook.com/latest/inbox/all?asset_id=${pageId}`);
+                inboxUrls.push(`https://www.facebook.com/latest/inbox/all?asset_id=${pageId}`);
+            }
+            inboxUrls.push('https://business.facebook.com/latest/inbox/all');
+
+            let inboxLoaded = false;
+
+            for (const inboxUrl of inboxUrls) {
                 try {
-                    console.log(`[Puppeteer] Trying URL: ${url}`);
-                    await this.page.goto(url, { waitUntil: 'networkidle2', timeout: 20000 });
+                    console.log(`[Puppeteer] Trying inbox: ${inboxUrl}`);
+                    await this.page.goto(inboxUrl, { waitUntil: 'networkidle2', timeout: 30000 });
+                    await this.delay(3000);
 
                     const currentUrl = this.page.url();
                     if (currentUrl.includes('/login') || currentUrl.includes('/checkpoint')) {
-                        console.log(`[Puppeteer] Redirected to login, skipping...`);
-                        continue;
+                        this.isLoggedIn = false;
+                        return { success: false, error: 'غير مسجل دخول' };
                     }
 
-                    const inputSelector = [
-                        '[aria-label="Message"]',
-                        '[aria-label="\u0631\u0633\u0627\u0644\u0629"]',
-                        'div[contenteditable="true"][role="textbox"]',
-                        '[contenteditable="true"]'
-                    ].join(', ');
+                    // Check if page loaded properly (not an error page)
+                    const hasError = await this.page.evaluate(() => {
+                        return document.body.innerText.includes("isn't available") ||
+                            document.body.innerText.includes('غير متاح');
+                    });
 
-                    await this.page.waitForSelector(inputSelector, { timeout: 10000 });
-                    messageBoxFound = true;
-                    console.log(`[Puppeteer] \u2705 Message box found`);
-                    break;
-                } catch (urlErr) {
-                    console.log(`[Puppeteer] \u274c URL failed: ${urlErr.message.substring(0, 80)}`);
-                    continue;
+                    if (!hasError) {
+                        inboxLoaded = true;
+                        console.log(`[Puppeteer] ✅ Inbox loaded: ${inboxUrl}`);
+                        break;
+                    }
+                    console.log(`[Puppeteer] ⚠️ Inbox not available, trying next...`);
+                } catch (e) {
+                    console.log(`[Puppeteer] ❌ Inbox URL failed: ${e.message.substring(0, 60)}`);
                 }
             }
 
-            if (!messageBoxFound) {
+            if (!inboxLoaded) {
                 const screenshotPath = path.join(__dirname, 'debug_puppeteer.png');
                 await this.page.screenshot({ path: screenshotPath, fullPage: true }).catch(() => { });
-                console.error(`[Puppeteer] \u274c No message box found. Screenshot: ${screenshotPath}`);
-                console.error(`[Puppeteer] Current URL: ${this.page.url()}`);
-                return { success: false, error: '\u0644\u0645 \u064a\u062a\u0645 \u0627\u0644\u0639\u062b\u0648\u0631 \u0639\u0644\u0649 \u0645\u0631\u0628\u0639 \u0627\u0644\u0631\u0633\u0627\u0626\u0644' };
+                return { success: false, error: 'لم يتم فتح inbox الصفحة — تأكد إنك أدمن على الصفحة' };
+            }
+
+            // Look for search box in inbox and search by name
+            const searchSelectors = [
+                'input[placeholder*="Search"]',
+                'input[placeholder*="بحث"]',
+                'input[placeholder*="search"]',
+                'input[aria-label*="Search"]',
+                'input[aria-label*="بحث"]',
+                'input[type="search"]',
+                '[role="search"] input',
+                'input[placeholder*="Search Messenger"]'
+            ];
+
+            let searchBox = null;
+            for (const sel of searchSelectors) {
+                searchBox = await this.page.$(sel);
+                if (searchBox) break;
+            }
+
+            if (searchBox) {
+                console.log(`[Puppeteer] Searching for: ${recipientName}`);
+                await searchBox.click();
+                await this.delay(500);
+                // Clear any existing text
+                await this.page.keyboard.down('Control');
+                await this.page.keyboard.press('a');
+                await this.page.keyboard.up('Control');
+                await this.page.keyboard.type(recipientName, { delay: 30 });
+                await this.delay(4000);
+
+                // Click on the first matching result
+                const resultClicked = await this.page.evaluate((name) => {
+                    const lowerName = name.toLowerCase();
+                    // Look for conversation items with the recipient name
+                    const allElements = document.querySelectorAll('a, [role="row"], [role="listitem"], [role="option"], div[tabindex], span');
+                    for (const el of allElements) {
+                        const text = (el.textContent || '').toLowerCase().trim();
+                        if (text.includes(lowerName) && el.offsetParent !== null && el.closest('[role="listbox"], [role="list"], [role="menu"], ul, [data-testid]')) {
+                            el.click();
+                            return true;
+                        }
+                    }
+                    // Fallback: try any clickable element with the name
+                    for (const el of allElements) {
+                        const text = (el.textContent || '').toLowerCase().trim();
+                        if (text === lowerName && el.offsetParent !== null) {
+                            el.click();
+                            return true;
+                        }
+                    }
+                    return false;
+                }, recipientName);
+
+                if (!resultClicked) {
+                    console.log(`[Puppeteer] ❌ Could not find conversation for: ${recipientName}`);
+                    const screenshotPath = path.join(__dirname, 'debug_puppeteer.png');
+                    await this.page.screenshot({ path: screenshotPath, fullPage: true }).catch(() => { });
+                    return { success: false, error: `لم يتم العثور على محادثة: ${recipientName}` };
+                }
+
+                await this.delay(3000);
+            } else {
+                console.log('[Puppeteer] ⚠️ No search box found, trying to scroll conversations...');
+                // Try to find conversation by scrolling and clicking
+                const found = await this.page.evaluate((name) => {
+                    const lowerName = name.toLowerCase();
+                    const allText = document.querySelectorAll('span, a, div');
+                    for (const el of allText) {
+                        const text = (el.textContent || '').toLowerCase().trim();
+                        if (text === lowerName && el.offsetParent !== null) {
+                            el.click();
+                            return true;
+                        }
+                    }
+                    return false;
+                }, recipientName);
+
+                if (!found) {
+                    const screenshotPath = path.join(__dirname, 'debug_puppeteer.png');
+                    await this.page.screenshot({ path: screenshotPath, fullPage: true }).catch(() => { });
+                    return { success: false, error: `لم يتم العثور على محادثة: ${recipientName}` };
+                }
+                await this.delay(3000);
+            }
+
+            // Now we should be in the conversation - find the message box
+            const inputSelector = [
+                '[aria-label="Message"]',
+                '[aria-label="رسالة"]',
+                '[aria-label="Aa"]',
+                '[aria-label="Reply"]',
+                '[aria-label="الرد"]',
+                'div[contenteditable="true"][role="textbox"]',
+                '[contenteditable="true"]'
+            ].join(', ');
+
+            try {
+                await this.page.waitForSelector(inputSelector, { timeout: 10000 });
+            } catch (e) {
+                const screenshotPath = path.join(__dirname, 'debug_puppeteer.png');
+                await this.page.screenshot({ path: screenshotPath, fullPage: true }).catch(() => { });
+                console.error(`[Puppeteer] ❌ No message box after opening conversation`);
+                return { success: false, error: 'لم يتم العثور على مربع الرسائل بعد فتح المحادثة' };
             }
 
             // Upload image if exists
@@ -262,7 +374,8 @@ class MessengerAutomation {
             if (message) {
                 const messageBox = await this.page.$('div[contenteditable="true"][role="textbox"]') ||
                     await this.page.$('[aria-label="Message"]') ||
-                    await this.page.$('[aria-label="\u0631\u0633\u0627\u0644\u0629"]') ||
+                    await this.page.$('[aria-label="رسالة"]') ||
+                    await this.page.$('[aria-label="Aa"]') ||
                     await this.page.$('[contenteditable="true"]');
 
                 if (messageBox) {
@@ -270,7 +383,7 @@ class MessengerAutomation {
                     await this.delay(500);
                     await this.page.keyboard.type(message, { delay: 15 });
                 } else {
-                    return { success: false, error: '\u0644\u0645 \u064a\u062a\u0645 \u0627\u0644\u0639\u062b\u0648\u0631 \u0639\u0644\u0649 \u0645\u0631\u0628\u0639 \u0627\u0644\u0643\u062a\u0627\u0628\u0629' };
+                    return { success: false, error: 'لم يتم العثور على مربع الكتابة' };
                 }
             }
 
@@ -280,7 +393,7 @@ class MessengerAutomation {
 
             return { success: true };
         } catch (err) {
-            console.error(`[Puppeteer] Failed to send to ${recipientId}:`, err.message);
+            console.error(`[Puppeteer] Failed to send to ${recipientName || recipientId}:`, err.message);
             const screenshotPath = path.join(__dirname, 'debug_puppeteer.png');
             await this.page.screenshot({ path: screenshotPath, fullPage: true }).catch(() => { });
             return { success: false, error: err.message };

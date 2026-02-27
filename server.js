@@ -13,7 +13,7 @@ const schedule = require('node-schedule');
 const fs = require('fs');
 const path = require('path');
 const multer = require('multer');
-require('dotenv').config();
+require('dotenv').config({ path: require('path').resolve(__dirname, '../.env') });
 
 // Security Packages
 const helmet = require('helmet');
@@ -5771,7 +5771,6 @@ app.post('/api/automation/init', async (req, res) => {
         if (isLoggedIn) {
             campaignService.setAutomation(messengerBot);
         }
-
         res.json({
             success: true,
             initialized: true,
@@ -5819,8 +5818,30 @@ app.post('/api/automation/login', async (req, res) => {
         if (success) {
             campaignService.setAutomation(messengerBot);
         }
-
         res.json({ success });
+    } catch (err) {
+        res.json({ success: false, error: err.message });
+    }
+});
+
+// Check automation status
+app.get('/api/automation/status', (req, res) => {
+    res.json({
+        initialized: !!messengerBot,
+        isLoggedIn: messengerBot ? messengerBot.isLoggedIn : false
+    });
+});
+
+// Close automation browser
+app.post('/api/automation/close', async (req, res) => {
+    try {
+        if (messengerBot) {
+            await messengerBot.close();
+            messengerBot = null;
+            campaignService.setAutomation(null);
+            console.log('[Automation] 🤖 Browser closed');
+        }
+        res.json({ success: true });
     } catch (err) {
         res.json({ success: false, error: err.message });
     }
@@ -7242,28 +7263,24 @@ async function startServer() {
         }, 15000);
 
         // ============= AUTO-START PUPPETEER AUTOMATION =============
-        // Auto-initialize Puppeteer for campaign fallback (after 10 seconds)
         setTimeout(async () => {
             try {
                 console.log('[Automation] 🤖 Auto-initializing Puppeteer for campaign fallback...');
                 messengerBot = new MessengerAutomation();
                 await messengerBot.initialize(true); // headless mode
-
-                // Try auto-login with saved cookies
                 const isLoggedIn = await messengerBot.autoLogin();
-
                 if (isLoggedIn) {
                     campaignService.setAutomation(messengerBot);
                     console.log('[Automation] 🤖 ✅ Puppeteer ready! Campaigns will use it as fallback.');
                 } else {
                     console.log('[Automation] 🤖 ⚠️ Puppeteer initialized but NOT logged in.');
-                    console.log('[Automation] 🤖 Login via: POST /api/automation/login { email, password }');
+                    console.log('[Automation] 🤖 Login via dashboard or: POST /api/automation/login');
                 }
             } catch (err) {
                 console.log('[Automation] 🤖 ⚠️ Auto-init skipped:', err.message);
-                console.log('[Automation] 🤖 Initialize manually: POST /api/automation/init');
             }
         }, 10000);
+
     });
 }
 
