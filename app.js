@@ -1191,6 +1191,10 @@ class SocialMediaHub {
             if (data.loggedIn && data.account) {
                 console.log('[App] Instagram session found for user, showing inbox');
                 this.showIgInbox(data.account);
+            } else if (data.checkpoint && data.needsCode) {
+                // Checkpoint detected — show verification form automatically
+                console.log('[App] Instagram checkpoint detected, showing verification form');
+                this.showIgVerificationForm(userId, data.message || 'مطلوب كود تحقق');
             } else {
                 console.log('[App] No Instagram session for this user, login required');
             }
@@ -2319,7 +2323,7 @@ class SocialMediaHub {
                             </div>
                             
                             <!-- Messages Container -->
-                            <div id="igMessages" style="height:400px;overflow-y:auto;padding:20px;background:var(--bg-secondary);"></div>
+                            <div id="igMessages" style="height:calc(100vh - 320px);min-height:400px;max-height:700px;overflow-y:auto;padding:20px;background:var(--bg-secondary);"></div>
                             
 
                             
@@ -2508,7 +2512,7 @@ class SocialMediaHub {
         // Note: WhatsApp chats will be loaded via waCheckStatus()
 
         // Team Management Section (Admin Only)
-
+        const userData = JSON.parse(localStorage.getItem('octobot_user') || '{}');
         const isAdmin = userData.role === 'admin';
         const isSupervisor = userData.role === 'supervisor';
         const canManageTeam = isAdmin || isSupervisor;

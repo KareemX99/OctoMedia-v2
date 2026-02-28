@@ -6154,10 +6154,21 @@ app.get('/api/ig/:userId/status', async (req, res) => {
     const { userId } = req.params;
 
     try {
-        const isLoggedIn = await instagramPrivateService.isLoggedIn(userId);
-        if (isLoggedIn) {
+        const status = await instagramPrivateService.isLoggedIn(userId);
+
+        if (status.loggedIn) {
             const account = await instagramPrivateService.getAccountInfo(userId);
             res.json({ loggedIn: true, account });
+        } else if (status.checkpoint) {
+            // Account is flagged — auto-trigger challenge
+            console.log(`[IG Status] Checkpoint detected for ${userId}, triggering challenge...`);
+            const challengeResult = await instagramPrivateService.checkAndResolveCheckpoint(userId, status.ig);
+            res.json({
+                loggedIn: false,
+                checkpoint: true,
+                needsCode: challengeResult.needsCode || false,
+                message: challengeResult.message
+            });
         } else {
             res.json({ loggedIn: false });
         }

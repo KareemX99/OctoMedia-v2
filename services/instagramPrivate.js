@@ -1,5 +1,5 @@
 // Instagram Private API Service - Direct Login
-const { IgApiClient } = require('instagram-private-api');
+const { IgApiClient, IgCheckpointError } = require('instagram-private-api');
 const fs = require('fs');
 const path = require('path');
 
@@ -15,10 +15,23 @@ class InstagramPrivateService {
         }
     }
 
-    // Get or create client for user
+    // Get or create client for user (with updated constants)
     getClient(userId) {
         if (!this.clients[userId]) {
-            this.clients[userId] = new IgApiClient();
+            const ig = new IgApiClient();
+
+            // Override outdated library constants (v222 is blocked by Instagram)
+            // Using a recent working version to avoid "unsupported_version" checkpoint
+            ig.state.constants = {
+                ...ig.state.constants,
+                APP_VERSION: '349.0.0.43.108',
+                APP_VERSION_CODE: '604247854',
+                BLOKS_VERSION_ID: 'dff3eebcee4112e534770fb4f1572040c413f89556980f8c74649f48dc7fd44f',
+                SIGNATURE_KEY: '46024e8f31e295869a0e861eaed42cb1dd8454b55232d85f6c6764365079374b',
+                SIGNATURE_VERSION: '4',
+            };
+
+            this.clients[userId] = ig;
         }
         return this.clients[userId];
     }
@@ -29,7 +42,7 @@ class InstagramPrivateService {
     }
 
     // Save session
-    async saveSession(userId, ig) {
+    async saveSession(userId, ig, username = null) {
         try {
             // Ensure session directory exists
             if (!fs.existsSync(this.sessionDir)) {
@@ -37,9 +50,18 @@ class InstagramPrivateService {
             }
             const session = await ig.state.serialize();
             delete session.constants;
-            fs.writeFileSync(this.getSessionPath(userId), JSON.stringify(session));
+
+            // Store username alongside session for device generation on reload
+            const sessionData = {
+                username: username || this._usernameCache?.[userId] || null,
+                session: session,
+                savedAt: new Date().toISOString()
+            };
+
+            fs.writeFileSync(this.getSessionPath(userId), JSON.stringify(sessionData));
+            console.log(`[IG] ✅ Session saved for user ${userId} (username: ${sessionData.username})`);
         } catch (err) {
-            console.error('Error saving Instagram session:', err.message);
+            console.error('[IG] ❌ Error saving Instagram session:', err.message);
         }
     }
 
@@ -48,14 +70,190 @@ class InstagramPrivateService {
         try {
             const sessionPath = this.getSessionPath(userId);
             if (fs.existsSync(sessionPath)) {
-                const session = JSON.parse(fs.readFileSync(sessionPath, 'utf8'));
+                const fileContent = JSON.parse(fs.readFileSync(sessionPath, 'utf8'));
+
+                // Support both old format (direct session) and new format (with username wrapper)
+                let session, username;
+                if (fileContent.session && fileContent.username) {
+                    // New format: { username, session, savedAt }
+                    session = fileContent.session;
+                    username = fileContent.username;
+                } else {
+                    // Old format: direct session object (no username)
+                    session = fileContent;
+                    username = null;
+                }
+
+                // Generate device BEFORE deserializing (critical for session validity)
+                if (username) {
+                    ig.state.generateDevice(username);
+                    console.log(`[IG] Device generated for ${username} before session load`);
+
+                    // Cache username for future saves
+                    this._usernameCache = this._usernameCache || {};
+                    this._usernameCache[userId] = username;
+                }
+
                 await ig.state.deserialize(session);
+                console.log(`[IG] ✅ Session loaded for user ${userId}`);
                 return true;
             }
         } catch (err) {
-            console.error('Error loading Instagram session:', err.message);
+            console.error('[IG] ❌ Error loading Instagram session:', err.message);
         }
         return false;
+    }
+
+    // Helper: extract checkpoint data from error and set it on ig.state
+    _extractCheckpointFromError(ig, err) {
+        console.log('[IG] === Checkpoint Extraction Debug ===');
+        console.log('[IG] Error type:', err?.constructor?.name);
+        console.log('[IG] Error message:', err?.message);
+        console.log('[IG] ig.state.checkpoint exists:', !!ig.state.checkpoint);
+
+        // Method 1: Library already set ig.state.checkpoint (request.js:107 does this automatically)
+        if (ig.state.checkpoint?.challenge?.api_path) {
+            console.log(`[IG] ✅ Checkpoint already on ig.state: ${ig.state.checkpoint.challenge.api_path}`);
+            return true;
+        }
+
+        // Method 1b: Library set checkpoint with checkpoint_url but no challenge object
+        if (ig.state.checkpoint?.checkpoint_url && !ig.state.checkpoint?.challenge) {
+            const cp = ig.state.checkpoint;
+            let apiPath;
+            try {
+                apiPath = new URL(cp.checkpoint_url).pathname;
+            } catch (e) {
+                apiPath = cp.checkpoint_url;
+            }
+            apiPath = apiPath.replace(/^\/api\/v1/, '');
+            cp.challenge = {
+                url: cp.checkpoint_url,
+                api_path: apiPath,
+                hide_webview_header: false,
+                lock: cp.lock || false,
+                logout: false,
+                native_flow: true
+            };
+            console.log(`[IG] ✅ Transformed checkpoint_url on ig.state to challenge format: ${apiPath}`);
+            return true;
+        }
+
+        // Method 2: Error is IgCheckpointError instance (has .url and .apiUrl getters)
+        if (err instanceof IgCheckpointError) {
+            console.log('[IG] ✅ Error is IgCheckpointError instance');
+            try {
+                const body = err.response?.body;
+                if (body?.challenge?.api_path) {
+                    ig.state.checkpoint = body;
+                    console.log(`[IG] ✅ Checkpoint extracted from IgCheckpointError: ${body.challenge.api_path}`);
+                    return true;
+                }
+            } catch (e) {
+                console.log('[IG] ⚠️ IgCheckpointError extraction failed:', e.message);
+            }
+        }
+
+        // Method 3: Extract from error response body (may be nested differently)
+        const body = err?.response?.body || err?.response?.data;
+        if (body) {
+            console.log('[IG] Response body keys:', Object.keys(body));
+            if (body.challenge?.api_path) {
+                ig.state.checkpoint = body;
+                console.log(`[IG] ✅ Checkpoint from response body: ${body.challenge.api_path}`);
+                return true;
+            }
+            if (body.message === 'challenge_required' || body.message === 'checkpoint_required') {
+                // Transform checkpoint_url format into challenge format the library expects
+                if (body.checkpoint_url && !body.challenge) {
+                    let apiPath;
+                    try {
+                        const url = new URL(body.checkpoint_url);
+                        apiPath = url.pathname; // e.g. /challenge/12345/abcdef/
+                    } catch (e) {
+                        // If checkpoint_url is already a path
+                        apiPath = body.checkpoint_url;
+                    }
+
+                    // Remove /api/v1 prefix if present (the library adds it back)
+                    apiPath = apiPath.replace(/^\/api\/v1/, '');
+
+                    // Create synthetic challenge object matching library's expected format
+                    body.challenge = {
+                        url: body.checkpoint_url,
+                        api_path: apiPath,
+                        hide_webview_header: false,
+                        lock: body.lock || false,
+                        logout: false,
+                        native_flow: true
+                    };
+                    console.log(`[IG] ✅ Created synthetic challenge from checkpoint_url: ${apiPath}`);
+                }
+                ig.state.checkpoint = body;
+                console.log(`[IG] ✅ Checkpoint set from body (message: ${body.message})`);
+                return true;
+            }
+        }
+
+        // Method 4: Check raw error properties
+        if (err?.checkpoint?.challenge?.api_path) {
+            ig.state.checkpoint = err.checkpoint;
+            console.log(`[IG] ✅ Checkpoint from err.checkpoint`);
+            return true;
+        }
+
+        // Method 5: Wrapped error (IgNetworkError wrapping IgCheckpointError)
+        const innerErr = err?.cause || err?.originalError || err?.error;
+        if (innerErr) {
+            console.log('[IG] Found inner error, trying extraction on it...');
+            return this._extractCheckpointFromError(ig, innerErr);
+        }
+
+        // Method 6: ig.state.checkpoint was set but without challenge (partial data)
+        if (ig.state.checkpoint) {
+            console.log('[IG] ⚠️ ig.state.checkpoint exists but missing challenge.api_path');
+            console.log('[IG] ig.state.checkpoint keys:', Object.keys(ig.state.checkpoint));
+            // Still return true — challenge.auto() will attempt to use challengeUrl
+            return true;
+        }
+
+        console.log('[IG] ❌ Could NOT extract checkpoint data from error');
+        console.log('[IG] Error properties:', Object.getOwnPropertyNames(err || {}));
+        try {
+            console.log('[IG] Error JSON:', JSON.stringify(err, null, 2).substring(0, 500));
+        } catch (e) { /* circular */ }
+        return false;
+    }
+
+    // Helper: attempt to trigger challenge auto and return appropriate response
+    async _handleChallenge(ig, userId, username) {
+        this.challenges = this.challenges || {};
+        this.challenges[userId] = {
+            ig: ig,
+            checkpoint: ig.state.checkpoint,
+            username: username
+        };
+
+        try {
+            await ig.challenge.auto(true); // true = prefer email
+            console.log(`[IG] Challenge auto succeeded for ${username}`);
+            return {
+                success: false,
+                code: 'challenge_required',
+                needsCode: true,
+                message: 'مطلوب كود تحقق - تم إرسال الكود إلى بريدك أو هاتفك',
+                challengeType: 'verification'
+            };
+        } catch (challengeErr) {
+            console.error('[IG] Challenge auto failed:', challengeErr.message);
+            return {
+                success: false,
+                code: 'challenge_required',
+                needsCode: true,
+                message: 'مطلوب كود تحقق - افتح Instagram وأكد محاولة الدخول',
+                error: challengeErr.message
+            };
+        }
     }
 
     // Login to Instagram
@@ -71,67 +269,75 @@ class InstagramPrivateService {
                     await ig.account.currentUser();
                     return { success: true, message: 'تم تسجيل الدخول (session موجودة)' };
                 } catch (e) {
-                    // Session invalid
+                    console.log('[IG] Session invalid, deleting stale session file...');
+                    // Delete stale session to avoid checkpoint on re-login
+                    try {
+                        const sessionPath = this.getSessionPath(userId);
+                        if (fs.existsSync(sessionPath)) {
+                            fs.unlinkSync(sessionPath);
+                            console.log('[IG] Stale session file deleted');
+                        }
+                    } catch (delErr) {
+                        console.error('[IG] Failed to delete stale session:', delErr.message);
+                    }
+
+                    // Create fresh client with updated constants
+                    delete this.clients[userId];
+                    const freshIg = this.getClient(userId);
+                    freshIg.state.generateDevice(username);
                 }
             }
 
-            // Attempt login with challenge handling
-            await ig.simulate.preLoginFlow();
+            // Use the current (possibly refreshed) client
+            const currentIg = this.getClient(userId);
+
+            // Attempt preLoginFlow - may trigger checkpoint
+            try {
+                await currentIg.simulate.preLoginFlow();
+            } catch (preErr) {
+                console.warn('[IG] preLoginFlow error:', preErr.message);
+                // If preLoginFlow triggers checkpoint, extract and handle it
+                if (this._extractCheckpointFromError(currentIg, preErr)) {
+                    return await this._handleChallenge(currentIg, userId, username);
+                }
+                // Non-checkpoint preLogin errors are ignorable (continue to login)
+            }
 
             try {
-                await ig.account.login(username, password);
-                await this.saveSession(userId, ig);
+                await currentIg.account.login(username, password);
+                await this.saveSession(userId, currentIg, username);
+
+                // Run postLoginFlow in background (non-blocking)
+                process.nextTick(async () => {
+                    try {
+                        await currentIg.simulate.postLoginFlow();
+                    } catch (e) { /* ignore */ }
+                });
+
                 return { success: true, message: 'تم تسجيل الدخول بنجاح' };
             } catch (loginErr) {
-                // Check if challenge required
-                if (ig.state.checkpoint) {
-                    // Store challenge state for this user
-                    this.challenges = this.challenges || {};
-                    this.challenges[userId] = {
-                        ig: ig,
-                        checkpoint: ig.state.checkpoint,
-                        username: username
-                    };
+                console.error('[IG] Login error:', loginErr.message);
+                console.error('[IG] Login error type:', loginErr?.constructor?.name);
 
-                    try {
-                        // Request verification code
-                        await ig.challenge.auto(true); // true = prefer email
-                        const challengeUrl = ig.state.checkpoint?.url;
-
-                        console.log(`[IG] Challenge required for ${username}, URL: ${challengeUrl}`);
-
-                        return {
-                            success: false,
-                            code: 'challenge_required',
-                            needsCode: true,
-                            message: 'مطلوب كود تحقق - تم إرسال الكود إلى بريدك أو هاتفك',
-                            challengeType: 'verification'
-                        };
-                    } catch (challengeErr) {
-                        console.error('[IG] Challenge auto failed:', challengeErr.message);
-                        return {
-                            success: false,
-                            code: 'challenge_required',
-                            needsCode: true,
-                            message: 'مطلوب كود تحقق - افتح Instagram وأكد محاولة الدخول',
-                            error: challengeErr.message
-                        };
-                    }
+                // Try to extract checkpoint data from the error
+                if (this._extractCheckpointFromError(currentIg, loginErr)) {
+                    return await this._handleChallenge(currentIg, userId, username);
                 }
+
+                // Re-throw if not a checkpoint error
                 throw loginErr;
             }
         } catch (err) {
             console.error('Instagram login error:', err.message);
 
-            // Check for checkpoint/challenge in error - includes various error messages
+            // Final fallback: check error message for challenge indicators
             const challengeIndicators = [
                 'checkpoint',
                 'challenge',
                 'send you an email',
                 'get back into your account',
                 'verify your identity',
-                'confirm your identity',
-                'two_factor'
+                'confirm your identity'
             ];
 
             const isChallenge = challengeIndicators.some(indicator =>
@@ -140,14 +346,44 @@ class InstagramPrivateService {
 
             if (isChallenge) {
                 const ig = this.getClient(userId);
-                this.challenges = this.challenges || {};
-                this.challenges[userId] = { ig: ig, username: arguments[1] };
 
+                // Last-resort: try to extract checkpoint from error
+                this._extractCheckpointFromError(ig, err);
+
+                this.challenges = this.challenges || {};
+                this.challenges[userId] = { ig: ig, username: username };
+
+                if (ig.state.checkpoint) {
+                    // We have checkpoint data, try challenge.auto
+                    try {
+                        await ig.challenge.auto(true);
+                        console.log(`[IG] Challenge auto from fallback succeeded for ${username}`);
+                        return {
+                            success: false,
+                            code: 'challenge_required',
+                            needsCode: true,
+                            message: 'مطلوب كود تحقق - تم إرسال الكود إلى بريدك أو هاتفك'
+                        };
+                    } catch (autoErr) {
+                        console.error('[IG] Challenge auto from fallback failed:', autoErr.message);
+                    }
+                }
+
+                // No checkpoint data or auto failed - user must verify manually
                 return {
                     success: false,
                     code: 'challenge_required',
+                    needsCode: false,
+                    message: 'مطلوب تحقق من الحساب - افتح تطبيق Instagram أو الموقع وأكد محاولة الدخول، ثم أعد تسجيل الدخول هنا'
+                };
+            }
+
+            if (err.message.includes('two_factor')) {
+                return {
+                    success: false,
+                    code: 'two_factor_required',
                     needsCode: true,
-                    message: 'مطلوب كود تحقق - تحقق من بريدك أو هاتفك، أو افتح تطبيق Instagram وأكد محاولة الدخول'
+                    message: 'مطلوب كود المصادقة الثنائية (2FA)'
                 };
             }
             if (err.message.includes('bad_password')) {
@@ -206,29 +442,116 @@ class InstagramPrivateService {
             const challenge = this.challenges[userId];
 
             if (!challenge || !challenge.ig) {
-                return { success: false, error: 'لا يوجد طلب تحقق معلق' };
+                return { success: false, error: 'لا يوجد طلب تحقق معلق - أعد تسجيل الدخول أولاً' };
             }
 
             const ig = challenge.ig;
-            await ig.challenge.auto(true);
 
-            return { success: true, message: 'تم إرسال كود جديد' };
+            try {
+                await ig.challenge.auto(true);
+                return { success: true, message: 'تم إرسال كود جديد' };
+            } catch (autoErr) {
+                console.error('[IG] Resend auto failed:', autoErr.message);
+
+                // Try challenge.reset() then auto() again
+                try {
+                    await ig.challenge.reset();
+                    await ig.challenge.auto(true);
+                    return { success: true, message: 'تم إرسال كود جديد' };
+                } catch (resetErr) {
+                    console.error('[IG] Resend reset+auto failed:', resetErr.message);
+                    return {
+                        success: false,
+                        error: 'فشل إعادة إرسال الكود - أعد تسجيل الدخول وحاول مرة أخرى'
+                    };
+                }
+            }
         } catch (err) {
             console.error('[IG] Resend code error:', err.message);
             return { success: false, error: err.message };
         }
     }
 
-    // Check if logged in
+    // Check if logged in - returns { loggedIn, checkpoint, error }
     async isLoggedIn(userId) {
         try {
             const ig = this.getClient(userId);
             const sessionLoaded = await this.loadSession(userId, ig);
-            if (!sessionLoaded) return false;
+            if (!sessionLoaded) {
+                console.log(`[IG] isLoggedIn: No session found for ${userId}`);
+                return { loggedIn: false };
+            }
+
             await ig.account.currentUser();
-            return true;
+            console.log(`[IG] isLoggedIn: ✅ Session valid for ${userId}`);
+            return { loggedIn: true };
         } catch (err) {
-            return false;
+            console.log(`[IG] isLoggedIn: ❌ Session check failed for ${userId}: ${err.message}`);
+
+            // Detect checkpoint_required — session is valid but account is flagged
+            const isCheckpoint = err.message && (
+                err.message.includes('checkpoint_required') ||
+                err.message.includes('challenge_required')
+            );
+
+            if (isCheckpoint) {
+                console.log(`[IG] isLoggedIn: 🔒 Checkpoint detected for ${userId}`);
+                const ig = this.getClient(userId);
+
+                // Try to extract checkpoint from the error
+                this._extractCheckpointFromError(ig, err);
+
+                return { loggedIn: false, checkpoint: true, ig };
+            }
+
+            return { loggedIn: false };
+        }
+    }
+
+    // Auto-resolve checkpoint: trigger challenge and return status
+    async checkAndResolveCheckpoint(userId, ig) {
+        try {
+            if (!ig) {
+                ig = this.getClient(userId);
+                await this.loadSession(userId, ig);
+            }
+
+            console.log(`[IG] checkAndResolveCheckpoint: Attempting to resolve for ${userId}`);
+
+            // Get username from cache
+            const username = this._usernameCache?.[userId] || 'unknown';
+
+            // Store challenge state
+            this.challenges = this.challenges || {};
+            this.challenges[userId] = {
+                ig: ig,
+                checkpoint: ig.state.checkpoint,
+                username: username
+            };
+
+            // Try to auto-trigger challenge (sends code to email/SMS)
+            try {
+                await ig.challenge.auto(true); // prefer email
+                console.log(`[IG] checkAndResolveCheckpoint: ✅ Challenge auto succeeded`);
+                return {
+                    success: true,
+                    needsCode: true,
+                    message: 'مطلوب كود تحقق - تم إرسال الكود إلى بريدك أو هاتفك'
+                };
+            } catch (autoErr) {
+                console.error(`[IG] checkAndResolveCheckpoint: Challenge auto failed:`, autoErr.message);
+                return {
+                    success: true,
+                    needsCode: true,
+                    message: 'مطلوب كود تحقق - افتح Instagram وأكد محاولة الدخول'
+                };
+            }
+        } catch (err) {
+            console.error('[IG] checkAndResolveCheckpoint error:', err.message);
+            return {
+                success: false,
+                message: 'فشل في معالجة التحقق - أعد تسجيل الدخول'
+            };
         }
     }
 
