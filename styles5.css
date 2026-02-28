@@ -2449,3 +2449,277 @@
     z-index: 2;
     pointer-events: none;
 }
+
+/* ============================================
+   WhatsApp Light Mode - Full Theme Override
+   ============================================ */
+
+body.light-theme {
+    --wa-dark-bg: #EFEAE2;
+    --wa-panel-bg: #FFFFFF;
+    --wa-sidebar-bg: #FFFFFF;
+    --wa-header-bg: #F0F2F5;
+    --wa-input-bg: #F0F2F5;
+    --wa-search-bg: #F0F2F5;
+    --wa-hover-bg: #F5F6F6;
+    --wa-active-bg: #E9EDEF;
+    --wa-border: #E9EDEF;
+    --wa-outgoing: #D9FDD3;
+    --wa-incoming: #FFFFFF;
+    --wa-text: #111B21;
+    --wa-text-secondary: #667781;
+    --wa-text-muted: #8696A0;
+}
+
+/* Container */
+body.light-theme .wa-container {
+    background: var(--wa-dark-bg);
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+}
+
+/* Status Bar */
+body.light-theme .wa-status-bar {
+    background: var(--wa-header-bg);
+    border-bottom-color: var(--wa-border);
+}
+
+body.light-theme .wa-status-bar .wa-status-text {
+    color: var(--wa-text);
+}
+
+body.light-theme .wa-status-bar .wa-account-name {
+    color: var(--wa-text-secondary);
+}
+
+/* Sidebar */
+body.light-theme .wa-sidebar {
+    background: var(--wa-sidebar-bg);
+    border-left-color: var(--wa-border);
+}
+
+body.light-theme .wa-sidebar-header {
+    background: var(--wa-header-bg);
+    border-bottom-color: var(--wa-border);
+}
+
+body.light-theme .wa-search-box {
+    background: var(--wa-search-bg);
+    border: 1px solid #dfe5e7;
+}
+
+body.light-theme .wa-search-box input {
+    color: var(--wa-text);
+    background: transparent !important;
+}
+
+/* Chat List Items */
+body.light-theme .wa-chat-item {
+    border-bottom-color: #f0f2f5;
+}
+
+body.light-theme .wa-chat-item:hover {
+    background: var(--wa-hover-bg);
+}
+
+body.light-theme .wa-chat-item.active {
+    background: var(--wa-active-bg);
+}
+
+body.light-theme .wa-chat-name {
+    color: var(--wa-text);
+}
+
+body.light-theme .wa-chat-preview {
+    color: var(--wa-text-secondary);
+}
+
+body.light-theme .wa-chat-time {
+    color: var(--wa-text-muted);
+}
+
+/* Chat Area */
+body.light-theme .wa-chat-area {
+    background: var(--wa-dark-bg);
+}
+
+body.light-theme .wa-chat-header {
+    background: var(--wa-header-bg);
+    border-bottom-color: var(--wa-border);
+}
+
+body.light-theme .wa-chat-header-name {
+    color: var(--wa-text);
+}
+
+body.light-theme .wa-chat-header-status {
+    color: var(--wa-text-secondary);
+}
+
+body.light-theme .wa-chat-header-actions button {
+    color: var(--wa-text-secondary);
+}
+
+body.light-theme .wa-chat-header-actions button:hover {
+    background: rgba(0, 0, 0, 0.05);
+    color: var(--wa-text);
+}
+
+/* Messages */
+body.light-theme .wa-messages {
+    background-color: var(--wa-dark-bg) !important;
+    background-image: url("data:image/svg+xml,%3Csvg width='60' height='60' viewBox='0 0 60 60' xmlns='http://www.w3.org/2000/svg'%3E%3Cg fill='none' fill-rule='evenodd'%3E%3Cg fill='%23000000' fill-opacity='0.03'%3E%3Cpath d='M36 34v-4h-2v4h-4v2h4v4h2v-4h4v-2h-4zm0-30V0h-2v4h-4v2h4v4h2V6h4V4h-4zM6 34v-4H4v4H0v2h4v4h2v-4h4v-2H6zM6 4V0H4v4H0v2h4v4h2V6h4V4H6z'/%3E%3C/g%3E%3C/g%3E%3C/svg%3E") !important;
+}
+
+/* Message Bubbles - WhatsApp official light colors */
+body.light-theme .wa-message.outgoing {
+    background: var(--wa-outgoing);
+    color: var(--wa-text);
+}
+
+body.light-theme .wa-message.outgoing::before {
+    background: var(--wa-outgoing);
+}
+
+body.light-theme .wa-message.incoming {
+    background: var(--wa-incoming);
+    color: var(--wa-text);
+    box-shadow: 0 1px 0.5px rgba(0, 0, 0, 0.08);
+}
+
+body.light-theme .wa-message.incoming::before {
+    background: var(--wa-incoming);
+}
+
+body.light-theme .wa-message-time {
+    color: rgba(0, 0, 0, 0.4);
+}
+
+body.light-theme .wa-message-ticks {
+    color: rgba(0, 0, 0, 0.35);
+}
+
+body.light-theme .wa-message-ticks.read {
+    color: #53BDEB;
+}
+
+body.light-theme .wa-message-sender {
+    color: #06CF9C;
+}
+
+/* Date Separator */
+body.light-theme .wa-date-separator span {
+    background: #FFFFFF;
+    color: var(--wa-text-secondary);
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.1);
+}
+
+/* Input Area */
+body.light-theme .wa-input-area {
+    background: var(--wa-header-bg);
+    border-top-color: var(--wa-border);
+}
+
+body.light-theme .wa-input-area .wa-emoji-btn,
+body.light-theme .wa-input-area .wa-attach-btn {
+    color: var(--wa-text-secondary);
+}
+
+body.light-theme .wa-input-area .wa-emoji-btn:hover,
+body.light-theme .wa-input-area .wa-attach-btn:hover {
+    color: var(--wa-text);
+    background: rgba(0, 0, 0, 0.05);
+}
+
+body.light-theme .wa-input-wrap {
+    background: #FFFFFF;
+    border: 1px solid #dfe5e7;
+}
+
+body.light-theme .wa-input-wrap input {
+    color: var(--wa-text);
+    background: transparent !important;
+}
+
+/* Empty Chat */
+body.light-theme .wa-empty-chat h3 {
+    color: var(--wa-text);
+}
+
+body.light-theme .wa-empty-chat p {
+    color: var(--wa-text-secondary);
+}
+
+body.light-theme .wa-empty-chat i {
+    color: var(--wa-text-muted);
+}
+
+/* QR Screen */
+body.light-theme .wa-qr-screen {
+    background: #f0f2f5;
+}
+
+body.light-theme .wa-qr-screen h2 {
+    color: var(--wa-text);
+}
+
+body.light-theme .wa-qr-screen p {
+    color: var(--wa-text-secondary);
+}
+
+body.light-theme .wa-qr-steps .wa-step {
+    color: var(--wa-text-secondary);
+}
+
+/* Typing Indicator */
+body.light-theme .wa-typing {
+    background: var(--wa-incoming);
+}
+
+/* Scrollbar */
+body.light-theme .wa-chat-list::-webkit-scrollbar-thumb,
+body.light-theme .wa-messages::-webkit-scrollbar-thumb {
+    background: #c5c6c8;
+}
+
+/* Info Sidebar */
+body.light-theme .wa-info-panel {
+    background: #FFFFFF;
+    border-left-color: var(--wa-border);
+}
+
+body.light-theme .wa-info-header {
+    background: var(--wa-header-bg);
+}
+
+body.light-theme .wa-info-name {
+    color: var(--wa-text) !important;
+}
+
+body.light-theme .wa-info-phone {
+    color: var(--wa-text-secondary) !important;
+}
+
+body.light-theme .wa-info-section-title {
+    color: var(--wa-text-muted);
+}
+
+body.light-theme .wa-info-section {
+    background: #FFFFFF;
+    border-bottom-color: #f0f2f5;
+}
+
+/* Media message fixes */
+body.light-theme .wa-message .wa-msg-image,
+body.light-theme .wa-message .wa-msg-video {
+    border-radius: 6px;
+}
+
+/* Pinned/Starred labels */
+body.light-theme .wa-pinned-label {
+    color: var(--wa-text-muted);
+}
+
+/* New message button */
+body.light-theme .wa-new-chat-btn {
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+}

@@ -1639,6 +1639,164 @@ body.light-theme .health-score-label {
     color: #64748b;
 }
 
+/* ===== LIGHT MODE: FIX INLINE STYLES FROM APP.JS ===== */
+
+/* Cards with hardcoded dark backgrounds */
+body.light-theme .card {
+    background: #ffffff !important;
+    border-color: #e2e8f0 !important;
+}
+
+body.light-theme .card::before {
+    background: linear-gradient(90deg, transparent, rgba(0, 0, 0, 0.05), transparent);
+}
+
+body.light-theme .card:hover {
+    border-color: #0284C7 !important;
+    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.08) !important;
+}
+
+/* Stat cards */
+body.light-theme .stat-card {
+    background: #ffffff !important;
+    border-color: #e2e8f0 !important;
+}
+
+body.light-theme .stat-card:hover {
+    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.1) !important;
+}
+
+/* Fix all elements with inline background:var(--bg-card) or var(--bg-secondary) */
+body.light-theme [style*="background:var(--bg-card)"],
+body.light-theme [style*="background: var(--bg-card)"] {
+    background: #ffffff !important;
+}
+
+body.light-theme [style*="background:var(--bg-secondary)"],
+body.light-theme [style*="background: var(--bg-secondary)"] {
+    background: #f8fafc !important;
+}
+
+body.light-theme [style*="background:var(--glass)"],
+body.light-theme [style*="background: var(--glass)"] {
+    background: #f3f4f6 !important;
+}
+
+/* Fix inline white text that becomes invisible in light mode */
+body.light-theme [style*="color:rgba(255,255,255"],
+body.light-theme [style*="color: rgba(255,255,255"] {
+    color: #374151 !important;
+}
+
+/* But keep white text on gradient backgrounds (buttons, badges) */
+body.light-theme [style*="background:linear-gradient"] [style*="color:white"],
+body.light-theme [style*="background:linear-gradient"] [style*="color:rgba(255,255,255"],
+body.light-theme .btn-primary,
+body.light-theme [style*="background:#E1306C"],
+body.light-theme [style*="background:#22c55e"] {
+    color: white !important;
+}
+
+/* Telegram/WhatsApp/Instagram chat pages with inline dark styles */
+body.light-theme #telegram [style*="border:1px solid var(--border-color)"],
+body.light-theme #whatsapp [style*="border:1px solid var(--border-color)"],
+body.light-theme #instagram [style*="border:1px solid var(--border-color)"] {
+    border-color: #e2e8f0 !important;
+}
+
+/* Fix conversation items with inline styles */
+body.light-theme [style*="border-bottom:1px solid var(--border-color)"] {
+    border-color: #e2e8f0 !important;
+}
+
+/* Team tabs */
+body.light-theme .team-tab {
+    background: #f3f4f6 !important;
+    color: #475569 !important;
+}
+
+body.light-theme .team-tab.active {
+    background: var(--gradient-primary) !important;
+    color: white !important;
+}
+
+/* Fix page header gradient text — already has override but ensure priority */
+body.light-theme .page-header h1 {
+    background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%) !important;
+    -webkit-background-clip: text !important;
+    -webkit-text-fill-color: transparent !important;
+    background-clip: text !important;
+}
+
+/* Theme toggle button */
+body.light-theme .theme-toggle {
+    border-color: #d1d5db;
+    color: #475569;
+}
+
+/* Fix WA/TG/IG chat messages container with dark inline bg */
+body.light-theme #tgMessages,
+body.light-theme #igMessages,
+body.light-theme .wa-messages {
+    background: #f8fafc !important;
+}
+
+/* Fix search inputs and filter bars */
+body.light-theme [style*="background:var(--glass);border:1px solid"],
+body.light-theme [style*="background: var(--glass);border:1px solid"] {
+    background: #f3f4f6 !important;
+    border-color: #e2e8f0 !important;
+    color: #1e293b !important;
+}
+
+/* Generic dark inline backgrounds */
+body.light-theme [style*="background:rgba(15, 23, 42"],
+body.light-theme [style*="background: rgba(15, 23, 42"],
+body.light-theme [style*="background:rgba(15,23,42"],
+body.light-theme [style*="background: rgba(15,23,42"] {
+    background: #ffffff !important;
+}
+
+body.light-theme [style*="background:rgba(2, 6, 23"],
+body.light-theme [style*="background: rgba(2, 6, 23"],
+body.light-theme [style*="background:#020617"],
+body.light-theme [style*="background: #020617"],
+body.light-theme [style*="background:#0F172A"],
+body.light-theme [style*="background: #0F172A"] {
+    background: #f0f2f5 !important;
+}
+
+/* Fix the main-content radial gradient */
+body.light-theme .main-content {
+    background: var(--bg-primary) !important;
+}
+
+/* Fix post items, list items with dark bg */
+body.light-theme .post-item {
+    background: #f8fafc !important;
+    border-color: #e2e8f0 !important;
+}
+
+body.light-theme .post-item:hover {
+    background: #eff6ff !important;
+}
+
+/* Fix hero banners  */
+body.light-theme .msg-hero {
+    box-shadow: 0 12px 40px rgba(102, 126, 234, 0.2) !important;
+}
+
+/* Fix sidebar footer border */
+body.light-theme .sidebar-footer {
+    border-top-color: #e2e8f0;
+}
+
+/* Fix inline style overrides for small text/labels */
+body.light-theme small,
+body.light-theme .text-muted {
+    color: #64748b;
+}
+
 /* Page Selector */
 .page-selector-dropdown {
     position: relative;
