@@ -13,7 +13,7 @@ const schedule = require('node-schedule');
 const fs = require('fs');
 const path = require('path');
 const multer = require('multer');
-require('dotenv').config({ path: require('path').resolve(__dirname, '../.env') });
+require('dotenv').config({ path: require('path').resolve(__dirname, '.env') });
 
 // Security Packages
 const helmet = require('helmet');
