@@ -305,7 +305,22 @@ app.post('/api/whatsapp/connect', authMiddleware, async (req, res) => {
         const userId = req.user.id;
         console.log(`[WA API] Connecting for user ${userId}...`);
 
-        // Set up message listener for real-time forwarding via Socket.IO
+        // If there's an existing client that isn't fully connected, destroy it first
+        // This prevents stuck states where old broken clients block new QR generation
+        const existingStatus = await whatsappService.getStatus(userId);
+        if (existingStatus.status !== 'connected' && whatsappService.clients[userId]) {
+            console.log(`[WA API] Destroying stale client for user ${userId} (status: ${existingStatus.status})`);
+            try {
+                await whatsappService.clients[userId].destroy();
+            } catch (destroyErr) {
+                console.log(`[WA API] Stale client destroy warning: ${destroyErr.message}`);
+            }
+            delete whatsappService.clients[userId];
+            delete whatsappService.readyStates[userId];
+            delete whatsappService.qrCodes[userId];
+        }
+
+        // Create a fresh client
         const client = await whatsappService.getClient(userId);
 
         // Attach standard listeners

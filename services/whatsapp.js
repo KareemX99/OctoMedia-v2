@@ -260,6 +260,21 @@ class WhatsAppService {
 
             if (!client.pupPage) {
                 await client.initialize();
+            } else {
+                // pupPage exists but client may be stuck — check if authenticated
+                const isAuth = client.info?.wid !== undefined;
+                if (!isAuth && !this.readyStates[userId]) {
+                    console.log(`[WA] Client has pupPage but not authenticated — re-initializing for user ${userId}`);
+                    try {
+                        await client.destroy();
+                    } catch (e) {
+                        console.log(`[WA] Destroy before re-init warning: ${e.message}`);
+                    }
+                    delete this.clients[userId];
+                    delete this.qrCodes[userId];
+                    const freshClient = await this.getClient(userId);
+                    await freshClient.initialize();
+                }
             }
 
             return { success: true };

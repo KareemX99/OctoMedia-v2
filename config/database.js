@@ -3,16 +3,16 @@ const { Sequelize } = require('sequelize');
 
 // Remote PostgreSQL connection
 const sequelize = new Sequelize('octobot_social_saas', 'postgres', 'Eng.OctoBot-DK-Kareem-DODGE.12', {
-    host: '178.63.34.211',
+    host: 'localhost',
     port: 10034,
     dialect: 'postgres',
-    logging: false, // Set to console.log for debugging
+    logging: false,
     // SSL disabled - remote PostgreSQL server does not support SSL
     dialectOptions: {},
     pool: {
-        max: 5,
+        max: 15,
         min: 0,
-        acquire: 30000,
+        acquire: 60000,
         idle: 10000
     }
 });
