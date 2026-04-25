@@ -318,6 +318,31 @@ app.post('/api/whatsapp/connect', authMiddleware, async (req, res) => {
             delete whatsappService.clients[userId];
             delete whatsappService.readyStates[userId];
             delete whatsappService.qrCodes[userId];
+
+            // Also clean up old session files to force a fresh QR
+            const sessionPath = whatsappService.getSessionPath(userId);
+            if (fs.existsSync(sessionPath)) {
+                console.log(`[WA API] Removing old session files for user ${userId}`);
+                try {
+                    fs.rmSync(sessionPath, { recursive: true, force: true });
+                } catch (rmErr) {
+                    console.log(`[WA API] Session cleanup warning: ${rmErr.message}`);
+                }
+            }
+        }
+
+        // Even if no client in memory, clean up stale session files on disk
+        // (happens after server restart — old files prevent fresh QR generation)
+        if (!whatsappService.clients[userId]) {
+            const sessionPath = whatsappService.getSessionPath(userId);
+            if (fs.existsSync(sessionPath)) {
+                console.log(`[WA API] No active client but found old session files for user ${userId} — cleaning up`);
+                try {
+                    fs.rmSync(sessionPath, { recursive: true, force: true });
+                } catch (rmErr) {
+                    console.log(`[WA API] Session cleanup warning: ${rmErr.message}`);
+                }
+            }
         }
 
         // Create a fresh client
