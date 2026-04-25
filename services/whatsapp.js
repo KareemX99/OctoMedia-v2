@@ -9,6 +9,7 @@ class WhatsAppService {
         this.clients = {}; // Store clients by userId
         this.qrCodes = {}; // Store QR codes for each user
         this.readyStates = {}; // Track which users have fully loaded WA Web stores
+        this._initStartTimes = {}; // Track when each client started initializing
         this.mediaCache = {}; // In-memory media cache: { [messageId]: { mimetype, data, filename, cachedAt } }
         this.mediaCacheMax = 500; // Max cache entries before pruning oldest
         this.sessionDir = path.join(__dirname, '..', '.wwebjs_auth');
@@ -132,7 +133,49 @@ class WhatsAppService {
                     await this.getClient(userId);
                     await this.initialize(userId);
 
-                    console.log(`[WA AutoReconnect] ✅ User ${userId} initialization started.`);
+                    console.log(`[WA AutoReconnect] ⏳ User ${userId} initialization started. Waiting up to 60s for ready...`);
+
+                    // Wait up to 60 seconds for the client to become ready
+                    const timeoutMs = 60000;
+                    const startTime = Date.now();
+                    let isReady = false;
+
+                    while (Date.now() - startTime < timeoutMs) {
+                        if (this.readyStates[userId]) {
+                            isReady = true;
+                            break;
+                        }
+                        await new Promise(resolve => setTimeout(resolve, 2000));
+                    }
+
+                    if (isReady) {
+                        console.log(`[WA AutoReconnect] ✅ User ${userId} reconnected successfully!`);
+                    } else {
+                        // Session didn't reconnect in time — destroy and clean up
+                        console.log(`[WA AutoReconnect] ⏰ User ${userId} timed out after 60s. Cleaning up stale session...`);
+                        try {
+                            if (this.clients[userId]) {
+                                await this.clients[userId].destroy();
+                            }
+                        } catch (e) {
+                            console.log(`[WA AutoReconnect] Destroy warning: ${e.message}`);
+                        }
+                        delete this.clients[userId];
+                        delete this.readyStates[userId];
+                        delete this.qrCodes[userId];
+
+                        // Remove stale session files
+                        if (fs.existsSync(sessionPath)) {
+                            try {
+                                fs.rmSync(sessionPath, { recursive: true, force: true });
+                                console.log(`[WA AutoReconnect] 🗑️ Removed stale session files for user ${userId}`);
+                            } catch (rmErr) {
+                                console.log(`[WA AutoReconnect] File cleanup warning: ${rmErr.message}`);
+                            }
+                        }
+
+                        await this._deactivateSessionInDB(userId, 'reconnect_timeout');
+                    }
                 } catch (err) {
                     console.error(`[WA AutoReconnect] ❌ Failed to reconnect user ${userId}:`, err.message);
                 }
@@ -249,6 +292,7 @@ class WhatsAppService {
         });
 
         this.clients[userId] = client;
+        this._initStartTimes[userId] = Date.now();
 
         return client;
     }
@@ -696,6 +740,28 @@ class WhatsAppService {
             status = 'authenticating'; // authenticated but stores still loading
         } else if (this.getQrCode(userId)) {
             status = 'waiting_qr';
+        } else {
+            // Check if stuck in 'initializing' for too long (>45 seconds)
+            const initStart = this._initStartTimes[userId];
+            if (initStart && (Date.now() - initStart) > 45000) {
+                console.log(`[WA] Client for user ${userId} stuck initializing for >45s — auto-destroying`);
+                try {
+                    await client.destroy();
+                } catch (e) {
+                    console.log(`[WA] Auto-destroy warning: ${e.message}`);
+                }
+                delete this.clients[userId];
+                delete this.readyStates[userId];
+                delete this.qrCodes[userId];
+                delete this._initStartTimes[userId];
+
+                return {
+                    status: 'disconnected',
+                    authenticated: false,
+                    ready: false,
+                    qrCode: null
+                };
+            }
         }
 
         return {
