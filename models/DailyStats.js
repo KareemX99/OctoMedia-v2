@@ -38,10 +38,8 @@ module.exports = (sequelize) => {
         }
     }, {
         indexes: [
-            {
-                unique: true,
-                fields: ['pageId', 'date']
-            }
+            // Indexes already exist in DB — removed to prevent duplicates on restart
+            // { unique: true, fields: ['pageId', 'date'] }
         ]
     });
 

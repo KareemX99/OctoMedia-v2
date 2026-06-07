@@ -160,7 +160,15 @@ router.post('/login', async (req, res) => {
             return res.status(400).json({ error: 'البريد الإلكتروني وكلمة المرور مطلوبين' });
         }
 
-        const user = await User.findOne({ where: { email } });
+        // Use raw SQL to avoid Sequelize describeTable slowness on remote DB
+        const { sequelize } = require('../config/database');
+        const bcrypt = require('bcryptjs');
+        const [users] = await sequelize.query(
+            `SELECT id, email, password, name, role, permissions, "isActive", "isVerified", "isWorkingToday", "subscriptionExpiresAt" FROM users WHERE email = $1 LIMIT 1`,
+            { bind: [email] }
+        );
+
+        const user = users[0];
         if (!user) {
             return res.status(401).json({ error: 'بيانات الدخول غير صحيحة' });
         }
@@ -170,7 +178,7 @@ router.post('/login', async (req, res) => {
             return res.status(403).json({ error: 'يجب تفعيل الحساب أولاً', needsVerification: true });
         }
 
-        const isValid = await user.validatePassword(password);
+        const isValid = await bcrypt.compare(password, user.password);
         if (!isValid) {
             return res.status(401).json({ error: 'بيانات الدخول غير صحيحة' });
         }

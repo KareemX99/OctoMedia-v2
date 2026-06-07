@@ -11,7 +11,7 @@ module.exports = (sequelize) => {
         userId: {
             type: DataTypes.UUID,
             allowNull: false,
-            unique: true,
+            // unique: true — constraint already exists in DB, removed to prevent duplicates
             comment: 'FK to User — one session per user'
         },
         clientId: {
@@ -49,9 +49,10 @@ module.exports = (sequelize) => {
         tableName: 'WhatsAppSessions',
         timestamps: true,
         indexes: [
-            { unique: true, fields: ['userId'] },
-            { fields: ['isActive'] },
-            { fields: ['clientId'] }
+            // Indexes already exist in DB — removed to prevent duplicates on restart
+            // { unique: true, fields: ['userId'] },
+            // { fields: ['isActive'] },
+            // { fields: ['clientId'] }
         ]
     });
 

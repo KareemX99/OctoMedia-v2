@@ -354,7 +354,7 @@ app.post('/api/whatsapp/connect', authMiddleware, async (req, res) => {
         // Additional connect-specific listeners (ready, qr)
         client.removeAllListeners('ready');
 
-        // Notify when ready + set readyStates flag (important: removeAllListeners above removes the service's handler)
+        // Notify when ready + set readyStates flag
         client.on('ready', () => {
             console.log(`[WA API] Client ready for user ${userId}`);
             whatsappService.readyStates[userId] = true;
@@ -363,16 +363,40 @@ app.post('/api/whatsapp/connect', authMiddleware, async (req, res) => {
             }
         });
 
-        // Notify when QR refreshes
-        const origQrHandler = client.listeners('qr');
+        // Notify when QR refreshes via Socket.IO
         client.on('qr', (qr) => {
+            console.log(`[WA API] QR emitted via Socket.IO for user ${userId}`);
             if (global.io) {
                 global.io.to(`wa-${userId}`).emit('wa-qr', { qrCode: whatsappService.getQrCode(userId) });
             }
         });
 
-        const result = await whatsappService.initialize(userId);
-        res.json(result);
+        // Notify on auth failure
+        client.on('auth_failure', (msg) => {
+            console.log(`[WA API] Auth failure for user ${userId}: ${msg}`);
+            if (global.io) {
+                global.io.to(`wa-${userId}`).emit('wa-error', { error: 'فشل في المصادقة، حاول مرة أخرى' });
+            }
+        });
+
+        // Return response IMMEDIATELY — don't wait for Puppeteer to initialize
+        // QR code will be sent via Socket.IO when ready
+        res.json({ success: true, message: 'جاري تجهيز QR Code...' });
+
+        // Initialize in background (Puppeteer takes time to start)
+        whatsappService.initialize(userId).then(result => {
+            if (!result.success) {
+                console.error(`[WA API] Background init failed for user ${userId}:`, result.error);
+                if (global.io) {
+                    global.io.to(`wa-${userId}`).emit('wa-error', { error: result.error });
+                }
+            }
+        }).catch(err => {
+            console.error(`[WA API] Background init error for user ${userId}:`, err.message);
+            if (global.io) {
+                global.io.to(`wa-${userId}`).emit('wa-error', { error: err.message });
+            }
+        });
     } catch (err) {
         console.error('[WA API] Connect error:', err.message);
         res.status(500).json({ success: false, error: err.message });
@@ -7165,27 +7189,6 @@ async function startServer() {
 
         // Initialize Campaign Service after database is ready
         campaignService.init(Campaign, appData);
-
-        // Create default admin if no users exist
-        const userCount = await User.count();
-        if (userCount === 0) {
-            await User.create({
-                email: 'admin@octobot.com',
-                password: 'admin123',
-                name: 'Admin',
-                role: 'admin',
-                isActive: true,
-                isVerified: true,  // Admin is pre-verified
-                isWorkingToday: true
-            });
-            console.log('👤 Default admin created: admin@octobot.com / admin123');
-        } else {
-            // Make sure existing admin is verified
-            await User.update(
-                { isVerified: true },
-                { where: { email: 'admin@octobot.com' } }
-            );
-        }
     }
 
     // Create HTTP server and attach Socket.IO for real-time updates
