@@ -65,7 +65,7 @@ module.exports = (sequelize) => {
         webhookToken: {
             type: DataTypes.STRING,
             allowNull: true,
-            unique: true,
+            // unique: true — constraint already exists in DB, removed to prevent duplicates
             comment: 'Unique token for webhook URL per store'
         }
     }, {

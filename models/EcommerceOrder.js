@@ -120,14 +120,7 @@ module.exports = (sequelize) => {
         tableName: 'ecommerce_orders',
         timestamps: true,
         indexes: [
-            { fields: ['storeId'] },
-            { fields: ['externalId'] },
-            { fields: ['storeId', 'externalId'], unique: true },
-            { fields: ['facebookPsid'] },
-            { fields: ['status'] },
-            { fields: ['customerEmail'] },
-            { fields: ['customerPhone'] },
-            { fields: ['externalCreatedAt'] }
+            // Indexes already exist in DB — removed to prevent duplicates on restart
         ]
     });
 

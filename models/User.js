@@ -12,7 +12,8 @@ const User = sequelize.define('User', {
     email: {
         type: DataTypes.STRING,
         allowNull: false,
-        unique: true,
+        // unique: true — REMOVED to prevent Sequelize from creating duplicate constraints on every restart
+        // The UNIQUE constraint already exists in the database (users_email_key)
         validate: {
             isEmail: true
         }

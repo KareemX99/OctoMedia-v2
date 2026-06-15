@@ -13,7 +13,7 @@ const schedule = require('node-schedule');
 const fs = require('fs');
 const path = require('path');
 const multer = require('multer');
-require('dotenv').config({ path: require('path').resolve(__dirname, '../.env') });
+require('dotenv').config({ path: require('path').resolve(__dirname, '.env') });
 
 // Security Packages
 const helmet = require('helmet');
@@ -327,7 +327,47 @@ app.post('/api/whatsapp/connect', authMiddleware, async (req, res) => {
         const userId = req.user.id;
         console.log(`[WA API] Connecting for user ${userId}...`);
 
-        // Set up message listener for real-time forwarding via Socket.IO
+        // If there's an existing client that isn't fully connected, destroy it first
+        // This prevents stuck states where old broken clients block new QR generation
+        const existingStatus = await whatsappService.getStatus(userId);
+        if (existingStatus.status !== 'connected' && whatsappService.clients[userId]) {
+            console.log(`[WA API] Destroying stale client for user ${userId} (status: ${existingStatus.status})`);
+            try {
+                await whatsappService.clients[userId].destroy();
+            } catch (destroyErr) {
+                console.log(`[WA API] Stale client destroy warning: ${destroyErr.message}`);
+            }
+            delete whatsappService.clients[userId];
+            delete whatsappService.readyStates[userId];
+            delete whatsappService.qrCodes[userId];
+
+            // Also clean up old session files to force a fresh QR
+            const sessionPath = whatsappService.getSessionPath(userId);
+            if (fs.existsSync(sessionPath)) {
+                console.log(`[WA API] Removing old session files for user ${userId}`);
+                try {
+                    fs.rmSync(sessionPath, { recursive: true, force: true });
+                } catch (rmErr) {
+                    console.log(`[WA API] Session cleanup warning: ${rmErr.message}`);
+                }
+            }
+        }
+
+        // Even if no client in memory, clean up stale session files on disk
+        // (happens after server restart — old files prevent fresh QR generation)
+        if (!whatsappService.clients[userId]) {
+            const sessionPath = whatsappService.getSessionPath(userId);
+            if (fs.existsSync(sessionPath)) {
+                console.log(`[WA API] No active client but found old session files for user ${userId} — cleaning up`);
+                try {
+                    fs.rmSync(sessionPath, { recursive: true, force: true });
+                } catch (rmErr) {
+                    console.log(`[WA API] Session cleanup warning: ${rmErr.message}`);
+                }
+            }
+        }
+
+        // Create a fresh client
         const client = await whatsappService.getClient(userId);
 
         // Attach standard listeners
@@ -336,7 +376,7 @@ app.post('/api/whatsapp/connect', authMiddleware, async (req, res) => {
         // Additional connect-specific listeners (ready, qr)
         client.removeAllListeners('ready');
 
-        // Notify when ready + set readyStates flag (important: removeAllListeners above removes the service's handler)
+        // Notify when ready + set readyStates flag
         client.on('ready', () => {
             console.log(`[WA API] Client ready for user ${userId}`);
             whatsappService.readyStates[userId] = true;
@@ -345,16 +385,40 @@ app.post('/api/whatsapp/connect', authMiddleware, async (req, res) => {
             }
         });
 
-        // Notify when QR refreshes
-        const origQrHandler = client.listeners('qr');
+        // Notify when QR refreshes via Socket.IO
         client.on('qr', (qr) => {
+            console.log(`[WA API] QR emitted via Socket.IO for user ${userId}`);
             if (global.io) {
                 global.io.to(`wa-${userId}`).emit('wa-qr', { qrCode: whatsappService.getQrCode(userId) });
             }
         });
 
-        const result = await whatsappService.initialize(userId);
-        res.json(result);
+        // Notify on auth failure
+        client.on('auth_failure', (msg) => {
+            console.log(`[WA API] Auth failure for user ${userId}: ${msg}`);
+            if (global.io) {
+                global.io.to(`wa-${userId}`).emit('wa-error', { error: 'فشل في المصادقة، حاول مرة أخرى' });
+            }
+        });
+
+        // Return response IMMEDIATELY — don't wait for Puppeteer to initialize
+        // QR code will be sent via Socket.IO when ready
+        res.json({ success: true, message: 'جاري تجهيز QR Code...' });
+
+        // Initialize in background (Puppeteer takes time to start)
+        whatsappService.initialize(userId).then(result => {
+            if (!result.success) {
+                console.error(`[WA API] Background init failed for user ${userId}:`, result.error);
+                if (global.io) {
+                    global.io.to(`wa-${userId}`).emit('wa-error', { error: result.error });
+                }
+            }
+        }).catch(err => {
+            console.error(`[WA API] Background init error for user ${userId}:`, err.message);
+            if (global.io) {
+                global.io.to(`wa-${userId}`).emit('wa-error', { error: err.message });
+            }
+        });
     } catch (err) {
         console.error('[WA API] Connect error:', err.message);
         res.status(500).json({ success: false, error: err.message });
@@ -7169,7 +7233,6 @@ async function startServer() {
 
         // Initialize Campaign Service after database is ready
         campaignService.init(Campaign, appData);
-
         // Create default admin if no users exist (with timeout protection)
         try {
             const countPromise = User.count();

@@ -10864,7 +10864,34 @@ class SocialMediaHub {
         qrImg.style.display = 'none';
 
         // Update status
-        document.getElementById('waStatusText').textContent = 'جاري الاتصال...';
+        document.getElementById('waStatusText').textContent = 'جاري تجهيز QR Code...';
+
+        // Join Socket.IO room FIRST for real-time QR updates
+        if (window.socket) {
+            const userData = JSON.parse(localStorage.getItem('octobot_user') || '{}');
+            window.socket.emit('join-room', `wa-${userData.id}`);
+
+            // Listen for QR code via Socket.IO
+            window.socket.on('wa-qr', (data) => {
+                console.log('[WA UI] QR received via Socket.IO');
+                if (data.qrCode) this._waShowQr(data.qrCode);
+            });
+            window.socket.on('wa-ready', () => {
+                console.log('[WA UI] Connected via Socket.IO');
+                this._waStopQrPolling();
+                this.waCheckStatus();
+            });
+            window.socket.on('wa-error', (data) => {
+                console.error('[WA UI] Error via Socket.IO:', data.error);
+                btn.disabled = false;
+                btn.innerHTML = '<i class="fab fa-whatsapp"></i> ربط واتساب';
+                qrBox.style.display = 'none';
+                document.getElementById('waStatusText').textContent = data.error || 'فشل الاتصال';
+            });
+        }
+
+        // Start polling IMMEDIATELY (QR takes ~20s to generate)
+        this._waStartQrPolling();
 
         try {
             const res = await fetch(`${this.API_URL}/api/whatsapp/connect`, {
@@ -10872,15 +10899,7 @@ class SocialMediaHub {
                 headers: this._waHeaders()
             });
             const data = await res.json();
-
-            // Join Socket.IO room for real-time updates
-            if (window.socket) {
-                const userData = JSON.parse(localStorage.getItem('octobot_user') || '{}');
-                window.socket.emit('join-room', `wa-${userData.id}`);
-            }
-
-            // Start polling for QR code / connection status
-            this._waStartQrPolling();
+            console.log('[WA UI] Connect response:', data);
         } catch (err) {
             console.error('[WA UI] Connect error:', err);
             btn.disabled = false;
