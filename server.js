@@ -19,6 +19,7 @@ require('dotenv').config({ path: require('path').resolve(__dirname, '../.env') }
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
 const hpp = require('hpp');
+const compression = require('compression');
 
 // Global Error Handlers
 process.on('uncaughtException', (err) => {
@@ -158,10 +159,31 @@ app.use(cors({
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
-// Static files
-app.use(express.static('.'));
-app.use(express.static(path.join(__dirname, 'public')));
-app.use('/uploads', express.static(uploadDir));
+// Gzip compression for all responses (huge speedup for app.js, css, html)
+app.use(compression({
+    level: 6,
+    threshold: 1024,
+    filter: (req, res) => {
+        if (req.headers['x-no-compression']) return false;
+        return compression.filter(req, res);
+    }
+}));
+
+// Static files with cache headers
+const staticOptions = {
+    maxAge: '1d',
+    setHeaders: (res, filePath) => {
+        // Don't cache HTML (so users always get latest UI)
+        if (filePath.endsWith('.html')) {
+            res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+        } else if (/\.(js|css|png|jpg|jpeg|gif|svg|woff2?|ttf|ico)$/i.test(filePath)) {
+            res.setHeader('Cache-Control', 'public, max-age=86400');
+        }
+    }
+};
+app.use(express.static('.', staticOptions));
+app.use(express.static(path.join(__dirname, 'public'), staticOptions));
+app.use('/uploads', express.static(uploadDir, { maxAge: '7d' }));
 
 // Auth Routes
 app.use('/api/auth', authRouter);
@@ -485,6 +507,7 @@ app.post('/api/whatsapp/chats/:chatId/labels/:labelId', authMiddleware, async (r
             currentLabels.push(labelId);
         }
         await chat.changeLabels(currentLabels);
+        whatsappService.clearChatsCache(userId);
         res.json({ success: true });
     } catch (err) {
         console.error('[WA API] Add label error:', err.message);
@@ -504,6 +527,7 @@ app.delete('/api/whatsapp/chats/:chatId/labels/:labelId', authMiddleware, async 
         // Remove the label
         const currentLabels = (chat.labels || []).filter(id => id !== labelId);
         await chat.changeLabels(currentLabels);
+        whatsappService.clearChatsCache(userId);
         res.json({ success: true });
     } catch (err) {
         console.error('[WA API] Remove label error:', err.message);
@@ -521,6 +545,7 @@ app.post('/api/whatsapp/chats/:chatId/pin', authMiddleware, async (req, res) => 
         const client = await whatsappService.getClient(userId);
         const chat = await client.getChatById(chatId);
         const result = chat.pinned ? await chat.unpin() : await chat.pin();
+        whatsappService.clearChatsCache(userId);
         res.json({ success: true, pinned: !chat.pinned });
     } catch (err) {
         console.error('[WA API] Pin error:', err.message);
@@ -537,9 +562,11 @@ app.post('/api/whatsapp/chats/:chatId/archive', authMiddleware, async (req, res)
         const chat = await client.getChatById(chatId);
         if (chat.archived) {
             await chat.unarchive();
+            whatsappService.clearChatsCache(userId);
             res.json({ success: true, archived: false });
         } else {
             await chat.archive();
+            whatsappService.clearChatsCache(userId);
             res.json({ success: true, archived: true });
         }
     } catch (err) {
@@ -557,10 +584,12 @@ app.post('/api/whatsapp/chats/:chatId/mute', authMiddleware, async (req, res) =>
         const chat = await client.getChatById(chatId);
         if (chat.isMuted) {
             const result = await chat.unmute();
+            whatsappService.clearChatsCache(userId);
             res.json({ success: true, isMuted: false });
         } else {
             // Mute forever (no expiry)
             const result = await chat.mute();
+            whatsappService.clearChatsCache(userId);
             res.json({ success: true, isMuted: true });
         }
     } catch (err) {
@@ -3634,6 +3663,7 @@ app.get('/api/analytics/:userId/:pageId/messages', async (req, res) => {
 // Get live/recent engagements (reactions, comments, shares) from recent posts
 app.get('/api/engagement/:userId/:pageId/live', async (req, res) => {
     const { userId, pageId } = req.params;
+    const { period = 'week' } = req.query;
     const user = appData.users[userId];
 
     if (!user || !user.pages?.[pageId]) {
@@ -3643,13 +3673,27 @@ app.get('/api/engagement/:userId/:pageId/live', async (req, res) => {
     const pageToken = user.pages[pageId].accessToken;
     const pageName = user.pages[pageId].name;
 
+    // Calculate cutoff date based on period
+    const now = Date.now();
+    const periodMs = {
+        day: 24 * 60 * 60 * 1000,
+        week: 7 * 24 * 60 * 60 * 1000,
+        month: 30 * 24 * 60 * 60 * 1000
+    };
+    const cutoffMs = now - (periodMs[period] || periodMs.week);
+    const sinceUnix = Math.floor(cutoffMs / 1000);
+
+    // Adjust post fetch limit based on period
+    const postLimit = period === 'day' ? 25 : period === 'week' ? 50 : 100;
+
     try {
-        // Get recent posts with their reactions and comments (increased limits)
+        // Get posts within the time period (Facebook supports `since` param as Unix timestamp)
         const postsResponse = await axios.get(`${FB_GRAPH_URL}/${pageId}/posts`, {
             params: {
                 access_token: pageToken,
-                fields: 'id,message,created_time,reactions.limit(100).summary(true){id,name,type},comments.limit(100).summary(true).filter(stream){id,from,message,created_time},shares',
-                limit: 10
+                fields: 'id,message,created_time,reactions.summary(true).limit(0),comments.summary(true).limit(0),shares',
+                limit: postLimit,
+                since: sinceUnix
             }
         });
 
@@ -7126,25 +7170,31 @@ async function startServer() {
         // Initialize Campaign Service after database is ready
         campaignService.init(Campaign, appData);
 
-        // Create default admin if no users exist
-        const userCount = await User.count();
-        if (userCount === 0) {
-            await User.create({
-                email: 'admin@octobot.com',
-                password: 'admin123',
-                name: 'Admin',
-                role: 'admin',
-                isActive: true,
-                isVerified: true,  // Admin is pre-verified
-                isWorkingToday: true
-            });
-            console.log('👤 Default admin created: admin@octobot.com / admin123');
-        } else {
-            // Make sure existing admin is verified
-            await User.update(
-                { isVerified: true },
-                { where: { email: 'admin@octobot.com' } }
-            );
+        // Create default admin if no users exist (with timeout protection)
+        try {
+            const countPromise = User.count();
+            const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error('User.count timeout')), 10000));
+            const userCount = await Promise.race([countPromise, timeoutPromise]);
+
+            if (userCount === 0) {
+                await User.create({
+                    email: 'admin@octobot.com',
+                    password: 'admin123',
+                    name: 'Admin',
+                    role: 'admin',
+                    isActive: true,
+                    isVerified: true,
+                    isWorkingToday: true
+                });
+                console.log('👤 Default admin created: admin@octobot.com / admin123');
+            } else {
+                await User.update(
+                    { isVerified: true },
+                    { where: { email: 'admin@octobot.com' } }
+                );
+            }
+        } catch (err) {
+            console.error('⚠️  Skipping admin check (DB issue):', err.message);
         }
     }
 

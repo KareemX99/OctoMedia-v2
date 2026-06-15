@@ -6,13 +6,15 @@ const sequelize = new Sequelize('octobot_social_saas', 'postgres', 'Eng.OctoBot-
     host: '178.63.34.211',
     port: 10034,
     dialect: 'postgres',
-    logging: false, // Set to console.log for debugging
+    logging: false,
     // SSL disabled - remote PostgreSQL server does not support SSL
-    dialectOptions: {},
+    dialectOptions: {
+        statement_timeout: 15000  // 15s query timeout (prevents hanging forever)
+    },
     pool: {
-        max: 5,
+        max: 10,
         min: 0,
-        acquire: 30000,
+        acquire: 60000,
         idle: 10000
     }
 });

@@ -3006,8 +3006,8 @@ class SocialMediaHub {
 
             console.log('[Analytics] Loading data for page:', pageId, 'fbUserId:', fbUserId);
 
-            // Call the real engagement API endpoint
-            const res = await fetch(`${this.API_URL}/api/engagement/${fbUserId}/${pageId}/live`, {
+            // Call the real engagement API endpoint with period filter
+            const res = await fetch(`${this.API_URL}/api/engagement/${fbUserId}/${pageId}/live?period=${this.currentPeriod}`, {
                 headers: {
                     'Authorization': `Bearer ${token}`
                 }
@@ -11832,10 +11832,12 @@ class SocialMediaHub {
                 ? `<div class="wa-message-sender">${msg.senderName || msg.author?.split('@')[0] || ''}</div>`
                 : '';
 
-            // Reply button data (safe for HTML attribute)
-            const safeBody = (msg.body || '').substring(0, 60).replace(/"/g, '&quot;').replace(/'/g, '&#39;');
-            const replyBtn = msg.id ? `<button class="wa-reply-btn" onclick="event.stopPropagation();app._waSetReply('${(msg.id || '').replace(/'/g, "\\'")}','${safeBody}',${isMe})" title="رد"><i class="fas fa-reply"></i></button>` : '';
-            const starBtn = msg.id ? `<button class="wa-star-btn" onclick="event.stopPropagation();app._waStarMessage('${(msg.id || '').replace(/'/g, "\\'")}' )" title="تمييز"><i class="${msg.isStarred ? 'fas' : 'far'} fa-star"${msg.isStarred ? ' style="color:#F59E0B;"' : ''}></i></button>` : '';
+            // Reply/star buttons - use data attributes to safely pass values (avoids onclick string injection)
+            const escAttr = (s) => String(s).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+            const dataMsgId = escAttr(msg.id || '');
+            const dataMsgBody = escAttr((msg.body || '').substring(0, 60));
+            const replyBtn = msg.id ? `<button class="wa-reply-btn" data-msg-id="${dataMsgId}" data-msg-body="${dataMsgBody}" data-from-me="${isMe}" onclick="event.stopPropagation();app._waSetReply(this.dataset.msgId,this.dataset.msgBody,this.dataset.fromMe==='true')" title="رد"><i class="fas fa-reply"></i></button>` : '';
+            const starBtn = msg.id ? `<button class="wa-star-btn" data-msg-id="${dataMsgId}" onclick="event.stopPropagation();app._waStarMessage(this.dataset.msgId)" title="تمييز"><i class="${msg.isStarred ? 'fas' : 'far'} fa-star"${msg.isStarred ? ' style="color:#F59E0B;"' : ''}></i></button>` : '';
 
             // Detect if this is a media message with overlay time
             const isMediaMsg = (msg.type === 'image' || msg.type === 'video') && mediaUrl;

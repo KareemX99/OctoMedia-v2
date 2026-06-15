@@ -1,0 +1,415 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="theme-color" content="#4CC9F0">
+    <title>خدماتنا - DK-OctoBot | جميع الخدمات المتاحة</title>
+    <meta name="description" content="تعرف على جميع خدمات DK-OctoBot: إدارة واتساب، فيسبوك، انستجرام، تيليجرام، المتاجر الإلكترونية، الذكاء الاصطناعي، تحليل المنافسين، والمزيد.">
+    <link rel="icon" type="image/png" href="/logo-icon.png">
+    <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@300;400;500;600;700;800;900&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.2/css/all.min.css">
+    <style>
+        :root {
+            --cyan: #4CC9F0;
+            --blue: #083D77;
+            --steel: #4682B4;
+            --white: #FFFFFF;
+            --gray-200: #D4E8F7;
+            --gray-500: #4A6A8A;
+            --grad-btn: linear-gradient(135deg, #4CC9F0 0%, #4682B4 100%);
+        }
+        * { margin:0; padding:0; box-sizing:border-box; }
+        body { font-family:'Cairo','Inter',sans-serif; background:#000; color:var(--white); line-height:1.6; overflow-x:hidden; }
+
+        /* Header */
+        .header { position:fixed; top:0; left:0; right:0; z-index:1000; background:rgba(0,0,0,.85); backdrop-filter:blur(20px); border-bottom:1px solid rgba(76,201,240,.1); }
+        .header-container { max-width:1400px; margin:0 auto; padding:15px 30px; display:flex; justify-content:space-between; align-items:center; }
+        .logo { display:flex; align-items:center; gap:12px; text-decoration:none; }
+        .logo img { height:45px; width:auto; filter:drop-shadow(0 0 8px rgba(76,201,240,.4)); }
+        .logo-text { font-size:22px; font-weight:800; background:linear-gradient(135deg,#4CC9F0,#4682B4,#fff); -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent; }
+        .nav-links { display:flex; gap:35px; list-style:none; }
+        .nav-links a { color:var(--gray-200); text-decoration:none; font-weight:500; font-size:15px; transition:.3s; }
+        .nav-links a:hover, .nav-links a.active { color:var(--cyan); }
+        .header-buttons { display:flex; gap:12px; }
+        .btn { padding:12px 28px; border-radius:10px; font-weight:600; font-size:14px; cursor:pointer; transition:.3s; text-decoration:none; display:inline-flex; align-items:center; gap:8px; border:none; font-family:inherit; }
+        .btn-outline { background:transparent; border:2px solid rgba(76,201,240,.5); color:var(--cyan); }
+        .btn-outline:hover { background:rgba(76,201,240,.1); }
+        .btn-primary { background:var(--grad-btn); color:#fff; box-shadow:0 8px 25px rgba(76,201,240,.3); }
+        .btn-primary:hover { transform:translateY(-3px); box-shadow:0 15px 35px rgba(76,201,240,.4); }
+
+        /* Hero */
+        .hero { padding:160px 30px 80px; text-align:center; position:relative; background:radial-gradient(ellipse 80% 60% at 50% 0%,rgba(76,201,240,.06) 0%,transparent 50%); }
+        .hero h1 { font-size:52px; font-weight:800; margin-bottom:20px; }
+        .hero h1 span { background:linear-gradient(135deg,#4CC9F0,#4682B4); -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent; }
+        .hero p { font-size:18px; color:var(--gray-200); max-width:750px; margin:0 auto 20px; line-height:1.8; }
+        .hero-badge { display:inline-flex; align-items:center; gap:8px; background:rgba(76,201,240,.1); border:1px solid rgba(76,201,240,.2); border-radius:50px; padding:8px 24px; font-size:14px; color:var(--cyan); margin-bottom:30px; }
+        .hero-badge i { animation:pulse 2s infinite; }
+        @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
+
+        /* Services Grid */
+        .services-section { padding:80px 30px 120px; max-width:1300px; margin:0 auto; }
+        .services-grid { display:grid; grid-template-columns:repeat(3,1fr); gap:30px; }
+
+        .service-card {
+            background:rgba(10,10,20,.6);
+            backdrop-filter:blur(20px);
+            border-radius:24px;
+            padding:40px 30px;
+            border:1px solid rgba(76,201,240,.08);
+            transition:all .4s cubic-bezier(.4,0,.2,1);
+            position:relative;
+            overflow:hidden;
+        }
+        .service-card::before {
+            content:'';
+            position:absolute;
+            top:0; left:0; right:0;
+            height:3px;
+            background:var(--grad-btn);
+            opacity:0;
+            transition:.4s;
+        }
+        .service-card:hover {
+            transform:translateY(-12px);
+            border-color:rgba(76,201,240,.25);
+            box-shadow:0 25px 60px rgba(0,0,0,.4),0 0 40px rgba(76,201,240,.08);
+        }
+        .service-card:hover::before { opacity:1; }
+
+        .service-icon {
+            width:70px; height:70px;
+            border-radius:18px;
+            display:flex; align-items:center; justify-content:center;
+            font-size:30px;
+            margin-bottom:24px;
+            position:relative;
+        }
+        .service-icon::after {
+            content:'';
+            position:absolute;
+            inset:-4px;
+            border-radius:22px;
+            background:inherit;
+            opacity:.15;
+            filter:blur(12px);
+        }
+
+        .service-card h3 { font-size:22px; font-weight:700; margin-bottom:12px; }
+        .service-card > p { font-size:14px; color:var(--gray-200); line-height:1.8; margin-bottom:20px; }
+
+        .service-features { list-style:none; }
+        .service-features li { display:flex; align-items:center; gap:10px; margin-bottom:10px; font-size:13.5px; color:var(--gray-200); }
+        .service-features li i { color:var(--cyan); font-size:12px; flex-shrink:0; }
+
+        .service-tag { display:inline-block; padding:4px 14px; border-radius:50px; font-size:11px; font-weight:600; margin-top:16px; }
+
+        /* Icon colors */
+        .icon-whatsapp { background:linear-gradient(135deg,#25D366,#128C7E); }
+        .icon-facebook { background:linear-gradient(135deg,#1877F2,#0D47A1); }
+        .icon-instagram { background:linear-gradient(135deg,#E4405F,#C13584,#833AB4); }
+        .icon-telegram { background:linear-gradient(135deg,#0088cc,#0065a3); }
+        .icon-campaign { background:linear-gradient(135deg,#FF6B35,#E84545); }
+        .icon-ecommerce { background:linear-gradient(135deg,#4CC9F0,#4682B4); }
+        .icon-ai { background:linear-gradient(135deg,#A855F7,#6D28D9); }
+        .icon-competitor { background:linear-gradient(135deg,#F59E0B,#D97706); }
+        .icon-sheets { background:linear-gradient(135deg,#34A853,#0F9D58); }
+        .icon-email { background:linear-gradient(135deg,#EA4335,#C5221F); }
+        .icon-analytics { background:linear-gradient(135deg,#00BCD4,#0097A7); }
+        .icon-team { background:linear-gradient(135deg,#7C3AED,#5B21B6); }
+
+        .tag-green { background:rgba(37,211,102,.12); color:#25D366; }
+        .tag-blue { background:rgba(24,119,242,.12); color:#1877F2; }
+        .tag-pink { background:rgba(228,64,95,.12); color:#E4405F; }
+        .tag-cyan { background:rgba(76,201,240,.12); color:#4CC9F0; }
+        .tag-orange { background:rgba(255,107,53,.12); color:#FF6B35; }
+        .tag-purple { background:rgba(168,85,247,.12); color:#A855F7; }
+        .tag-yellow { background:rgba(245,158,11,.12); color:#F59E0B; }
+        .tag-ggreen { background:rgba(52,168,83,.12); color:#34A853; }
+        .tag-red { background:rgba(234,67,53,.12); color:#EA4335; }
+        .tag-teal { background:rgba(0,188,212,.12); color:#00BCD4; }
+        .tag-dpurple { background:rgba(124,58,237,.12); color:#7C3AED; }
+
+        /* CTA */
+        .cta { padding:100px 30px; text-align:center; background:radial-gradient(ellipse 80% 60% at 50% 50%,rgba(76,201,240,.05) 0%,transparent 50%); }
+        .cta h2 { font-size:38px; font-weight:700; margin-bottom:20px; }
+        .cta h2 span { background:linear-gradient(135deg,#4CC9F0,#4682B4); -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent; }
+        .cta p { font-size:16px; color:var(--gray-200); margin-bottom:35px; max-width:600px; margin-left:auto; margin-right:auto; }
+        .cta .btn { padding:18px 40px; font-size:17px; border-radius:12px; }
+
+        /* Footer */
+        .footer { padding:50px 30px 25px; background:rgba(10,10,20,.8); border-top:1px solid rgba(76,201,240,.1); text-align:center; }
+        .footer-links { margin-bottom:18px; }
+        .footer-links a { color:var(--gray-500); text-decoration:none; margin:0 15px; font-size:14px; transition:.3s; }
+        .footer-links a:hover { color:var(--cyan); }
+        .footer p { font-size:13px; color:var(--gray-500); }
+
+        /* Animations */
+        .fade-up { opacity:0; transform:translateY(40px); transition:all .6s cubic-bezier(.4,0,.2,1); }
+        .fade-up.visible { opacity:1; transform:translateY(0); }
+
+        /* Responsive */
+        @media(max-width:1024px) { .services-grid { grid-template-columns:repeat(2,1fr); } }
+        @media(max-width:768px) {
+            .nav-links,.header-buttons { display:none; }
+            .services-grid { grid-template-columns:1fr; }
+            .hero h1 { font-size:34px; }
+            .hero p { font-size:16px; }
+        }
+    </style>
+</head>
+<body>
+    <header class="header">
+        <div class="header-container">
+            <a href="landing.html" class="logo">
+                <img src="logo.png?v=2" alt="DK-OctoBot Logo">
+                <span class="logo-text">DK-OctoBot</span>
+            </a>
+            <nav>
+                <ul class="nav-links">
+                    <li><a href="landing.html">الرئيسية</a></li>
+                    <li><a href="features.html">الميزات</a></li>
+                    <li><a href="services.html" class="active">الخدمات</a></li>
+                    <li><a href="pricing.html">الأسعار</a></li>
+                    <li><a href="about.html">من نحن</a></li>
+                    <li><a href="contact.html">اتصل بنا</a></li>
+                </ul>
+            </nav>
+            <div class="header-buttons">
+                <a href="login.html" class="btn btn-outline">تسجيل الدخول</a>
+                <a href="register.html" class="btn btn-primary">ابدأ مجاناً</a>
+            </div>
+        </div>
+    </header>
+
+    <section class="hero">
+        <div class="hero-badge"><i class="fas fa-bolt"></i> 12 خدمة متكاملة في منصة واحدة</div>
+        <h1>جميع <span>الخدمات</span> المتاحة</h1>
+        <p>منصة DK-OctoBot توفر لك مجموعة شاملة من الأدوات والخدمات لإدارة حضورك الرقمي بالكامل. من السوشيال ميديا إلى المتاجر الإلكترونية والذكاء الاصطناعي</p>
+    </section>
+
+    <section class="services-section">
+        <div class="services-grid">
+
+            <!-- WhatsApp -->
+            <div class="service-card fade-up">
+                <div class="service-icon icon-whatsapp"><i class="fab fa-whatsapp"></i></div>
+                <h3>إدارة واتساب</h3>
+                <p>تواصل مع عملائك مباشرة عبر واتساب وأدر جميع محادثاتك من لوحة تحكم واحدة</p>
+                <ul class="service-features">
+                    <li><i class="fas fa-check"></i> ربط رقمك عبر QR Code</li>
+                    <li><i class="fas fa-check"></i> إرسال واستقبال الرسائل والوسائط</li>
+                    <li><i class="fas fa-check"></i> إدارة المحادثات والمجموعات</li>
+                    <li><i class="fas fa-check"></i> تصنيف العملاء بالليبلز</li>
+                    <li><i class="fas fa-check"></i> إرسال حملات تسويقية جماعية</li>
+                </ul>
+                <span class="service-tag tag-green">تواصل مباشر</span>
+            </div>
+
+            <!-- Facebook -->
+            <div class="service-card fade-up">
+                <div class="service-icon icon-facebook"><i class="fab fa-facebook-f"></i></div>
+                <h3>إدارة فيسبوك</h3>
+                <p>تحكم كامل في صفحاتك ومجموعاتك على فيسبوك مع أدوات النشر والإدارة المتقدمة</p>
+                <ul class="service-features">
+                    <li><i class="fas fa-check"></i> إدارة صفحات متعددة</li>
+                    <li><i class="fas fa-check"></i> جدولة المنشورات</li>
+                    <li><i class="fas fa-check"></i> إدارة رسائل الماسنجر</li>
+                    <li><i class="fas fa-check"></i> التفاعل التلقائي مع التعليقات</li>
+                    <li><i class="fas fa-check"></i> تحليلات وتقارير الأداء</li>
+                </ul>
+                <span class="service-tag tag-blue">سوشيال ميديا</span>
+            </div>
+
+            <!-- Instagram -->
+            <div class="service-card fade-up">
+                <div class="service-icon icon-instagram"><i class="fab fa-instagram"></i></div>
+                <h3>إدارة انستجرام</h3>
+                <p>أدوات متقدمة لإدارة حسابك على انستجرام ونشر المحتوى والتفاعل مع المتابعين</p>
+                <ul class="service-features">
+                    <li><i class="fas fa-check"></i> نشر الصور والفيديوهات والقصص</li>
+                    <li><i class="fas fa-check"></i> إدارة الرسائل المباشرة (DM)</li>
+                    <li><i class="fas fa-check"></i> جدولة المنشورات مسبقاً</li>
+                    <li><i class="fas fa-check"></i> تحليل أداء الحساب</li>
+                    <li><i class="fas fa-check"></i> إدارة حسابات متعددة</li>
+                </ul>
+                <span class="service-tag tag-pink">سوشيال ميديا</span>
+            </div>
+
+            <!-- Telegram -->
+            <div class="service-card fade-up">
+                <div class="service-icon icon-telegram"><i class="fab fa-telegram-plane"></i></div>
+                <h3>بوتات تيليجرام</h3>
+                <p>إنشاء وإدارة بوتات تيليجرام ذكية للتواصل مع جمهورك وأتمتة العمل</p>
+                <ul class="service-features">
+                    <li><i class="fas fa-check"></i> إنشاء بوتات مخصصة</li>
+                    <li><i class="fas fa-check"></i> إرسال إشعارات جماعية</li>
+                    <li><i class="fas fa-check"></i> أتمتة الردود والرسائل</li>
+                    <li><i class="fas fa-check"></i> إدارة القنوات والمجموعات</li>
+                    <li><i class="fas fa-check"></i> تكامل مع APIs خارجية</li>
+                </ul>
+                <span class="service-tag tag-cyan">بوتات ذكية</span>
+            </div>
+
+            <!-- Campaigns -->
+            <div class="service-card fade-up">
+                <div class="service-icon icon-campaign"><i class="fas fa-bullhorn"></i></div>
+                <h3>الحملات والإرسال الجماعي</h3>
+                <p>أرسل رسائل تسويقية لآلاف العملاء عبر جميع المنصات بضغطة زر واحدة</p>
+                <ul class="service-features">
+                    <li><i class="fas fa-check"></i> إرسال جماعي عبر كل المنصات</li>
+                    <li><i class="fas fa-check"></i> تخصيص الرسائل لكل عميل</li>
+                    <li><i class="fas fa-check"></i> جدولة الحملات</li>
+                    <li><i class="fas fa-check"></i> تقارير مفصلة عن الإرسال</li>
+                    <li><i class="fas fa-check"></i> دعم النصوص والصور والفيديو</li>
+                </ul>
+                <span class="service-tag tag-orange">تسويق</span>
+            </div>
+
+            <!-- E-Commerce -->
+            <div class="service-card fade-up">
+                <div class="service-icon icon-ecommerce"><i class="fas fa-store"></i></div>
+                <h3>المتاجر الإلكترونية</h3>
+                <p>اربط متجرك الإلكتروني وأدر المنتجات والطلبات والعملاء من مكان واحد</p>
+                <ul class="service-features">
+                    <li><i class="fas fa-check"></i> ربط WooCommerce و EasyOrder</li>
+                    <li><i class="fas fa-check"></i> إدارة المنتجات والمخزون</li>
+                    <li><i class="fas fa-check"></i> تتبع الطلبات والشحنات</li>
+                    <li><i class="fas fa-check"></i> تقارير المبيعات والإيرادات</li>
+                    <li><i class="fas fa-check"></i> مزامنة تلقائية للبيانات</li>
+                </ul>
+                <span class="service-tag tag-cyan">تجارة إلكترونية</span>
+            </div>
+
+            <!-- AI -->
+            <div class="service-card fade-up">
+                <div class="service-icon icon-ai"><i class="fas fa-robot"></i></div>
+                <h3>الذكاء الاصطناعي</h3>
+                <p>استخدم قوة الذكاء الاصطناعي لأتمتة الردود وإنشاء المحتوى وتحليل البيانات</p>
+                <ul class="service-features">
+                    <li><i class="fas fa-check"></i> ردود تلقائية ذكية بالـ AI</li>
+                    <li><i class="fas fa-check"></i> إنشاء محتوى تسويقي</li>
+                    <li><i class="fas fa-check"></i> تحليل مشاعر العملاء</li>
+                    <li><i class="fas fa-check"></i> اقتراحات ذكية للردود</li>
+                    <li><i class="fas fa-check"></i> تكامل مع Gemini و Groq</li>
+                </ul>
+                <span class="service-tag tag-purple">تقنية متقدمة</span>
+            </div>
+
+            <!-- Competitor Analysis -->
+            <div class="service-card fade-up">
+                <div class="service-icon icon-competitor"><i class="fas fa-binoculars"></i></div>
+                <h3>تحليل المنافسين</h3>
+                <p>راقب وحلل أداء منافسيك واحصل على رؤى قيمة لتحسين استراتيجيتك</p>
+                <ul class="service-features">
+                    <li><i class="fas fa-check"></i> تتبع صفحات المنافسين</li>
+                    <li><i class="fas fa-check"></i> تحليل المحتوى والتفاعل</li>
+                    <li><i class="fas fa-check"></i> مقارنة الأداء</li>
+                    <li><i class="fas fa-check"></i> تقارير تنافسية مفصلة</li>
+                    <li><i class="fas fa-check"></i> تنبيهات على نشاط المنافسين</li>
+                </ul>
+                <span class="service-tag tag-yellow">تحليلات</span>
+            </div>
+
+            <!-- Google Sheets -->
+            <div class="service-card fade-up">
+                <div class="service-icon icon-sheets"><i class="fas fa-table"></i></div>
+                <h3>تكامل Google Sheets</h3>
+                <p>اربط بيانات عملائك ومنتجاتك مع Google Sheets للإدارة والتحديث السهل</p>
+                <ul class="service-features">
+                    <li><i class="fas fa-check"></i> استيراد بيانات من الشيتس</li>
+                    <li><i class="fas fa-check"></i> تصدير التقارير تلقائياً</li>
+                    <li><i class="fas fa-check"></i> مزامنة البيانات لحظياً</li>
+                    <li><i class="fas fa-check"></i> إدارة قوائم العملاء</li>
+                    <li><i class="fas fa-check"></i> تحديث أسعار المنتجات</li>
+                </ul>
+                <span class="service-tag tag-ggreen">تكامل</span>
+            </div>
+
+            <!-- Email -->
+            <div class="service-card fade-up">
+                <div class="service-icon icon-email"><i class="fas fa-envelope"></i></div>
+                <h3>خدمة البريد الإلكتروني</h3>
+                <p>أرسل إشعارات وتنبيهات عبر البريد الإلكتروني لعملائك وفريق عملك</p>
+                <ul class="service-features">
+                    <li><i class="fas fa-check"></i> إشعارات الطلبات الجديدة</li>
+                    <li><i class="fas fa-check"></i> تنبيهات الحساب والأمان</li>
+                    <li><i class="fas fa-check"></i> رسائل ترحيبية تلقائية</li>
+                    <li><i class="fas fa-check"></i> تأكيد التسجيل والعمليات</li>
+                    <li><i class="fas fa-check"></i> استعادة كلمة المرور</li>
+                </ul>
+                <span class="service-tag tag-red">تواصل</span>
+            </div>
+
+            <!-- Analytics -->
+            <div class="service-card fade-up">
+                <div class="service-icon icon-analytics"><i class="fas fa-chart-line"></i></div>
+                <h3>التحليلات والتقارير</h3>
+                <p>لوحة تحكم شاملة مع إحصائيات وتقارير مفصلة لقياس أدائك الرقمي</p>
+                <ul class="service-features">
+                    <li><i class="fas fa-check"></i> إحصائيات يومية وأسبوعية</li>
+                    <li><i class="fas fa-check"></i> تقارير أداء المنصات</li>
+                    <li><i class="fas fa-check"></i> تحليل سلوك العملاء</li>
+                    <li><i class="fas fa-check"></i> متابعة المبيعات</li>
+                    <li><i class="fas fa-check"></i> رسوم بيانية تفاعلية</li>
+                </ul>
+                <span class="service-tag tag-teal">بيانات</span>
+            </div>
+
+            <!-- Team -->
+            <div class="service-card fade-up">
+                <div class="service-icon icon-team"><i class="fas fa-users-cog"></i></div>
+                <h3>إدارة الفريق</h3>
+                <p>أدر فريق عملك وتتبع أنشطتهم ووزّع المهام بكفاءة عالية</p>
+                <ul class="service-features">
+                    <li><i class="fas fa-check"></i> إضافة أعضاء الفريق</li>
+                    <li><i class="fas fa-check"></i> صلاحيات مخصصة لكل عضو</li>
+                    <li><i class="fas fa-check"></i> تتبع نشاط الفريق</li>
+                    <li><i class="fas fa-check"></i> رسائل داخلية بين الفريق</li>
+                    <li><i class="fas fa-check"></i> تقارير أداء الفريق</li>
+                </ul>
+                <span class="service-tag tag-dpurple">إدارة</span>
+            </div>
+
+        </div>
+    </section>
+
+    <section class="cta">
+        <h2>جاهز لتجربة <span>جميع الخدمات</span>؟</h2>
+        <p>سجل الآن واحصل على فترة تجريبية مجانية واستكشف قوة DK-OctoBot في إدارة أعمالك الرقمية</p>
+        <a href="register.html" class="btn btn-primary"><i class="fas fa-rocket"></i> ابدأ مجاناً الآن</a>
+    </section>
+
+    <footer class="footer">
+        <div class="footer-links">
+            <a href="landing.html">الرئيسية</a>
+            <a href="features.html">الميزات</a>
+            <a href="services.html">الخدمات</a>
+            <a href="pricing.html">الأسعار</a>
+            <a href="about.html">من نحن</a>
+            <a href="privacy.html">سياسة الخصوصية</a>
+            <a href="terms.html">الشروط</a>
+        </div>
+        <p>&copy; 2026 DK-OctoBot. جميع الحقوق محفوظة.</p>
+    </footer>
+
+    <script>
+        // Scroll animations
+        const observer = new IntersectionObserver((entries) => {
+            entries.forEach((entry, i) => {
+                if (entry.isIntersecting) {
+                    setTimeout(() => entry.target.classList.add('visible'), i * 80);
+                    observer.unobserve(entry.target);
+                }
+            });
+        }, { threshold: 0.1 });
+        document.querySelectorAll('.fade-up').forEach(el => observer.observe(el));
+
+        // Header scroll effect
+        window.addEventListener('scroll', () => {
+            const header = document.querySelector('.header');
+            header.style.background = window.scrollY > 50 ? 'rgba(0,0,0,.95)' : 'rgba(0,0,0,.85)';
+        });
+    </script>
+</body>
+</html>

@@ -41,47 +41,10 @@ EcommerceProduct.belongsTo(EcommerceStore, { foreignKey: 'storeId', as: 'store' 
 EcommerceStore.hasMany(EcommerceOrder, { foreignKey: 'storeId', as: 'orders' });
 EcommerceOrder.belongsTo(EcommerceStore, { foreignKey: 'storeId', as: 'store' });
 
-// Sync all models
+// Sync all models - SKIPPED (tables already exist, sync hangs on remote DB)
 async function syncDatabase() {
-    try {
-        await Promise.all([
-            User.sync({ alter: true }),
-            Platform.sync({ alter: true }),
-            Campaign.sync({ alter: true }), // alter: true to add new columns like imageUrls
-            TeamActivity.sync({ alter: true }),
-            TeamMessage.sync({ alter: true }),
-            Conversation.sync({ alter: true }),
-            Message.sync({ alter: true }),
-            EcommerceStore.sync({ alter: true }),
-            EcommerceProduct.sync({ alter: true }),
-            EcommerceOrder.sync({ alter: true }),
-            DailyStats.sync({ alter: true }),
-            WhatsAppSession.sync({ alter: true })
-        ]);
-
-        console.log('✅ All database tables synced!');
-        return true;
-    } catch (error) {
-        console.log('⚠️ Parallel sync failed, trying sequential...');
-        try {
-            await User.sync({ alter: true });
-            await Platform.sync({ alter: true });
-            await Campaign.sync({ alter: true }); // alter: true to add new columns like imageUrls
-            await TeamActivity.sync({ alter: true });
-            await TeamMessage.sync({ alter: true });
-            await Conversation.sync({ alter: true });
-            await Message.sync({ alter: true });
-            await EcommerceStore.sync({ alter: true });
-            await EcommerceProduct.sync({ alter: true });
-            await EcommerceOrder.sync({ alter: true });
-            await WhatsAppSession.sync({ alter: true });
-            console.log('✅ All database tables synced (sequential)!');
-            return true;
-        } catch (seqError) {
-            console.error('❌ Error syncing database:', seqError.message);
-            return false;
-        }
-    }
+    console.log('⏭️  Skipping table sync (tables already exist on remote DB)');
+    return true;
 }
 
 module.exports = {

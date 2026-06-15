@@ -11,6 +11,9 @@ class WhatsAppService {
         this.readyStates = {}; // Track which users have fully loaded WA Web stores
         this.mediaCache = {}; // In-memory media cache: { [messageId]: { mimetype, data, filename, cachedAt } }
         this.mediaCacheMax = 500; // Max cache entries before pruning oldest
+        this._chatsCache = {}; // Chat list cache: { [userId]: { chats, timestamp } }
+        this._chatsCacheTTL = 30000; // Cache valid for 30 seconds
+        this._chatsRefreshing = {}; // Prevent duplicate refresh requests
         this.sessionDir = path.join(__dirname, '..', '.wwebjs_auth');
         this._reconnecting = false; // Flag to prevent concurrent reconnect calls
 
@@ -305,24 +308,42 @@ class WhatsAppService {
         }
     }
 
-    // Get all chats
+    // Clear chat cache for a user (called after send, archive, pin, etc.)
+    clearChatsCache(userId) { if (this._chatsCache[userId]) { delete this._chatsCache[userId]; } }
+
+    // Get all chats (with smart caching)
     async getChats(userId) {
+        const cache = this._chatsCache[userId];
+        const isFresh = cache && (Date.now() - cache.timestamp < this._chatsCacheTTL);
+
+        // Return cached chats immediately if fresh
+        if (isFresh && cache.chats.length > 0) {
+            console.log(`[WA] getChats: served ${cache.chats.length} chats from cache (${Math.round((Date.now() - cache.timestamp) / 1000)}s old)`);
+            return cache.chats;
+        }
+
+        // If another refresh is already in progress, return stale cache or empty
+        if (this._chatsRefreshing[userId]) {
+            console.log('[WA] getChats: refresh already in progress, returning cached or empty');
+            return cache ? cache.chats : [];
+        }
+
+        this._chatsRefreshing[userId] = true;
         try {
             const client = await this.getClient(userId);
 
-            // Guard: don't try to get chats if stores aren't ready
             if (!this.readyStates[userId]) {
-                console.log('[WA] getChats skipped - client not ready yet (stores not loaded)');
-                return [];
+                console.log('[WA] getChats skipped - client not ready yet');
+                return cache ? cache.chats : [];
             }
 
-            // Try up to 3 times with 5s delay (stores may still be loading)
+            // Try up to 2 times with 2s delay
             let lastError = null;
-            for (let attempt = 1; attempt <= 3; attempt++) {
+            for (let attempt = 1; attempt <= 2; attempt++) {
                 try {
                     const chats = await client.getChats();
                     console.log(`[WA] getChats success: ${chats.length} chats (attempt ${attempt})`);
-                    return chats.map(chat => ({
+                    const mapped = chats.map(chat => ({
                         id: chat.id._serialized,
                         name: chat.name || chat.id.user,
                         isGroup: chat.isGroup,
@@ -334,19 +355,24 @@ class WhatsAppService {
                         timestamp: chat.lastMessage?.timestamp || chat.lastMessage?._timestamp || 0,
                         labels: chat.labels || []
                     }));
+                    // Update cache
+                    this._chatsCache[userId] = { chats: mapped, timestamp: Date.now() };
+                    return mapped;
                 } catch (innerErr) {
                     lastError = innerErr;
-                    console.log(`[WA] getChats attempt ${attempt}/3 failed: ${innerErr.message}`);
-                    if (attempt < 3) {
-                        await new Promise(resolve => setTimeout(resolve, 5000));
+                    console.log(`[WA] getChats attempt ${attempt}/2 failed: ${innerErr.message}`);
+                    if (attempt < 2) {
+                        await new Promise(resolve => setTimeout(resolve, 2000));
                     }
                 }
             }
             console.error('[WA] getChats all attempts failed:', lastError?.message);
-            return [];
+            return cache ? cache.chats : [];
         } catch (err) {
             console.error('[WA] Get chats error:', err.message);
-            return [];
+            return cache ? cache.chats : [];
+        } finally {
+            this._chatsRefreshing[userId] = false;
         }
     }
 
@@ -476,6 +502,7 @@ class WhatsAppService {
             }
 
             const result = await client.sendMessage(chatId, message, sendOpts);
+            this.clearChatsCache(userId); // Refresh chat list next time
 
             return {
                 success: true,
@@ -493,6 +520,7 @@ class WhatsAppService {
             const client = await this.getClient(userId);
             const media = await MessageMedia.fromFilePath(mediaPath);
             const result = await client.sendMessage(chatId, media, { caption });
+            this.clearChatsCache(userId);
 
             return {
                 success: true,
@@ -510,6 +538,7 @@ class WhatsAppService {
             const client = await this.getClient(userId);
             const media = await MessageMedia.fromUrl(url, { mimeType });
             const result = await client.sendMessage(chatId, media, { caption });
+            this.clearChatsCache(userId);
 
             return {
                 success: true,

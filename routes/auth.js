@@ -27,7 +27,8 @@ router.post('/register', async (req, res) => {
                 existingUser.verificationExpires = new Date(Date.now() + 15 * 60 * 1000); // 15 minutes
                 await existingUser.save();
 
-                await sendVerificationEmail(email, name, code);
+                // Fire-and-forget email send (don't block response)
+                sendVerificationEmail(email, name, code).catch(err => console.error('[Email] Send failed:', err.message));
                 return res.json({ success: true, message: 'تم إرسال كود التحقق مرة أخرى', needsVerification: true });
             }
             return res.status(409).json({ error: 'هذا البريد الإلكتروني مسجل بالفعل' });
@@ -48,8 +49,8 @@ router.post('/register', async (req, res) => {
             verificationExpires
         });
 
-        // Send verification email
-        await sendVerificationEmail(email, name, verificationCode);
+        // Send verification email in background (don't block response)
+        sendVerificationEmail(email, name, verificationCode).catch(err => console.error('[Email] Send failed:', err.message));
 
         res.status(201).json({
             success: true,
@@ -278,9 +279,13 @@ router.post('/reset-password', async (req, res) => {
 router.get('/me', authMiddleware, async (req, res) => {
     try {
         console.log('[Auth] /me called for userId:', req.user.id);
-        const user = await User.findByPk(req.user.id, {
+
+        // Add timeout protection (User table queries hang sometimes due to PG cache issues)
+        const userPromise = User.findByPk(req.user.id, {
             attributes: ['id', 'email', 'name', 'role', 'permissions', 'isActive', 'isWorkingToday', 'isVerified', 'subscriptionExpiresAt']
         });
+        const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error('Query timeout')), 8000));
+        const user = await Promise.race([userPromise, timeoutPromise]);
 
         if (!user) {
             console.log('[Auth] /me User not found for ID:', req.user.id);
@@ -290,7 +295,17 @@ router.get('/me', authMiddleware, async (req, res) => {
         console.log('[Auth] /me Success for userId:', req.user.id);
         res.json({ user });
     } catch (error) {
-        console.error('[Auth] /me ERROR:', error);
+        console.error('[Auth] /me ERROR:', error.message);
+        // On timeout, return user info from JWT token (cached client-side anyway)
+        if (error.message === 'Query timeout') {
+            return res.json({
+                user: {
+                    id: req.user.id,
+                    email: req.user.email,
+                    role: req.user.role
+                }
+            });
+        }
         res.status(500).json({ error: 'Failed to get user', details: error.message });
     }
 });
