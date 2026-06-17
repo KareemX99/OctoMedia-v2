@@ -327,6 +327,7 @@ router.get('/team', authMiddleware, adminOnly, async (req, res) => {
 
         res.json({ users });
     } catch (error) {
+        console.error('[Auth] Get team error:', error.message);
         res.status(500).json({ error: 'Failed to get team' });
     }
 });

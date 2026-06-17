@@ -4,7 +4,7 @@ const { Sequelize } = require('sequelize');
 // CRITICAL FIX: Patch the pg Client.query to block schema introspection queries
 // These take 60+ seconds on the remote DB and cause deadlocks that block all operations
 const pg = require('pg');
-const blockedPattern = /INFORMATION_SCHEMA|PG_CATALOG\.PG_TYPE|PG_STATIO|ALTER TABLE|ADD CONSTRAINT|DROP CONSTRAINT|CREATE UNIQUE INDEX|CREATE INDEX/i;
+const blockedPattern = /INFORMATION_SCHEMA|PG_CATALOG\.PG_TYPE|PG_STATIO|ALTER TABLE|ADD CONSTRAINT|DROP CONSTRAINT/i;
 
 const origClientQuery = pg.Client.prototype.query;
 pg.Client.prototype.query = function(config, values, callback) {

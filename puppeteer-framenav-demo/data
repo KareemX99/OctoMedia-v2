@@ -1,0 +1,155 @@
+# تحليل Arrow Sender Pro — مستند العمل المشترك
+
+> ملف تحليلي تم توليده من فحص الـ exe والبيانات المخزّنة. كل التوكنات والكوكيز الحساسة **مُخفاة (REDACTED)** ويُحتفظ بالهيكل والأطوال فقط.
+
+## 1. طبيعة المشروع
+- المجلد المفتوح = تطبيق **مكمبَّل ومنشور**، مش كود مصدري (لا يوجد `.cs` / `.csproj`).
+- الكود المصدري الأصلي (من startup_log): `C:\Users\waloo\source\repos\AvaloniaApplication1\`
+- الإصدار: **1.6.0.0**
+
+### المكدّس التقني
+| العنصر | التفاصيل |
+|---|---|
+| الإطار | .NET 9 + Avalonia UI 11.3.6 (سطح مكتب) |
+| الأتمتة | Selenium WebDriver + Chrome (drivers: 120 / 143 / 144) |
+| HTTP/JSON | Newtonsoft.Json + DynamicData |
+| الذكاء الاصطناعي | OpenRouter (`openrouter.ai/api/v1/chat/completions`) |
+| التخزين الآمن | Windows DPAPI (بادئة `DPAPI1:`) |
+
+### الوظيفة
+أداة إرسال رسائل جماعية لصفحات فيسبوك (Messenger) + استخراج محادثات/leads + ردود آلية بالـ AI.
+
+## 2. آلية ربط حساب الفيسبوك
+
+### طرق الربط (من أسماء الـ handlers في الـ exe)
+- `handleLoginBtnClicked` — دخول عادي (إيميل + باسوورد)
+- `handleLogin2faBtnClicked` — مع مصادقة ثنائية (2FA)
+- `handleLoginApprovalBtnClicked` — مع موافقة الجهاز (Browser Approval)
+- `handleLoginWithCookieClicked` / `btnAddCookies_Clicked` — ربط مباشر بالكوكيز
+
+### الكلاس المسؤول: `FacebookOAuthAutomation`
+الـ methods الداخلية المكتشفة:
+- `GetAccessToken` (d__148)
+- `GetOAuthTokenWithApproval` (d__149) — يتعامل مع شاشة الموافقة من جهاز آخر
+- `GetOAuthTokenWith2FACheck` (d__150) — يُدخل كود الـ 2FA (`Enter2FACode`, `Otp2faDialog`)
+- `GetSessionAppAccessToken` (d__151)
+- `GetFacebookAppId` / `GetFacebookApiSecret2` / `GetFacebookAppAccessToken`
+- `GetAccountPages` / `GetAccountPages2` / `GetPages` / `RefreshPages`
+
+### الـ Flow خطوة بخطوة
+1. **أتمتة المتصفح:** فتح Chrome عبر Selenium وتسجيل الدخول بالـ credentials (مع التعامل مع 2FA / Approval).
+2. **OAuth Implicit Flow:** توجيه المتصفح لـ dialog/oauth (الـ URL الكامل بالأسفل) وقراءة التوكن من شريط العنوان بعد الـ redirect.
+3. **استخراج توكنات الصفحات:** نداء `me/accounts` على Graph API للحصول على Page Access Token لكل صفحة.
+
+### الـ OAuth URL الكامل (مستخرج حرفياً من الـ exe)
+```
+https://www.facebook.com/dialog/oauth
+  ?client_id=124024574287414            ← App ID رسمي تابع لإنستجرام (وليس خاص بالتطبيق)
+  &redirect_uri=https://www.instagram.com/accounts/signup/
+  &scope=user_birthday,...,manage_pages,pages_manage_cta,
+         pages_manage_instant_articles,pages_show_list,publish_pages,
+         read_page_mailboxes,ads_management,ads_read,business_management,
+         pages_messaging,pages_messaging_phone_number,
+         pages_messaging_subscriptions,pages_messaging_payments,
+         instagram_basic,instagram_manage_comments,instagram_manage_insights,
+         publish_to_groups,groups_access_member_info,leads_retrieval,
+         whatsapp_business_management,public_profile
+  &response_type=token,granted_scopes
+```
+
+**ملاحظة جوهرية:** استخدام `client_id` لتطبيق آخر (إنستجرام) + `response_type=token` (Implicit) = حصول على توكن واسع الصلاحيات دون App Review. وهذا هو السبب المباشر في الـ blocks وإلغاء التوكنات الظاهرة في اللوجات.
+
+### Endpoints المستخدمة
+- `FbGraphBaseUrl` = `https://graph.facebook.com`
+- `me/accounts` (جلب الصفحات + توكناتها)
+- `/conversations` (استخراج المحادثات — pagination بـ 499/صفحة)
+- `OpenRouterBaseUrl` = `https://openrouter.ai/api/v1/chat/completions` (ردود AI)
+
+## 3. التخزين والتشفير
+
+كل الملفات الحساسة مشفّرة بـ **Windows DPAPI** (نطاق `CurrentUser`) — لا تنتقل لجهاز آخر.
+الشكل: `DPAPI1:` + Base64(blob). تم فك تشفيرها بنجاح على نفس الحساب للتأكد من البنية.
+
+### أماكن البيانات
+| المسار | المحتوى | الحالة |
+|---|---|---|
+| `Documents/ArrowSender/accounts.json` | حسابات الفيسبوك المربوطة | DPAPI مشفّر (1423 bytes) |
+| `Documents/ArrowSender/<uid>/page.json` | صفحات الحساب + توكناتها | DPAPI مشفّر (5991 bytes) |
+| `Documents/ArrowSender/<uid>/C_*.json` | محادثات مُصدَّرة (campaign) | JSON |
+| `Documents/ArrowSender/<uid>/CR_*.json` | نتائج/ردود | JSON |
+| `Documents/ArrowSender/<uid>/Business/` | حالة الحملات | JSON |
+| `LOCALAPPDATA/ArrowSender/.token / .cred / .user / .license / .remember` | جلسة المستخدم/الترخيص | DPAPI مشفّر |
+| `LOCALAPPDATA/ArrowSender/config.json` | إعدادات | DPAPI مشفّر |
+| `APPDATA/ArrowSenderPro/language.txt` | اللغة (`ar`) | نص |
+
+### بنية `page.json` بعد فك التشفير (التوكنات مُخفاة)
+```json
+[
+  {"name":"<اسم الصفحة>","accessToken":"<REDACTED_TOKEN>","id":"944026828796707","isAccessToken":true},
+  {"name":"<اسم الصفحة>","accessToken":"<REDACTED_TOKEN>","id":"964071960116893","isAccessToken":true}
+  // ... وهكذا لكل صفحة
+]
+```
+> الحساب المُختبر يحتوي على ~13 صفحة، كل منها له `accessToken` خاص (Page Access Token).
+
+## 4. نماذج البيانات (DTOs المكتشفة في الـ exe)
+- `FacebookCookieDto` / `ListFacebookCookieDto` — الكوكيز (`c_user`, `xs`, `datr`, `fr`)
+- `FacebookMessageRequest` → `FacebookRecipient` + `FacebookPayload` + `FacebookMessage`
+- `FacebookAttachment` / `FacebookAttachmentArray` — المرفقات
+- `FacebookButton` / `ListFacebookButton` — أزرار الرسائل
+- `FPageDataModel` / `PageSelectorItem` / `PageDataModel` — الصفحات
+- `LoginRequest` / `LoginData` / `ApiResponseLoginData` — تسجيل دخول السيرفر (ترخيص)
+- `DeviceInfoRequest` / `VerifyDeviceRequest` — تحقق الجهاز (نظام الترخيص)
+
+## 5. ملاحظات ومشاكل مرصودة (من اللوجات)
+1. **Bug توجيه النوافذ** (`err.err`): `Cannot show a window with a closed owner` أثناء `post-login routing`.
+2. **إلغاء التوكنات** (`export.log`): `OAuthException code 190` (الجلسة أُلغيت لتغيير الباسوورد) + "account blocked".
+3. **مخالفة شروط فيسبوك:** استخدام client_id لتطبيق آخر + أتمتة Selenium = سبب الـ blocks المتكررة.
+
+## 6. نقاط للتحليل المشترك لاحقاً
+- [ ] تصليح bug توجيه النوافذ بعد الدخول (يحتاج الكود المصدري)
+- [ ] تحسين ثبات التوكنات / تقليل الـ blocks
+- [ ] فحص أعمق لمنطق استخراج الـ leads (`/conversations` pagination)
+- [ ] مراجعة نظام الترخيص (Device verification)
+
+## 7. آلية الحماية والمصادقة (تحليل تفصيلي)
+
+### أ) تسجيل الدخول للتطبيق (Server-bound)
+- `AuthService`: `RegisterAsync`, `LoginAsync`, `VerifyTokenAsync`, `RefreshLicenseInfoAsync`
+- `LoginRequest` → `ApiResponseLoginData` (يحتوي JWT + `LicenseInfo` + `LicenseValidationResult`)
+- إعدادات: `MaxLoginAttempts`, `TokenExpiryDays`, `chkKeepMeSignedIn`
+- تسلسل الإقلاع (من startup_log): `Auto-login → Token valid → License valid → Showing Window` وإلا `RedirectToLogin`
+
+### ب) ربط الجهاز (Anti-piracy / Device Binding)
+- `DeviceService`: `GetDeviceId`, `GenerateHash`, `VerifyDeviceAsync`
+- بصمة الجهاز عبر **WMI** (`System.Management.ManagementObject` / `ManagementObjectSearcher`) — أي قراءة Hardware ID
+- `VerifyDeviceRequest` → السيرفر يربط الترخيص بالـ DeviceId
+
+### ج) نظام الرصيد (Credits / Reservation)
+- `ConfirmBulkReservationAsync` (حجز قبل الحملة)
+- `FinalizeReservationAsync` (خصم فعلي)
+- `CancelReservationAsync` (إلغاء)
+- `SyncOfflineDeductionsAsync` (مزامنة الخصومات offline)
+- نماذج: `ReservationData`, `ReservationResult`, `ReservationId`
+
+### د) طبقات التشفير
+1. **تخزين محلي — Windows DPAPI** (`DPAPI1:` + Base64, نطاق CurrentUser) لكل: `.token`, `.cred`, `accounts.json`, `page.json`, `config.json`
+2. **اتصال السيرفر — AES + HMAC مع توقيع:**
+   - `PostEncryptedAsync` / `DecryptAndExtractAsync`
+   - `EncryptStringToBytes_Aes` / `DecryptStringFromBytes_Aes` (CipherMode + IV)
+   - `EncryptedPacket` { `sha256`, `signatureBase64`, `alg`, `extra` } — حزمة موقّعة
+   - اشتقاق المفاتيح: `Rfc2898DeriveBytes` (PBKDF2) + `SaltSize` + `Pbkdf2Iterations` + `KeySizeBytes` + `MacKeySizeBytes`
+   - التحقق: `HMACSHA256` + `ComputeSha256Hex` / `VerifySha256`
+   - `EndToEndEncryption` flag
+3. **مفتاح الـ API:** `ApiEncryptionKey` يُحمّل عبر `LoadApiEncryptionKey` من ملف سرّي (`GetSecretFilePath`) أو متغير بيئة (`ApiEncryptionKeyEnvName`) مع `IsOverrideEnabled`
+4. **النتيجة:** الـ server base URL **غير ظاهر كنص صريح** في الـ exe (مشفّر/runtime)
+
+### هـ) الباك-إند (مؤشرات)
+- **MongoDB** (`lastReadId` بصيغة ObjectId)
+- **JWT** (`System.Security.Claims`, `ClaimsIdentity`, `Expiry`, `TokenExpiryDays`)
+
+### و) نقاط ضعف محتملة (للمراجعة الأمنية — دفاعية)
+- قرار "افتح/لا تفتح" يبدو client-side (قابل للـ patch) → يُفضّل ربط الميزات ببيانات مشفّرة من السيرفر
+- `SyncOfflineDeductionsAsync`: لو الرصيد يُحسب محلياً → خطر تلاعب → الحساب النهائي لازم server-side
+- .NET قابل للـ decompile (أسماء الكلاسات/الـ methods ظاهرة) → يُنصح بـ Obfuscation
+- `ApiEncryptionKey` لو مخزّن داخل الحزمة → قابل للاستخراج → يُفضّل مفاتيح per-session

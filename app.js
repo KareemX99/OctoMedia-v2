@@ -1344,15 +1344,13 @@ class SocialMediaHub {
                 <div class="card quick-notes">
                     <div class="card-header"><h2><i class="fas fa-sticky-note"></i> ملاحظاتي</h2></div>
                     <div class="card-body">
-                        <div id="quickNotesContainer" style="display:flex;flex-direction:column;gap:12px;">
-                            <div style="position:relative;">
-                                <textarea id="quickNoteInput" placeholder="✍️ اكتب ملاحظتك هنا..." style="width:100%;min-height:70px;padding:14px 16px;border-radius:12px;border:2px solid var(--border-color);background:var(--bg-secondary);color:var(--text-primary);resize:none;font-family:inherit;font-size:14px;line-height:1.5;transition:border-color 0.3s,box-shadow 0.3s;" onfocus="this.style.borderColor='var(--primary)';this.style.boxShadow='0 0 0 3px rgba(14,165,233,0.1)'" onblur="this.style.borderColor='var(--border-color)';this.style.boxShadow='none'"></textarea>
-                            </div>
-                            <button onclick="app.saveQuickNote()" class="add-note-btn" style="display:flex;align-items:center;justify-content:center;gap:8px;padding:12px 24px;background:var(--bg-card);border:2px dashed var(--border-color);color:var(--text-secondary);border-radius:12px;cursor:pointer;font-weight:600;font-size:14px;transition:all 0.3s;font-family:inherit;" onmouseover="this.style.borderColor='var(--primary)';this.style.color='var(--primary)';this.style.background='rgba(14,165,233,0.05)'" onmouseout="this.style.borderColor='var(--border-color)';this.style.color='var(--text-secondary)';this.style.background='var(--bg-card)'">
+                        <div id="quickNotesContainer" class="qnote-container">
+                            <textarea id="quickNoteInput" class="qnote-input" placeholder="✍️ اكتب ملاحظتك هنا..."></textarea>
+                            <button onclick="app.saveQuickNote()" class="qnote-add-btn">
                                 <i class="fas fa-plus-circle" style="font-size:16px;"></i>
                                 <span>إضافة ملاحظة</span>
                             </button>
-                            <div id="quickNotesList" style="display:flex;flex-direction:column;gap:8px;max-height:220px;overflow-y:auto;"></div>
+                            <div id="quickNotesList" class="qnote-list"></div>
                         </div>
                     </div>
                 </div>
@@ -1474,7 +1472,7 @@ class SocialMediaHub {
                 /* Hero Banner - Premium Design */
                 .msg-hero {
                     background: linear-gradient(135deg, #667eea 0%, #764ba2 50%, #0EA5E9 100%);
-                    border-radius: 24px; padding: 28px 36px; margin-bottom: 20px;
+                    border-radius: var(--radius-xl); padding: 28px 36px; margin-bottom: 20px;
                     display: flex; align-items: center; justify-content: space-between;
                     box-shadow: 0 12px 40px rgba(102, 126, 234, 0.35), 0 4px 16px rgba(233, 30, 99, 0.15);
                     position: relative; overflow: hidden;
@@ -1530,7 +1528,7 @@ class SocialMediaHub {
                     text-align: center; padding: 16px 24px;
                     background: linear-gradient(135deg, rgba(255,255,255,0.2) 0%, rgba(255,255,255,0.08) 100%);
                     backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
-                    border-radius: 16px; min-width: 110px;
+                    border-radius: var(--radius-lg); min-width: 110px;
                     border: 1px solid rgba(255,255,255,0.25);
                     box-shadow: 0 8px 32px rgba(0,0,0,0.1), inset 0 1px 0 rgba(255,255,255,0.2);
                     transition: all 0.3s ease;
@@ -1542,7 +1540,7 @@ class SocialMediaHub {
                 }
                 .msg-hero-stat-icon {
                     width: 36px; height: 36px; margin: 0 auto 8px auto;
-                    background: rgba(255,255,255,0.2); border-radius: 10px;
+                    background: rgba(255,255,255,0.2); border-radius: var(--radius-sm);
                     display: flex; align-items: center; justify-content: center;
                     font-size: 16px; color: white;
                 }
@@ -1580,7 +1578,7 @@ class SocialMediaHub {
                     color: white; font-size: 14px;
                 }
                 .msg-page-select {
-                    width: 100%; padding: 12px 14px; border-radius: 12px;
+                    width: 100%; padding: 12px 14px; border-radius: var(--radius-md);
                     background: var(--bg-secondary); border: 1px solid var(--border-color);
                     color: var(--text-primary); font-family: inherit; font-size: 14px;
                     cursor: pointer; transition: all 0.2s ease;
@@ -1588,7 +1586,7 @@ class SocialMediaHub {
                 .msg-page-select:focus { outline: none; border-color: #0084ff; box-shadow: 0 0 0 3px rgba(0,132,255,0.15); }
                 .msg-search-box {
                     display: flex; gap: 8px; margin-top: 12px; padding: 4px;
-                    background: var(--bg-secondary); border-radius: 12px;
+                    background: var(--bg-secondary); border-radius: var(--radius-md);
                 }
                 .msg-search-box input {
                     flex: 1; padding: 10px 14px; border-radius: 8px;
@@ -1627,7 +1625,7 @@ class SocialMediaHub {
                 .msg-chat-info h3 { font-size: 16px; font-weight: 600; color: var(--text-primary); margin: 0; }
                 .msg-chat-actions { margin-right: auto; display: flex; gap: 8px; }
                 .msg-chat-action {
-                    width: 36px; height: 36px; border-radius: 10px;
+                    width: 36px; height: 36px; border-radius: var(--radius-sm);
                     background: var(--bg-secondary); border: 1px solid var(--border-color);
                     color: var(--text-secondary); cursor: pointer;
                     display: flex; align-items: center; justify-content: center;
@@ -1654,7 +1652,7 @@ class SocialMediaHub {
                 }
                 .msg-input-row { display: flex; gap: 12px; align-items: flex-end; }
                 .msg-input-row textarea {
-                    flex: 1; padding: 14px 18px; border-radius: 16px;
+                    flex: 1; padding: 14px 18px; border-radius: var(--radius-lg);
                     background: var(--bg-secondary); border: 1px solid var(--border-color);
                     color: var(--text-primary); font-family: inherit; font-size: 14px;
                     resize: none; min-height: 50px; max-height: 120px;
@@ -1944,11 +1942,11 @@ class SocialMediaHub {
         // Broadcast Section - Professional Design with Light/Dark Mode
         document.getElementById('broadcast').innerHTML = `
             <style>
-                .bcast { --accent: #0EA5E9; --accent-light: rgba(14,165,233,0.1); --accent-glow: rgba(14,165,233,0.25); max-width: 1200px; margin: 0 auto; font-family: 'Segoe UI', system-ui, sans-serif; }
+                .bcast { --accent: #0EA5E9; --accent-light: rgba(14,165,233,0.1); --accent-glow: rgba(14,165,233,0.25); max-width: 1200px; margin: 0 auto; font-family: inherit; }
                 .bcast-grid { display: grid; grid-template-columns: 360px 1fr; gap: 24px; }
                 @media (max-width: 900px) { .bcast-grid { grid-template-columns: 1fr; } }
                 .bcast-banner {
-                    background: var(--bg-card); border: 1px solid var(--border-color); border-radius: 16px;
+                    background: var(--bg-card); border: 1px solid var(--border-color); border-radius: var(--radius-lg);
                     padding: 28px 32px; margin-bottom: 24px; display: flex; align-items: center; gap: 20px;
                     position: relative; overflow: hidden;
                 }
@@ -1966,7 +1964,7 @@ class SocialMediaHub {
                 .bcast-banner-text h2 { font-size: 20px; font-weight: 700; color: var(--text-primary); margin: 0 0 6px 0; }
                 .bcast-banner-text p { font-size: 14px; color: var(--text-secondary); margin: 0; }
                 .bcast-card {
-                    background: var(--bg-card); border: 1px solid var(--border-color); border-radius: 16px;
+                    background: var(--bg-card); border: 1px solid var(--border-color); border-radius: var(--radius-lg);
                     padding: 24px; transition: all 0.3s ease;
                 }
                 .bcast-card:hover { border-color: var(--accent); box-shadow: 0 8px 32px var(--accent-glow); }
@@ -1976,35 +1974,35 @@ class SocialMediaHub {
                 }
                 .bcast-card-icon {
                     width: 40px; height: 40px; background: linear-gradient(135deg, var(--accent), #2563EB);
-                    border-radius: 10px; display: flex; align-items: center; justify-content: center;
+                    border-radius: var(--radius-sm); display: flex; align-items: center; justify-content: center;
                     font-size: 16px; color: white;
                 }
                 .bcast-card-title { font-size: 16px; font-weight: 700; color: var(--text-primary); margin: 0; }
-                .bcast-label { display: block; font-size: 13px; font-weight: 600; color: var(--text-secondary); margin-bottom: 8px; }
+                .bcast-label { display: block; font-size: var(--fs-sm); font-weight: 600; color: var(--text-secondary); margin-bottom: 8px; }
                 .bcast-label i { color: var(--accent); margin-left: 6px; }
                 .bcast-select, .bcast-textarea {
-                    width: 100%; padding: 14px 16px; border-radius: 12px; background: var(--bg-secondary);
+                    width: 100%; padding: 14px 16px; border-radius: var(--radius-md); background: var(--bg-secondary);
                     border: 1px solid var(--border-color); color: var(--text-primary);
-                    font-family: inherit; font-size: 14px; transition: all 0.2s ease;
+                    font-family: inherit; font-size: var(--fs-body); transition: all 0.2s ease;
                 }
                 .bcast-select:focus, .bcast-textarea:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-light); }
                 .bcast-textarea { resize: vertical; min-height: 160px; line-height: 1.7; }
                 .bcast-group { margin-bottom: 20px; }
                 .bcast-stats { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 20px; }
-                .bcast-stat { background: var(--accent-light); border: 1px solid var(--accent-glow); border-radius: 12px; padding: 16px; text-align: center; }
+                .bcast-stat { background: var(--accent-light); border: 1px solid var(--accent-glow); border-radius: var(--radius-md); padding: 16px; text-align: center; }
                 .bcast-stat-num { font-size: 32px; font-weight: 800; color: var(--accent); line-height: 1; }
                 .bcast-stat-label { font-size: 11px; color: var(--text-secondary); margin-top: 4px; text-transform: uppercase; letter-spacing: 0.5px; }
                 .bcast-ai-btn {
                     display: inline-flex; align-items: center; gap: 10px; padding: 14px 28px;
-                    background: linear-gradient(135deg, var(--accent), #2563EB); border: none; border-radius: 12px;
+                    background: linear-gradient(135deg, var(--accent), #2563EB); border: none; border-radius: var(--radius-md);
                     color: white; font-size: 15px; font-weight: 700; cursor: pointer;
                     transition: all 0.3s ease; box-shadow: 0 4px 16px var(--accent-glow);
                 }
                 .bcast-ai-btn:hover { transform: translateY(-2px); box-shadow: 0 8px 24px var(--accent-glow); }
                 .bcast-ai-btn i { font-size: 18px; }
                 .bcast-preview {
-                    background: var(--bg-secondary); border: 1px dashed var(--border-color); border-radius: 12px;
-                    padding: 20px; min-height: 100px; color: var(--text-secondary); font-size: 14px; line-height: 1.8; white-space: pre-wrap;
+                    background: var(--bg-secondary); border: 1px dashed var(--border-color); border-radius: var(--radius-md);
+                    padding: 20px; min-height: 100px; color: var(--text-secondary); font-size: var(--fs-body); line-height: 1.8; white-space: pre-wrap;
                 }
                 .bcast-preview-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
                 .bcast-refresh-btn {
@@ -2948,6 +2946,19 @@ class SocialMediaHub {
                     </div>
                 </div>
                 <div id="analyticsCards" class="analytics-grid"><div class="loading-spinner"><div class="spinner"></div></div></div>
+                <div class="charts-row">
+                    <div class="chart-card chart-card-main">
+                        <h3 class="chart-card-title"><i class="fas fa-chart-area"></i> اتجاه التفاعل</h3>
+                        <div class="chart-canvas-wrap"><canvas id="engagementCanvas"></canvas></div>
+                    </div>
+                    <div class="chart-card chart-card-side">
+                        <h3 class="chart-card-title"><i class="fas fa-heartbeat"></i> صحة الصفحة</h3>
+                        <div class="chart-canvas-wrap health-wrap">
+                            <canvas id="healthCanvas"></canvas>
+                            <div class="health-center"><span id="healthScoreValue">0</span><small id="healthScoreLabel"></small></div>
+                        </div>
+                    </div>
+                </div>
             </div>`;
 
         await this.loadAnalyticsData(this.selectedAnalyticsPage);
@@ -3044,6 +3055,20 @@ class SocialMediaHub {
                 { total: data.stats?.totalShares || 0 },
                 { total: data.stats?.totalComments || 0 }
             );
+
+            // Fetch time-series for the engagement chart (reuses existing analytics endpoint)
+            try {
+                const seriesRes = await fetch(`${this.API_URL}/api/analytics/${pageId}?period=${this.currentPeriod}`, {
+                    headers: { 'Authorization': `Bearer ${token}` }
+                });
+                if (seriesRes.ok) {
+                    const seriesData = await seriesRes.json();
+                    this.renderEngagementChart(seriesData.engagement);
+                    this.renderHealthScore(seriesData.healthScore);
+                }
+            } catch (e) {
+                console.warn('[Analytics] Engagement series not available:', e.message);
+            }
 
             // Update Fan Count for the selected page
             const selectedPageObj = this.fbPages.find(p => p.id === pageId);
@@ -3314,60 +3339,116 @@ class SocialMediaHub {
     // Do not duplicate it here
 
     renderEngagementChart(engagement) {
-        const container = document.getElementById('engagementChart');
-        if (!container) return;
+        const canvas = document.getElementById('engagementCanvas');
+        if (!canvas) return;
 
         const labels = engagement?.labels || [];
-        const datasets = engagement?.datasets || [];
-        const data = datasets[0]?.data || [];
-        const maxVal = Math.max(...data, 1);
+        const data = engagement?.datasets?.[0]?.data || [];
 
-        console.log('[Engagement Chart] Rendering with:', { labels, data });
+        // Fallback if Chart.js failed to load
+        if (typeof window.Chart === 'undefined') {
+            const wrap = canvas.parentElement;
+            if (wrap) wrap.innerHTML = `<div style="text-align:center;padding:40px;color:var(--text-secondary);font-size:13px;">إجمالي التفاعلات: ${data.reduce((a, b) => a + b, 0)}</div>`;
+            return;
+        }
 
-        container.innerHTML = `
-            <h3><i class="fas fa-chart-bar"></i> التفاعل (${this.currentPeriod === 'day' ? 'اليومي' : (this.currentPeriod === 'week' ? 'الأسبوعي' : 'الشهري')})</h3>
-            <div class="chart-wrapper">
-                <div class="chart-bars">
-                    ${labels.map((label, i) => {
-            const value = data[i] || 0;
-            const height = maxVal > 0 ? (value / maxVal) * 180 : 0;
-            const isHighlighted = i === labels.length - 1;
+        // Destroy previous instance to avoid memory leak / ghost canvas
+        if (this.engagementChartInstance) {
+            this.engagementChartInstance.destroy();
+            this.engagementChartInstance = null;
+        }
 
-            return `
-                        <div class="chart-bar-item ${isHighlighted ? 'today' : ''}">
-                            <div class="chart-bar-value">${value}</div>
-                            <div class="chart-bar" style="height: ${Math.max(height, 4)}px; ${isHighlighted ? 'background: linear-gradient(180deg, #0EA5E9, #2563EB);' : ''}"></div>
-                            <div class="chart-bar-label" style="${isHighlighted ? 'font-weight:700;color:var(--primary);' : ''}">${label}</div>
-                        </div>`;
-        }).join('')}
-                </div>
-            </div>
-            <div style="text-align:center;margin-top:12px;font-size:12px;color:var(--text-secondary);">
-                <i class="fas fa-info-circle"></i> إجمالي التفاعلات: ${data.reduce((a, b) => a + b, 0)}
-            </div>`;
+        // Read theme-aware colors from CSS variables
+        const css = getComputedStyle(document.body);
+        const textColor = css.getPropertyValue('--text-secondary').trim() || '#94A3B8';
+        const gridColor = 'rgba(148,163,184,0.12)';
+        const primary = css.getPropertyValue('--primary').trim() || '#38BDF8';
+
+        const ctx = canvas.getContext('2d');
+        const gradient = ctx.createLinearGradient(0, 0, 0, 280);
+        gradient.addColorStop(0, 'rgba(56,189,248,0.35)');
+        gradient.addColorStop(1, 'rgba(56,189,248,0.02)');
+
+        this.engagementChartInstance = new window.Chart(ctx, {
+            type: 'line',
+            data: {
+                labels,
+                datasets: [{
+                    label: 'التفاعل',
+                    data,
+                    borderColor: primary,
+                    backgroundColor: gradient,
+                    borderWidth: 2.5,
+                    fill: true,
+                    tension: 0.4,
+                    pointBackgroundColor: primary,
+                    pointRadius: 4,
+                    pointHoverRadius: 6
+                }]
+            },
+            options: this._engagementChartOptions(textColor, gridColor)
+        });
+    }
+
+    _engagementChartOptions(textColor, gridColor) {
+        return {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: { legend: { display: false } },
+            scales: {
+                y: {
+                    beginAtZero: true,
+                    ticks: { color: textColor, precision: 0 },
+                    grid: { color: gridColor }
+                },
+                x: {
+                    ticks: { color: textColor },
+                    grid: { display: false }
+                }
+            }
+        };
     }
 
     renderHealthScore(health) {
-        const container = document.getElementById('healthScoreCard');
-        if (!container) return;
+        const canvas = document.getElementById('healthCanvas');
+        if (!canvas) return;
 
-        const score = health?.score || 0;
-        const color = score >= 70 ? 'var(--success)' : score >= 40 ? 'var(--warning)' : 'var(--danger)';
+        // Accepts either a number (healthScore) or an object { score }
+        const score = Math.max(0, Math.min(100, typeof health === 'number' ? health : (health?.score || 0)));
+        const color = score >= 70 ? '#10B981' : score >= 40 ? '#F59E0B' : '#EF4444';
 
-        container.innerHTML = `
-                    <div class="health-score-card">
-                <h3 style="margin-bottom: 16px;"><i class="fas fa-heartbeat"></i> صحة الصفحة</h3>
-                <div class="health-score-circle" style="--score: ${score}; background: conic-gradient(${color}${score * 3.6}deg, var(--glass) 0deg);">
-                    <div class="health-score-value">${score}</div>
-                </div>
-                <div class="health-score-label">${score >= 70 ? 'ممتاز!' : score >= 40 ? 'جيد' : 'يحتاج تحسين'}</div>
-                ${health?.tips?.length > 0 ? `
-                    <div style="margin-top: 16px; text-align: right; font-size: 13px; color: var(--text-secondary);">
-                        ${health.tips.map(tip => `<p style="margin-bottom: 4px;">💡 ${tip}</p>`).join('')}
-                    </div>
-                ` : ''
+        const valueEl = document.getElementById('healthScoreValue');
+        const labelEl = document.getElementById('healthScoreLabel');
+        if (valueEl) { valueEl.textContent = score; valueEl.style.color = color; }
+        if (labelEl) labelEl.textContent = score >= 70 ? 'ممتاز' : score >= 40 ? 'جيد' : 'يحتاج تحسين';
+
+        if (typeof window.Chart === 'undefined') return;
+
+        if (this.healthChartInstance) {
+            this.healthChartInstance.destroy();
+            this.healthChartInstance = null;
+        }
+
+        const trackColor = getComputedStyle(document.body).getPropertyValue('--border-color').trim() || 'rgba(148,163,184,0.15)';
+
+        this.healthChartInstance = new window.Chart(canvas.getContext('2d'), {
+            type: 'doughnut',
+            data: {
+                datasets: [{
+                    data: [score, 100 - score],
+                    backgroundColor: [color, trackColor],
+                    borderWidth: 0,
+                    circumference: 360,
+                    rotation: 0
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                cutout: '75%',
+                plugins: { legend: { display: false }, tooltip: { enabled: false } }
             }
-            </div>`;
+        });
     }
 
     renderLiveEngagements(data) {
@@ -3899,9 +3980,9 @@ class SocialMediaHub {
             const timeAgo = this.formatTimeAgo(note.createdAt);
             const canDelete = note.authorId === currentUserId;
             return `
-                <div class="note-item" style="display:flex;align-items:flex-start;gap:10px;padding:12px;background:var(--glass);border-radius:10px;border-right:3px solid var(--primary);transition:all 0.2s;">
-                    <div style="flex:1;min-width:0;">
-                        <div style="font-size:13px;color:var(--text-primary);line-height:1.6;word-break:break-word;">${note.text}</div>
+                <div class="qnote-item">
+                    <div class="qnote-text">
+                        <div>${note.text}</div>
                         <div style="display:flex;align-items:center;gap:6px;margin-top:8px;font-size:10px;color:var(--text-muted);">
                             <span style="display:inline-flex;align-items:center;gap:4px;background:var(--glass-strong);padding:2px 8px;border-radius:10px;">
                                 <i class="fas fa-clock"></i> ${timeAgo}
@@ -3909,7 +3990,7 @@ class SocialMediaHub {
                         </div>
                     </div>
                     ${canDelete ? `
-                        <button onclick="app.deleteQuickNote(${note.id})" class="delete-note-btn" style="background:var(--glass);border:none;color:var(--text-muted);cursor:pointer;padding:6px 8px;border-radius:6px;opacity:0.5;transition:all 0.2s;" onmouseover="this.style.opacity='1';this.style.background='rgba(244,67,54,0.15)';this.style.color='#f44336'" onmouseout="this.style.opacity='0.5';this.style.background='var(--glass)';this.style.color='var(--text-muted)'">
+                        <button onclick="app.deleteQuickNote(${note.id})" class="qnote-delete" title="حذف">
                             <i class="fas fa-times"></i>
                         </button>
                     ` : ''}

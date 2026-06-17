@@ -17,6 +17,7 @@ class WhatsAppService {
         this._chatsRefreshing = {}; // Prevent duplicate refresh requests
         this.sessionDir = path.join(__dirname, '..', '.wwebjs_auth');
         this._reconnecting = false; // Flag to prevent concurrent reconnect calls
+        this._initPromises = {}; // Prevent concurrent initialization for same user
 
         // Create session directory if not exists
         if (!fs.existsSync(this.sessionDir)) {
@@ -166,14 +167,29 @@ class WhatsAppService {
                         delete this.clients[userId];
                         delete this.readyStates[userId];
                         delete this.qrCodes[userId];
+                        delete this._initPromises[userId];
 
-                        // Remove stale session files
+                        // Wait for browser to fully shutdown before removing files (Windows needs extra time)
+                        await new Promise(resolve => setTimeout(resolve, 3000));
+
+                        // Remove stale session files (retry up to 3 times)
                         if (fs.existsSync(sessionPath)) {
-                            try {
-                                fs.rmSync(sessionPath, { recursive: true, force: true });
-                                console.log(`[WA AutoReconnect] 🗑️ Removed stale session files for user ${userId}`);
-                            } catch (rmErr) {
-                                console.log(`[WA AutoReconnect] File cleanup warning: ${rmErr.message}`);
+                            let removed = false;
+                            for (let attempt = 1; attempt <= 3; attempt++) {
+                                try {
+                                    fs.rmSync(sessionPath, { recursive: true, force: true });
+                                    console.log(`[WA AutoReconnect] 🗑️ Removed stale session files for user ${userId}`);
+                                    removed = true;
+                                    break;
+                                } catch (rmErr) {
+                                    console.log(`[WA AutoReconnect] File cleanup attempt ${attempt}/3 failed: ${rmErr.message}`);
+                                    if (attempt < 3) {
+                                        await new Promise(resolve => setTimeout(resolve, 2000));
+                                    }
+                                }
+                            }
+                            if (!removed) {
+                                console.log(`[WA AutoReconnect] ⚠️ Could not remove session files for ${userId} after 3 attempts`);
                             }
                         }
 
@@ -267,6 +283,7 @@ class WhatsAppService {
             console.log(`[WA] User ${userId} disconnected:`, reason);
             delete this.clients[userId];
             delete this.readyStates[userId];
+            delete this._initPromises[userId];
 
             // Update DB: mark inactive with reason (but keep the session for potential reconnect)
             if (reason === 'LOGOUT') {
@@ -300,8 +317,17 @@ class WhatsAppService {
         return client;
     }
 
-    // Initialize client (start)
+    // Initialize client (start the browser / load WhatsApp Web)
     async initialize(userId) {
+        // Wait for an already-in-progress init for this user
+        if (this._initPromises[userId]) {
+            await this._initPromises[userId];
+            return { success: true };
+        }
+
+        let resolveInit;
+        this._initPromises[userId] = new Promise(r => { resolveInit = r; });
+
         try {
             const client = await this.getClient(userId);
 
@@ -324,9 +350,37 @@ class WhatsAppService {
                 }
             }
 
+            resolveInit();
+            delete this._initPromises[userId];
             return { success: true };
         } catch (err) {
             console.error('[WA] Initialize error:', err.message);
+
+            // Handle "browser already running" — kill the stale process
+            if (err.message && err.message.includes('already running')) {
+                const sessionPath = this.getSessionPath(userId);
+                try {
+                    const { execSync } = require('child_process');
+                    const escapedPath = sessionPath.replace(/\\/g, '\\\\');
+                    const cmd = `wmic process where "name='chrome.exe' and commandline like '%${escapedPath}%'" get processid 2>nul`;
+                    const output = execSync(cmd, { timeout: 5000, encoding: 'utf8' });
+                    const pids = output.split('\n').filter(l => /^\d+$/.test(l.trim()));
+                    pids.forEach(pid => {
+                        try { execSync(`taskkill /F /PID ${pid.trim()} 2>nul`); } catch (e) { /* ignore */ }
+                    });
+                    if (pids.length > 0) {
+                        console.log(`[WA] Killed ${pids.length} stale Chrome process(es) for session`);
+                        await new Promise(r => setTimeout(r, 2000));
+                    }
+                } catch (killErr) {
+                    console.log(`[WA] Could not kill stale browser: ${killErr.message}`);
+                }
+                // Clean up failed client so next call starts fresh
+                delete this.clients[userId];
+            }
+
+            resolveInit();
+            delete this._initPromises[userId];
             return { success: false, error: err.message };
         }
     }
@@ -783,6 +837,7 @@ class WhatsAppService {
                 delete this.readyStates[userId];
                 delete this.qrCodes[userId];
                 delete this._initStartTimes[userId];
+                delete this._initPromises[userId];
 
                 return {
                     status: 'disconnected',

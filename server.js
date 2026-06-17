@@ -1544,6 +1544,7 @@ app.post('/api/support/mark-read', authMiddleware, async (req, res) => {
 
 // Facebook Graph API Base URL
 const FB_GRAPH_URL = 'https://graph.facebook.com/v21.0';
+const { FacebookMessage, FacebookMessageRequest } = require('./dtos/facebook');
 const FB_APP_ID = process.env.FB_APP_ID;
 const FB_APP_SECRET = process.env.FB_APP_SECRET;
 const REDIRECT_URI = `${process.env.BASE_URL || 'http://localhost:3000'}/auth/facebook/callback`;
@@ -5707,28 +5708,31 @@ app.post('/api/broadcast/:userId/:pageId/send', upload.single('media'), async (r
 
         for (const recipient of recipients) {
             try {
-                const messagePayload = {
-                    recipient: { id: recipient.id },
-                    messaging_type: 'MESSAGE_TAG',
-                    tag: 'POST_PURCHASE_UPDATE'
-                };
-
                 if (mediaAttachment) {
-                    messagePayload.message = { attachment: mediaAttachment };
                     // Send media first, then text
-                    await axios.post(`${FB_GRAPH_URL}/${pageId}/messages`, messagePayload, {
+                    const mediaReq = new FacebookMessageRequest({
+                        recipientId: recipient.id,
+                        message: FacebookMessage.media(mediaAttachment.type, mediaAttachment.payload.attachment_id)
+                    }).asResponse();
+                    await axios.post(`${FB_GRAPH_URL}/${pageId}/messages`, mediaReq.toJSON(), {
                         params: { access_token: pageToken }
                     });
 
                     if (message) {
-                        messagePayload.message = { text: message };
-                        await axios.post(`${FB_GRAPH_URL}/${pageId}/messages`, messagePayload, {
+                        const textReq = new FacebookMessageRequest({
+                            recipientId: recipient.id,
+                            message: FacebookMessage.text(message)
+                        }).asResponse();
+                        await axios.post(`${FB_GRAPH_URL}/${pageId}/messages`, textReq.toJSON(), {
                             params: { access_token: pageToken }
                         });
                     }
                 } else if (message) {
-                    messagePayload.message = { text: message };
-                    await axios.post(`${FB_GRAPH_URL}/${pageId}/messages`, messagePayload, {
+                    const textReq = new FacebookMessageRequest({
+                        recipientId: recipient.id,
+                        message: FacebookMessage.text(message)
+                    }).asResponse();
+                    await axios.post(`${FB_GRAPH_URL}/${pageId}/messages`, textReq.toJSON(), {
                         params: { access_token: pageToken }
                     });
                 }
@@ -5795,51 +5799,28 @@ app.post('/api/broadcast/:userId/:pageId/send-one', upload.single('media'), asyn
             attachmentId = uploadRes.data.attachment_id;
         }
 
-        // Determine messaging type based on Message Tag
-        // Valid tags: POST_PURCHASE_UPDATE, ACCOUNT_UPDATE, CONFIRMED_EVENT_UPDATE
-        const validTags = ['POST_PURCHASE_UPDATE', 'ACCOUNT_UPDATE', 'CONFIRMED_EVENT_UPDATE'];
-        const tag = validTags.includes(messageTag) ? messageTag : 'POST_PURCHASE_UPDATE';
-
-        const messagePayload = {
-            recipient: { id: recipientId },
-            messaging_type: 'MESSAGE_TAG',
-            tag: tag
-        };
+        // Send via RESPONSE messaging type (within 24h window).
+        // Message tags are deprecated by Facebook; RESPONSE works for users
+        // who messaged the page in the last 24 hours.
 
         // Send image first if exists
         if (attachmentId) {
-            messagePayload.message = {
-                attachment: {
-                    type: 'image',
-                    payload: { attachment_id: attachmentId }
-                }
-            };
-            await axios.post(`${FB_GRAPH_URL}/me/messages`, messagePayload, {
+            const imageReq = new FacebookMessageRequest({
+                recipientId, message: FacebookMessage.image({ attachmentId })
+            }).asResponse();
+            await axios.post(`${FB_GRAPH_URL}/me/messages`, imageReq.toJSON(), {
                 params: { access_token: pageToken }
             });
         }
 
         // Then send text if exists
         if (message) {
-            messagePayload.message = { text: message };
-
-            try {
-                // Try with MESSAGE_TAG first
-                await axios.post(`${FB_GRAPH_URL}/me/messages`, messagePayload, {
-                    params: { access_token: pageToken }
-                });
-            } catch (tagError) {
-                // If tag fails, try with RESPONSE (24-hour window)
-                console.log(`[Broadcast] Tag failed for ${recipientName}, trying RESPONSE...`);
-                const fallbackPayload = {
-                    recipient: { id: recipientId },
-                    messaging_type: 'RESPONSE',
-                    message: { text: message }
-                };
-                await axios.post(`${FB_GRAPH_URL}/me/messages`, fallbackPayload, {
-                    params: { access_token: pageToken }
-                });
-            }
+            const textReq = new FacebookMessageRequest({
+                recipientId, message: FacebookMessage.text(message)
+            }).asResponse();
+            await axios.post(`${FB_GRAPH_URL}/me/messages`, textReq.toJSON(), {
+                params: { access_token: pageToken }
+            });
         }
 
         res.json({ success: true, recipientId, recipientName });

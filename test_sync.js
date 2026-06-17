@@ -1,3 +1,11 @@
+// ⚠️ DISABLED — هذا السكربت ينفّذ User.sync({alter:true}) الذي يسبب
+// ALTER TABLE "users" المتكرر و deadlock على قاعدة البيانات. عُطّل لمنع تشغيله بالخطأ.
+// لتشغيله عمداً: ALLOW_DANGEROUS_SYNC=1 node test_sync.js
+if (process.env.ALLOW_DANGEROUS_SYNC !== '1') {
+    console.error('⛔ test_sync.js معطّل. لتشغيله عمداً: ALLOW_DANGEROUS_SYNC=1 node test_sync.js');
+    process.exit(1);
+}
+
 const { sequelize } = require('./config/database');
 
 async function test() {

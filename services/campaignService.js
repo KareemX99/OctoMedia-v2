@@ -2,6 +2,8 @@
 const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
+const FormData = require('form-data');
+const { FacebookMessage, FacebookMessageRequest } = require('../dtos/facebook');
 
 class CampaignService {
     constructor() {
@@ -10,18 +12,19 @@ class CampaignService {
         this.Campaign = null;
         this.appData = null;
         this.FB_GRAPH_URL = 'https://graph.facebook.com/v21.0';
-        this.messengerBot = null; // Puppeteer automation (fallback)
-    }
-
-    // Set the Puppeteer automation instance for fallback messaging
-    setAutomation(bot) {
-        this.messengerBot = bot;
-        console.log(`[Campaign] 🤖 Automation ${bot ? 'connected (fallback ready)' : 'disconnected'}`);
+        // Fallback tags tried in order when the chosen tag is rejected
+        this.FALLBACK_TAGS = ['ACCOUNT_UPDATE'];
     }
 
     // Helper to normalize campaign ID to string for consistent Map key matching
     normalizeId(id) {
         return String(id);
+    }
+
+    // Kept for backward compatibility with server.js Puppeteer endpoints.
+    // Campaigns no longer use Puppeteer — sending is done via Facebook Graph API.
+    setAutomation(bot) {
+        // no-op: campaigns send through the Graph API now
     }
 
     // Helper to emit real-time progress via Socket.IO
@@ -205,31 +208,44 @@ class CampaignService {
 
             console.log(`[Campaign] Running from index ${currentIndex}/${recipients.length}, pageToken exists: ${!!pageToken}`);
 
+            // Local accumulators to avoid O(n²) failedList rebuilds and reduce DB round-trips
+            const failedList = [...(campaign.failedList || [])];
+            const campaignDelay = campaign.delay; // delay doesn't change during a run
+            const messageTemplate = campaign.messageTemplate;
+            const messageTag = campaign.messageTag;
+            const mediaFiles = campaign.mediaFiles;
+            const imageUrls = campaign.imageUrls;
+            let lastStatusCheck = 0;
+
             while (currentIndex < recipients.length) {
-                // Refresh campaign state
-                await campaign.reload();
-
-                // Check if paused or cancelled
-                if (campaign.status === 'paused') {
-                    console.log(`[Campaign] ${campaignId} paused at index ${currentIndex}`);
-                    break;
-                }
-
-                if (campaign.status === 'cancelled') {
-                    console.log(`[Campaign] ${campaignId} cancelled`);
-                    break;
+                // Lightweight pause/cancel check (query only the status column, every 3 messages)
+                if (currentIndex - lastStatusCheck >= 3 || currentIndex === campaign.currentIndex) {
+                    lastStatusCheck = currentIndex;
+                    const fresh = await this.Campaign.findByPk(campaignId, { attributes: ['status'] });
+                    if (!fresh) break;
+                    if (fresh.status === 'paused') {
+                        console.log(`[Campaign] ${campaignId} paused at index ${currentIndex}`);
+                        // Persist progress before pausing
+                        await this._persistProgress(campaign, currentIndex, failedList);
+                        break;
+                    }
+                    if (fresh.status === 'cancelled') {
+                        console.log(`[Campaign] ${campaignId} cancelled`);
+                        await this._persistProgress(campaign, currentIndex, failedList);
+                        break;
+                    }
                 }
 
                 const recipient = recipients[currentIndex];
-                const uniqueMessage = this.parseSpintax(campaign.messageTemplate);
+                const uniqueMessage = this.parseSpintax(messageTemplate);
 
                 // Send message
                 try {
                     console.log(`[Campaign] Sending to ${recipient.name} (${currentIndex + 1}/${recipients.length})`);
 
-                    // ===== Facebook API with Message Tags =====
-                    await this.sendMessage(pageToken, recipient, uniqueMessage, campaign.messageTag, campaign.mediaFiles, campaign.imageUrls, campaign.pageId);
-                    console.log(`[Campaign] ✅ Sent to ${recipient.name} via Message Tags`);
+                    // ===== Facebook Graph API (Send API) with Message Tags =====
+                    await this.sendMessage(pageToken, recipient, uniqueMessage, messageTag, mediaFiles, imageUrls, campaign.pageId);
+                    console.log(`[Campaign] ✅ Sent to ${recipient.name} via Graph API`);
 
                     // Update live progress cache IMMEDIATELY for real-time UI updates
                     const progress = this.liveProgress.get(cacheKey);
@@ -237,31 +253,24 @@ class CampaignService {
                         progress.sentCount++;
                         progress.lastMessage = uniqueMessage;
                         console.log(`[Campaign LIVE] ${campaignId}: ${progress.sentCount}/${progress.totalRecipients} sent`);
-
-                        // Emit real-time update via Socket.IO
                         this.emitProgress(campaignId, progress, 'running');
                     }
 
-                    // Also update database (async, doesn't block UI)
-                    campaign.increment('sentCount');
-                    campaign.update({
-                        currentIndex: currentIndex + 1,
-                        lastMessage: uniqueMessage
-                    });
-
                 } catch (sendErr) {
                     const fbErrData = sendErr.response?.data?.error;
-                    const errMsg = sendErr.message;
+                    const errMsg = fbErrData?.message || sendErr.message;
 
                     // Classify the error
                     let errorType = 'other';
-                    if (errMsg.includes('نافذة المراسلة') || errMsg.includes('outside window') || fbErrData?.code === 10) {
+                    const subcode = fbErrData?.error_subcode;
+                    if (errMsg.includes('نافذة المراسلة') || errMsg.includes('outside window')
+                        || errMsg.includes('24') || fbErrData?.code === 10 || subcode === 2018278) {
                         errorType = 'outside_window';
                     } else if (errMsg.includes('غير متاح') || errMsg.includes('isn\'t available') || fbErrData?.code === 551) {
                         errorType = 'unavailable';
                     }
 
-                    const shortErr = errorType === 'outside_window' ? '⏰ خارج النافذة'
+                    const shortErr = errorType === 'outside_window' ? '⏰ خارج نافذة 24 ساعة'
                         : errorType === 'unavailable' ? '🚫 حساب غير متاح'
                             : `❓ ${errMsg}`;
 
@@ -271,30 +280,27 @@ class CampaignService {
                     const progress = this.liveProgress.get(cacheKey);
                     if (progress) {
                         progress.failedCount++;
-                        // Track error categories
                         if (!progress.errorBreakdown) progress.errorBreakdown = { outside_window: 0, unavailable: 0, other: 0 };
                         progress.errorBreakdown[errorType]++;
                         console.log(`[Campaign LIVE] ${campaignId}: ${progress.sentCount} sent, ${progress.failedCount} failed`);
-
-                        // Emit real-time update via Socket.IO
                         this.emitProgress(campaignId, progress, 'running');
                     }
 
-                    // Also update database
-                    const failedList = [...(campaign.failedList || []), { name: recipient.name, error: shortErr, type: errorType }];
-                    campaign.increment('failedCount');
-                    campaign.update({
-                        currentIndex: currentIndex + 1,
-                        failedList
-                    });
+                    // Accumulate failure locally (persisted periodically, not every message)
+                    failedList.push({ name: recipient.name, error: shortErr, type: errorType });
                 }
 
                 currentIndex++;
 
+                // Persist progress to DB every 5 messages (and counters stay accurate via cache)
+                if (currentIndex % 5 === 0) {
+                    await this._persistProgress(campaign, currentIndex, failedList);
+                }
+
                 // Delay between messages (AI mode uses random 5-30 seconds)
                 if (currentIndex < recipients.length) {
-                    let delayMs = campaign.delay;
-                    if (campaign.delay === 'ai' || campaign.delay === 0) {
+                    let delayMs = campaignDelay;
+                    if (campaignDelay === 'ai' || campaignDelay === 0) {
                         // AI Smart Mode: Random delay between 5-30 seconds
                         delayMs = Math.floor(Math.random() * (30000 - 5000 + 1)) + 5000;
                         console.log(`[Campaign] AI Mode: Next delay = ${Math.round(delayMs / 1000)}s`);
@@ -304,22 +310,27 @@ class CampaignService {
             }
 
             // Check if completed
-            await campaign.reload();
-            if (campaign.status === 'running' && currentIndex >= recipients.length) {
+            const freshFinal = await this.Campaign.findByPk(campaignId, { attributes: ['status'] });
+            if (freshFinal && freshFinal.status === 'running' && currentIndex >= recipients.length) {
+                const progress = this.liveProgress.get(cacheKey);
+                const eb = (progress && progress.errorBreakdown) || {};
+
                 await campaign.update({
                     status: 'completed',
-                    completedAt: new Date()
+                    completedAt: new Date(),
+                    currentIndex,
+                    sentCount: progress ? progress.sentCount : campaign.sentCount,
+                    failedCount: progress ? progress.failedCount : campaign.failedCount,
+                    failedList
                 });
 
                 // Update live progress status
-                const progress = this.liveProgress.get(cacheKey);
                 if (progress) {
                     progress.status = 'completed';
                     // Emit completion event via Socket.IO
                     this.emitProgress(campaignId, progress, 'completed');
 
                     // Print detailed summary
-                    const eb = progress.errorBreakdown || {};
                     console.log(`\n[Campaign] ✅ === CAMPAIGN ${campaignId} COMPLETED ===`);
                     console.log(`[Campaign] 📊 Total: ${progress.totalRecipients}`);
                     console.log(`[Campaign] ✅ Sent: ${progress.sentCount}`);
@@ -360,34 +371,131 @@ class CampaignService {
         }
     }
 
-    // Send single message via Puppeteer (browser automation) ONLY
-    async sendMessage(pageToken, recipient, message, messageTag, mediaFiles, imageUrls = [], pageId = null) {
-        // Check Puppeteer is ready
-        if (!this.messengerBot || !this.messengerBot.isLoggedIn) {
-            throw new Error('المتصفح غير متصل — سجّل دخول من الداشبورد أولاً');
+    // Persist current progress to the DB in a single awaited write.
+    // Pulls counters from the live cache so DB stays consistent with the UI.
+    async _persistProgress(campaign, currentIndex, failedList) {
+        try {
+            const cacheKey = String(campaign.id);
+            const progress = this.liveProgress.get(cacheKey);
+            const update = { currentIndex, failedList };
+            if (progress) {
+                update.sentCount = progress.sentCount;
+                update.failedCount = progress.failedCount;
+                if (progress.lastMessage) update.lastMessage = progress.lastMessage;
+            }
+            await campaign.update(update);
+        } catch (err) {
+            console.error(`[Campaign] _persistProgress error for ${campaign.id}:`, err.message);
         }
+    }
 
-        // Send local media files via Puppeteer
-        for (const mediaPath of mediaFiles) {
-            if (fs.existsSync(mediaPath)) {
-                console.log(`[Campaign] 🤖 Sending media to ${recipient.name}...`);
-                const result = await this.messengerBot.sendMessage(recipient.id, null, mediaPath, recipient.name, pageId);
-                if (result.success) {
-                    console.log(`[Campaign] 🤖 ✅ Media sent to ${recipient.name}`);
-                } else {
-                    throw new Error(`فشل إرسال الميديا: ${result.error || 'خطأ غير معروف'}`);
+    // Send a single FacebookMessage using RESPONSE messaging type (within 24h window).
+    // Returns on success; throws the FB error on failure (e.g. outside the 24h window).
+    async sendWithTagFallback(message, primaryTag, pageToken, recipientId) {
+        const request = new FacebookMessageRequest({ recipientId, message }).asResponse();
+        try {
+            await axios.post(`${this.FB_GRAPH_URL}/me/messages`, request.toJSON(), {
+                params: { access_token: pageToken }
+            });
+        } catch (err) {
+            const fbErr = err.response?.data?.error;
+            console.log(`[Campaign] RESPONSE rejected: ${fbErr?.message || err.message} (code: ${fbErr?.code}, subcode: ${fbErr?.error_subcode}, type: ${fbErr?.type}) | recipient: ${recipientId}`);
+            if (fbErr) {
+                console.log(`[Campaign]    ↳ user_title: ${fbErr.error_user_title || '-'} | user_msg: ${fbErr.error_user_msg || '-'} | fbtrace_id: ${fbErr.fbtrace_id || '-'}`);
+            }
+            throw err;
+        }
+    }
+
+    // Upload a local image file to Facebook and return its reusable attachment_id
+    async uploadImageAttachment(filePath, pageToken) {
+        const form = new FormData();
+        form.append('message', JSON.stringify({
+            attachment: { type: 'image', payload: { is_reusable: true } }
+        }));
+        form.append('filedata', fs.createReadStream(filePath));
+
+        const uploadRes = await axios.post(`${this.FB_GRAPH_URL}/me/message_attachments`, form, {
+            headers: form.getHeaders(),
+            params: { access_token: pageToken }
+        });
+        return uploadRes.data.attachment_id;
+    }
+
+    // Download a remote image URL to a temp file, returns the temp file path
+    async downloadImageToTemp(imageUrl) {
+        const tempFileName = `campaign_${Date.now()}_${Math.floor(Math.random() * 1e6)}.jpg`;
+        const uploadsDir = path.join(__dirname, '..', 'uploads');
+        if (!fs.existsSync(uploadsDir)) {
+            fs.mkdirSync(uploadsDir, { recursive: true });
+        }
+        const tempFilePath = path.join(uploadsDir, tempFileName);
+
+        const imageResponse = await axios({
+            method: 'get',
+            url: imageUrl,
+            responseType: 'stream',
+            timeout: 30000,
+            headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' }
+        });
+
+        const writer = fs.createWriteStream(tempFilePath);
+        imageResponse.data.pipe(writer);
+        await new Promise((resolve, reject) => {
+            writer.on('finish', resolve);
+            writer.on('error', reject);
+        });
+        return tempFilePath;
+    }
+
+    // Send a single message via Facebook Graph API (Send API) using the Page token.
+    // Sends text (chunked) first, then local media files, then remote image URLs.
+    async sendMessage(pageToken, recipient, message, messageTag, mediaFiles = [], imageUrls = [], pageId = null) {
+        const tag = messageTag || 'POST_PURCHASE_UPDATE';
+
+        // ===== STEP 1: Text (split into chunks under Facebook's 2000 char limit) =====
+        if (message) {
+            const MAX_LENGTH = 1900;
+            const chunks = [];
+            for (let i = 0; i < message.length; i += MAX_LENGTH) {
+                chunks.push(message.substring(i, i + MAX_LENGTH));
+            }
+
+            for (let i = 0; i < chunks.length; i++) {
+                await this.sendWithTagFallback(FacebookMessage.text(chunks[i]), tag, pageToken, recipient.id);
+                if (i < chunks.length - 1) {
+                    await this.sleep(300); // keep chunk order
                 }
             }
         }
 
-        // Send text message via Puppeteer
-        if (message) {
-            console.log(`[Campaign] 🤖 Sending text to ${recipient.name}...`);
-            const result = await this.messengerBot.sendMessage(recipient.id, message, null, recipient.name, pageId);
-            if (result.success) {
-                console.log(`[Campaign] 🤖 ✅ Text sent to ${recipient.name}`);
-            } else {
-                throw new Error(`فشل الإرسال: ${result.error || 'خطأ غير معروف'}`);
+        // ===== STEP 2: Local media files =====
+        for (const mediaPath of (mediaFiles || [])) {
+            if (!fs.existsSync(mediaPath)) continue;
+            await this.sleep(400);
+            const attachmentId = await this.uploadImageAttachment(mediaPath, pageToken);
+            await this.sendWithTagFallback(
+                FacebookMessage.image({ attachmentId }),
+                tag, pageToken, recipient.id
+            );
+        }
+
+        // ===== STEP 3: Remote image URLs (e-commerce product images) =====
+        for (const imageUrl of (imageUrls || [])) {
+            if (!imageUrl) continue;
+            let tempFilePath = null;
+            try {
+                await this.sleep(400);
+                tempFilePath = await this.downloadImageToTemp(imageUrl);
+                const attachmentId = await this.uploadImageAttachment(tempFilePath, pageToken);
+                await this.sendWithTagFallback(
+                    FacebookMessage.image({ attachmentId }),
+                    tag, pageToken, recipient.id
+                );
+            } finally {
+                if (tempFilePath) {
+                    try { fs.unlinkSync(tempFilePath); } catch (e) { /* ignore */ }
+                }
             }
         }
     }

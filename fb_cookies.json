@@ -1,5 +1,20 @@
 [
   {
+    "name": "fr",
+    "value": "0QKnER2SFTjWyyPin..BqMaiu..AAA.0.0.BqMpAX.AWfMTLvN9nFgB9uZ6SpNcDmUUsw",
+    "domain": ".facebook.com",
+    "path": "/",
+    "expires": 1789474510.086451,
+    "size": 71,
+    "httpOnly": true,
+    "secure": true,
+    "session": false,
+    "sameSite": "None",
+    "priority": "Medium",
+    "sourceScheme": "Secure",
+    "sameParty": false
+  },
+  {
     "name": "ps_l",
     "value": "1",
     "domain": ".facebook.com",
@@ -11,8 +26,8 @@
     "session": false,
     "sameSite": "Lax",
     "priority": "Medium",
-    "sameParty": false,
-    "sourceScheme": "Secure"
+    "sourceScheme": "Secure",
+    "sameParty": false
   },
   {
     "name": "ps_n",
@@ -26,8 +41,8 @@
     "session": false,
     "sameSite": "None",
     "priority": "Medium",
-    "sameParty": false,
-    "sourceScheme": "Secure"
+    "sourceScheme": "Secure",
+    "sameParty": false
   },
   {
     "name": "sb",
@@ -41,8 +56,8 @@
     "session": false,
     "sameSite": "None",
     "priority": "Medium",
-    "sameParty": false,
-    "sourceScheme": "Secure"
+    "sourceScheme": "Secure",
+    "sameParty": false
   },
   {
     "name": "datr",
@@ -56,7 +71,22 @@
     "session": false,
     "sameSite": "None",
     "priority": "Medium",
-    "sameParty": false,
-    "sourceScheme": "Secure"
+    "sourceScheme": "Secure",
+    "sameParty": false
+  },
+  {
+    "name": "wd",
+    "value": "1280x800",
+    "domain": ".facebook.com",
+    "path": "/",
+    "expires": 1782303311,
+    "size": 10,
+    "httpOnly": false,
+    "secure": true,
+    "session": false,
+    "sameSite": "Lax",
+    "priority": "Medium",
+    "sourceScheme": "Secure",
+    "sameParty": false
   }
 ]
