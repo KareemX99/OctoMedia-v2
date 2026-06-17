@@ -3056,7 +3056,7 @@ class SocialMediaHub {
                 { total: data.stats?.totalComments || 0 }
             );
 
-            // Fetch time-series for the engagement chart (reuses existing analytics endpoint)
+            // Fetch time-series + period-aware totals/trends from the analytics endpoint
             try {
                 const seriesRes = await fetch(`${this.API_URL}/api/analytics/${pageId}?period=${this.currentPeriod}`, {
                     headers: { 'Authorization': `Bearer ${token}` }
@@ -3065,6 +3065,15 @@ class SocialMediaHub {
                     const seriesData = await seriesRes.json();
                     this.renderEngagementChart(seriesData.engagement);
                     this.renderHealthScore(seriesData.healthScore);
+
+                    // Re-render cards from DailyStats (period-aware) with real trend %.
+                    // Conversations now come from DailyStats.messages like reactions/comments/shares.
+                    this.renderAnalyticsCards(
+                        seriesData.reactions || { total: data.stats?.totalReactions || 0 },
+                        seriesData.messages || { total: messagesTotal },
+                        seriesData.shares || { total: data.stats?.totalShares || 0 },
+                        seriesData.comments || { total: data.stats?.totalComments || 0 }
+                    );
                 }
             } catch (e) {
                 console.warn('[Analytics] Engagement series not available:', e.message);

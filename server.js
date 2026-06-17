@@ -1348,6 +1348,40 @@ app.get('/api/analytics/:pageId', authMiddleware, async (req, res) => {
             totalMessages += stat.messages || 0;
         });
 
+        // ===== Previous period totals (for trend %) =====
+        // Compare the selected period against the immediately preceding window of equal length.
+        const periodDays = period === 'day' ? 1 : period === 'week' ? 7 : 30;
+        let prevReactions = 0, prevComments = 0, prevShares = 0, prevMessages = 0;
+        try {
+            if (platform) {
+                const { Op } = require('sequelize');
+                const prevEnd = new Date(egyptNowDate);
+                prevEnd.setUTCDate(prevEnd.getUTCDate() - periodDays);      // start of current window
+                const prevStart = new Date(prevEnd);
+                prevStart.setUTCDate(prevStart.getUTCDate() - periodDays);  // start of previous window
+                const prevStats = await DailyStats.findAll({
+                    where: {
+                        pageId,
+                        date: { [Op.gte]: getEgyptDateStr(prevStart), [Op.lt]: getEgyptDateStr(prevEnd) }
+                    }
+                });
+                prevStats.forEach(stat => {
+                    prevReactions += stat.reactions || 0;
+                    prevComments += stat.comments || 0;
+                    prevShares += stat.shares || 0;
+                    prevMessages += stat.messages || 0;
+                });
+            }
+        } catch (prevErr) {
+            console.warn('[Analytics] DB Access Error (prev period):', prevErr.message);
+        }
+
+        // % change vs previous period. New activity from a zero baseline => +100%.
+        const calcTrend = (cur, prev) => {
+            if (prev === 0) return cur > 0 ? 100 : 0;
+            return Math.round(((cur - prev) / prev) * 100);
+        };
+
         let totalEngagement = totalReactions + totalComments + totalShares;
 
         // Cold Start Fallback: Use Graph API data when DB stats are empty
@@ -1395,21 +1429,25 @@ app.get('/api/analytics/:pageId', authMiddleware, async (req, res) => {
         const data = {
             engagement: {
                 total: totalEngagement,
-                percentage: 0,
+                percentage: calcTrend(totalEngagement, prevReactions + prevComments + prevShares),
                 labels: chartLabels,
                 datasets: [{ data: chartData }]
             },
             messages: {
-                total: conversationsCount,
-                percentage: 0
+                total: totalMessages,
+                percentage: calcTrend(totalMessages, prevMessages)
             },
             shares: {
                 total: totalShares,
-                percentage: 0
+                percentage: calcTrend(totalShares, prevShares)
             },
             comments: {
                 total: totalComments,
-                percentage: 0
+                percentage: calcTrend(totalComments, prevComments)
+            },
+            reactions: {
+                total: totalReactions,
+                percentage: calcTrend(totalReactions, prevReactions)
             },
             healthScore: Math.min(100, Math.round((totalEngagement / Math.max(posts.length, 1)) * 10)),
             pageStats: {
